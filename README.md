@@ -1,0 +1,144 @@
+# CoreMem
+
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **98.0% R@5 on LongMemEval (500 questions)** in the Executive Assistant retrieval stack — no LLM, no tuning, no cloud.
+
+> **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
+
+**Dual-backend architecture.** Drop-in backends (ChromaDB baseline, HybridDB enhanced) with the same API. Ranking pipeline: backend retrieval → deterministic heuristics → recency-aware rescoring → session-aware retrieval.
+
+```python
+from coremem import MemoryCore
+from coremem.backends.chroma import ChromaBackend
+
+core = MemoryCore(backend=ChromaBackend(path="./memory"))
+
+# Ingest conversation turns
+core.ingest("user", "I visited the Museum of Modern Art today")
+core.ingest("assistant", "That sounds wonderful! How was it?")
+core.ingest("user", "I went to an Ancient Civilizations exhibition at the Natural History Museum")
+
+# Search with deterministic heuristic reranking
+results = core.search("When did I visit art museums?")
+
+for r in results:
+    print(f"[{r.memory.ts}] [{r.memory.role}] {r.memory.content}")
+```
+
+## Why CoreMem?
+
+Every AI agent needs memory. But cloud-based vector search is expensive, slow, and doesn't work offline. Pure embedding similarity misses keyword matches and temporal context. LLM-based memory systems cost tokens per query.
+
+CoreMem solves all three:
+
+| Component | What it does |
+|-----------|-------------|
+| **Semantic search** | Embedding similarity via ChromaDB or HybridDB |
+| **Deterministic heuristics** | Keyword overlap, temporal recency, person-name boost, quoted-phrase matching |
+| **Session deduplication** | One result per conversation, with full context retrieval |
+
+## LongMemEval Results (500 questions, no LLM, no tuning)
+
+| Metric | Score |
+|--------|-------|
+| R@5 | **98.0%** |
+| R@10 | **98.4%** |
+| MRR | 0.944 |
+| P@5 | 0.592 |
+| F1@5 | 0.684 |
+| Selectivity | 11.5% haystack scanned |
+| Rank distribution | #1: 91.8%, #2-3: 5.0%, #4-5: 1.2%, #6-10: 0.4%, >10: 1.6% |
+
+Outperforms MemPalace raw (96.6%) and matches their hybrid v4 held-out (98.4%) — with zero tuning, zero dev-set peeking.
+
+## Installation
+
+```bash
+pip install coremem
+```
+
+With HybridDB backend for enhanced FTS5 + vector hybrid search:
+
+```bash
+pip install coremem[hybrid]
+```
+
+## Core Concepts
+
+### Backends
+
+```python
+# ChromaDB baseline — pure vector search
+from coremem.backends.chroma import ChromaBackend
+core = MemoryCore(backend=ChromaBackend(path="./data"))
+
+# HybridDB enhanced — FTS5 + vector hybrid search
+from coremem.backends.hybrid import HybridBackend
+core = MemoryCore(backend=HybridBackend(path="./data"))
+```
+
+### Ingestion
+
+```python
+# Simple ingestion
+core.ingest("user", "I built a Spitfire model kit", session_id="conv_001")
+
+# Batch ingestion
+from coremem import ingest_batch
+ingest_batch(core, [
+    ("user", "What's the weather today?"),
+    ("assistant", "Sunny with a high of 72°F"),
+], session_id="conv_001")
+```
+
+### Search
+
+```python
+# Basic search
+results = core.search("How many model kits?", limit=10)
+
+# Limit results
+results = core.search("model building projects", limit=5)
+```
+
+### Heuristics
+
+Deterministic, zero-LLM scoring boosts applied to every result:
+
+| Heuristic | What it catches |
+|-----------|----------------|
+| `keyword_overlap` | Exact word matches between query and content |
+| `temporal_boost` | Queries with "latest", "current", "recently" |
+| `recency_decay` | Unconditional exponential decay (30-day half-life) |
+| `person_name_boost` | Proper name mentions in content |
+| `quoted_phrase_boost` | Exact phrase matches in quotes |
+
+```python
+from coremem import SearchHeuristics
+
+# Apply all heuristics to a single result
+score = SearchHeuristics.apply_all(
+    query="latest project",
+    content="Just finished the Q3 project report",
+    score=0.75,
+    ts="2026-05-28T10:00:00Z",
+)
+```
+
+### Wake-Up Context
+
+Give the agent instant situational awareness:
+
+```python
+context = core.wake_up(user_id="alice")
+# Returns a compact string with L0 identity and L1 recent context.
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Author
+
+Eddy Vinck
+
+CoreMem is the retrieval engine behind the [Executive Assistant](https://github.com/open-assistants-lab) agent system. Pairs with [HybridDB](https://github.com/open-assistants-lab) for storage and ConnectKit for real-time sync.
