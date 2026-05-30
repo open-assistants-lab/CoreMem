@@ -39,10 +39,11 @@ class HybridBackend(StoreBackend):
             self._db.create_table(
                 "messages",
                 {
+                    "id": "TEXT PRIMARY KEY",
                     "ts": "TEXT NOT NULL",
                     "role": "TEXT NOT NULL",
                     "content": "LONGTEXT",
-                    "metadata": "JSON",
+                    "metadata": "TEXT",
                 },
             )
         except Exception:
@@ -84,7 +85,7 @@ class HybridBackend(StoreBackend):
             params.append(str(value))
         return parts, params
 
-    def _delete_with_journal(self, ids: list[int]) -> None:
+    def _delete_with_journal(self, ids: list[str]) -> None:
         """Delete rows, journal entries, ChromaDB vectors, and sync DuckDB."""
         with self._db._connect() as cur:
             placeholders = ",".join("?" for _ in ids)
@@ -114,19 +115,25 @@ class HybridBackend(StoreBackend):
         return ids[0] if ids else ""
 
     def ingest_batch(self, memories: list[Memory]) -> list[str]:
+        import uuid
+
         if not memories:
             return []
+        ids = []
         rows = []
         for m in memories:
+            mid = m.id or str(uuid.uuid4())[:12]
+            ids.append(mid)
             storage_meta = self._merge_metadata_for_storage(m)
             rows.append({
+                "id": mid,
                 "content": m.content,
                 "role": m.role,
                 "metadata": json.dumps(storage_meta),
                 "ts": m.ts.isoformat() if m.ts else datetime.now().isoformat(),
             })
-        assigned_ids = self._db.insert_batch("messages", rows)
-        return [str(i) for i in assigned_ids]
+        self._db.insert_batch("messages", rows)
+        return ids
 
     def search(self, query: SearchQuery) -> list[SearchResult]:
         import sys
