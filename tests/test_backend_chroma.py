@@ -21,21 +21,17 @@ def test_search_returns_results(chroma_tmp_path):
     assert any("model" in r.memory.content.lower() for r in results)
 
 
-def test_search_filters_by_wing(chroma_tmp_path):
+def test_search_filters_by_metadata(chroma_tmp_path):
     be = ChromaBackend(path=chroma_tmp_path)
-    be._collection.add(
-        ids=["m1"], documents=["I like chess"],
-        metadatas=[{"wing": "hobbies", "room": "games", "role": "user"}],
-    )
-    be._collection.add(
-        ids=["m2"], documents=["I enjoy painting"],
-        metadatas=[{"wing": "arts", "room": "painting", "role": "user"}],
-    )
+    be.ingest(Memory(id="m1", content="I like chess", role="user", metadata={"topic": "hobbies"}))
+    be.ingest(Memory(id="m2", content="I enjoy painting", role="user", metadata={"topic": "arts"}))
 
-    results = be.search(SearchQuery(text="hobby", limit=5, wing="hobbies"))
+    results = be.search(SearchQuery(text="hobby", limit=5, filters={"topic": "hobbies"}))
     assert len(results) > 0
-    assert all("chess" in r.memory.content.lower() or "hobbies" in str(r.memory.session_id or "")
-               for r in results)
+    assert all("chess" in r.memory.content.lower() for r in results)
+
+    results_all = be.search(SearchQuery(text="hobby", limit=5))
+    assert len(results_all) >= 2
 
 
 def test_get_recent(chroma_tmp_path):

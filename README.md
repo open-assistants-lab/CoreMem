@@ -62,6 +62,8 @@ With HybridDB backend for enhanced FTS5 + vector hybrid search:
 pip install coremem[hybrid]
 ```
 
+> **Note on model downloads.** ChromaDB downloads a bundled MiniLM embedding model (~80MB) on first `PersistentClient()` init. The cross-encoder downloads `cross-encoder/ms-marco-MiniLM-L-6-v2` (~500MB) on first `search_enhanced()` call. Both cache locally after download. Call `core.warmup()` at startup to pre-load models predictably.
+
 ## Core Concepts
 
 ### Backends
@@ -83,21 +85,23 @@ core = MemoryCore(backend=HybridBackend(path="./data"))
 core.ingest("user", "I built a Spitfire model kit", session_id="conv_001")
 
 # Batch ingestion
-from coremem import ingest_batch
-ingest_batch(core, [
-    ("user", "What's the weather today?"),
-    ("assistant", "Sunny with a high of 72°F"),
+core.ingest_many([
+    {"role": "user", "content": "What's the weather today?"},
+    {"role": "assistant", "content": "Sunny with a high of 72°F"},
 ], session_id="conv_001")
 ```
 
 ### Search
 
 ```python
-# Basic search
+# Basic search — fast path with deterministic heuristics
 results = core.search("How many model kits?", limit=10)
 
-# Limit results
-results = core.search("model building projects", limit=5)
+# Enhanced search — multi-query expansion + cross-encoder reranking
+results = core.search_enhanced("What did I build recently?", limit=10)
+
+# Cross-encoder loads on first use (~500MB download).
+# Disable with DISABLE_CROSS_ENCODER=1 for eval scripts.
 ```
 
 ### Heuristics
@@ -122,6 +126,28 @@ score = SearchHeuristics.apply_all(
     score=0.75,
     ts="2026-05-28T10:00:00Z",
 )
+```
+
+### Enhanced Search
+
+`search_enhanced()` adds multi-query expansion and cross-encoder reranking:
+
+```python
+results = core.search_enhanced("model kits", limit=10)
+```
+
+**Multi-query expansion.** Generates search variants for better recall. Regex expansion always active. LLM-based expansion is opt-in — pass an `llm_provider` to `MemoryCore`:
+
+```python
+core = MemoryCore(backend=..., llm_provider=my_chat_model)
+```
+
+Or set `MEMORY_EXPANSION_MODEL=ollama:llama3.2` in your environment when using MemoryCore from this project's ecosystem.
+
+**Cross-encoder reranking.** A `cross-encoder/ms-marco-MiniLM-L-6-v2` model reranks the top results for better relevance. Loads lazily on first `search_enhanced()` call (~500MB download). Pre-load at startup with `core.warmup()` to avoid the delay during first search. Disable with:
+
+```bash
+DISABLE_CROSS_ENCODER=1 python my_script.py
 ```
 
 ### Wake-Up Context
