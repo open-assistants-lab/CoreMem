@@ -4,22 +4,24 @@ Measures Recall@K without any LLM involvement. Two backends supported:
   --backend chroma  → ChromaBackend (baseline, target 95%+)
   --backend hybrid  → HybridBackend (enhanced, requires hybriddb)
 
+Resumability:
+  --output results.json  → saves results incrementally after each question
+  --resume results.json  → skips already-completed questions, continues
+
 Dataset format (LongMemEval):
   Each question has: question_id, question_type, question, answer_session_ids,
   haystack_session_ids, haystack_sessions.
-  haystack_session_ids[i] maps to haystack_sessions[i].
-
-Injection: sessions are injected in batch, tagged as session_{i:04d}.
-
-Recall check: answer_session_ids[aid] → find aid in haystack_session_ids → get
-index → our injected id session_{index:04d} → check if in top-K results.
 
 Usage:
-    uv run python -m coremem.benchmarks.longmemeval.eval \
+    uv run python -m benchmarks.longmemeval.eval \
         --data /tmp/lme_cache/.../longmemeval_s_cleaned.json \
-        --backend chroma \
-        --limit 20 \
-        --k 5
+        --backend hybrid --k 5 --search-mode both \
+        --output results/hybrid_500.json
+
+    # Resume after timeout:
+    uv run python -m benchmarks.longmemeval.eval \
+        --data ... --backend hybrid --k 5 --search-mode both \
+        --resume results/hybrid_500.json --output results/hybrid_500.json
 """
 
 from __future__ import annotations
@@ -54,11 +56,9 @@ def _load_questions(data_path: str, question_types: list[str] | None = None, lim
 def _setup_backend(backend: str, path: str):
     if backend == "chroma":
         from coremem.backends.chroma import ChromaBackend
-
         return ChromaBackend(path=path)
     elif backend == "hybrid":
         from coremem.backends.hybrid import HybridBackend
-
         return HybridBackend(path=path)
     else:
         raise ValueError(f"Unknown backend: {backend}. Use 'chroma' or 'hybrid'.")
@@ -130,6 +130,46 @@ def _score_results(
     return len(hits) > 0, rank
 
 
+def _capture_failure_detail(
+    q: dict,
+    answer_sids: list[str],
+    search_results: list[Any],
+    mode: str,
+) -> dict[str, Any]:
+    """Capture detailed diagnostic info for a failed question."""
+    top5 = []
+    for r in search_results[:5]:
+        top5.append({
+            "session_id": r.memory.session_id,
+            "score": r.score,
+            "content_preview": r.memory.content[:200],
+        })
+
+    expected_sessions = []
+    for sid in answer_sids[:3]:
+        expected_sessions.append({
+            "session_id": sid,
+            "content_len": None,  # filled later if we have the session
+        })
+
+    return {
+        "question": q.get("question", ""),
+        "question_type": q.get("question_type", ""),
+        "mode": mode,
+        "expected_session_count": len(answer_sids),
+        "expected_top_sids": answer_sids[:3],
+        "actual_top5": top5,
+    }
+
+
+def _save_progress(output_path: Path, data: dict) -> None:
+    """Atomically save results to output file."""
+    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    tmp.replace(output_path)
+
+
 def run_retrieval_benchmark(
     data_path: str | Path,
     backend: str = "chroma",
@@ -139,20 +179,45 @@ def run_retrieval_benchmark(
     verbose: bool = True,
     memory_base: str = "/tmp/coremem_bench",
     search_mode: str = "both",
+    output: str | None = None,
+    resume: str | None = None,
 ) -> dict[str, Any]:
     questions = _load_questions(str(data_path), question_types=question_types, limit=limit)
 
     if not questions:
         raise ValueError(f"No questions found in {data_path}")
 
-    results: list[dict] = []
-    type_scores: dict[str, dict[str, list[bool]]] = {}
+    output_path = Path(output) if output else None
 
-    if verbose:
+    # Load existing results if resuming
+    existing_results: list[dict] = []
+    completed_ids: set[str] = set()
+    type_scores: dict[str, dict[str, list[bool]]] = {}
+    failures: list[dict] = []
+
+    if resume:
+        resume_path = Path(resume)
+        if resume_path.exists():
+            existing_data = json.loads(resume_path.read_text())
+            existing_results = existing_data.get("results", [])
+            completed_ids = {r["question_id"] for r in existing_results}
+            type_scores = existing_data.get("_type_scores", {})
+            failures = existing_data.get("_failures", [])
+            if verbose:
+                print(f"Resuming: {len(completed_ids)} already completed, {len(questions) - len(completed_ids)} remaining")
+        else:
+            if verbose:
+                print(f"Resume file not found: {resume}. Starting fresh.")
+
+    results: list[dict] = list(existing_results)
+
+    if verbose and not resume:
         print(f"Backend: {backend}")
         print(f"Questions: {len(questions)}")
         print(f"Recall: R@{k}")
         print(f"Search modes: {search_mode}")
+        if output_path:
+            print(f"Output: {output_path}")
         print("-" * 60)
 
     start_time = time.time()
@@ -160,6 +225,12 @@ def run_retrieval_benchmark(
 
     for qi, q in enumerate(questions):
         q_id = q.get("question_id", f"q_{qi}")
+
+        if q_id in completed_ids:
+            if verbose:
+                print(f"  [{qi+1}/{len(questions)}] {q_id}: SKIP (already completed)", flush=True)
+            continue
+
         q_text = q.get("question", "")
         q_type = q.get("question_type", "unknown")
         haystack_ids = q.get("haystack_session_ids", [])
@@ -169,6 +240,7 @@ def run_retrieval_benchmark(
         if not answer_sids:
             if verbose:
                 print(f"  [{qi+1}/{len(questions)}] {q_id}: SKIP (no answer IDs mapped)", flush=True)
+            completed_ids.add(q_id)
             continue
 
         mem_path = f"{memory_base}_{q_id}_{os.getpid()}"
@@ -189,6 +261,11 @@ def run_retrieval_benchmark(
                     "search_time_s": round(search_time, 4),
                 }
 
+                if not is_hit:
+                    failures.append(_capture_failure_detail(
+                        q, answer_sids, search_results, mode,
+                    ))
+
                 if q_type not in type_scores:
                     type_scores[q_type] = {}
                 if mode not in type_scores[q_type]:
@@ -204,6 +281,18 @@ def run_retrieval_benchmark(
                 "modes": mode_stats,
             }
             results.append(result)
+            completed_ids.add(q_id)
+
+            # Save progress incrementally
+            if output_path:
+                _save_progress(output_path, {
+                    "options": {"backend": backend, "k": k, "search_mode": search_mode},
+                    "results": results,
+                    "_type_scores": type_scores,
+                    "_failures": failures,
+                    "_completed": len(completed_ids),
+                    "_total": len(questions),
+                })
 
             if verbose:
                 parts = [f"  [{qi+1}/{len(questions)}] {q_id} ({q_type})"]
@@ -213,6 +302,8 @@ def run_retrieval_benchmark(
                     rank_str = f"rank={ms['rank']}" if ms["rank"] > 0 else "rank=N/A"
                     parts.append(f"{mode}: {hit_str} ({rank_str} | {ms['search_time_s']:.4f}s)")
                 parts.append(f"inject={inject_time:.1f}s")
+                if output_path:
+                    parts.append(f"[saved {len(completed_ids)}/{len(questions)}]")
                 print(" | ".join(parts), flush=True)
 
         finally:
@@ -252,8 +343,10 @@ def run_retrieval_benchmark(
                     s = sum(scores)
                     print(f"  {qt} ({m}): {s}/{len(scores)} = {s/len(scores):.1%}")
         print(f"Time: {elapsed:.1f}s")
+        if failures:
+            print(f"Failures captured: {len(failures)}")
 
-    return {
+    result = {
         "backend": backend,
         "k": k,
         "per_mode": per_mode,
@@ -268,8 +361,23 @@ def run_retrieval_benchmark(
             for qt, modes_dict in type_scores.items()
         },
         "results": results,
+        "failures": failures,
         "elapsed_s": round(elapsed, 1),
     }
+
+    # Final save
+    if output_path:
+        _save_progress(output_path, {
+            "options": {"backend": backend, "k": k, "search_mode": search_mode},
+            **{k: v for k, v in result.items() if k != "failures"},
+            "failures": failures,
+            "_completed": len(completed_ids),
+            "_total": len(questions),
+        })
+        if verbose:
+            print(f"Final results saved to {output_path}")
+
+    return result
 
 
 def main():
@@ -283,6 +391,10 @@ def main():
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--search-mode", type=str, default="both",
                         choices=["search", "search_enhanced", "both"])
+    parser.add_argument("--output", type=str, default=None,
+                        help="Save incremental results to JSON file")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from existing results file")
     args = parser.parse_args()
 
     run_retrieval_benchmark(
@@ -293,6 +405,8 @@ def main():
         k=args.k,
         verbose=True,
         search_mode=args.search_mode,
+        output=args.output,
+        resume=args.resume,
     )
 
 
