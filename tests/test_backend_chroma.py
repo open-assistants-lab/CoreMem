@@ -26,7 +26,7 @@ def test_search_filters_by_metadata(chroma_tmp_path):
     be.ingest(Memory(id="m1", content="I like chess", role="user", metadata={"topic": "hobbies"}))
     be.ingest(Memory(id="m2", content="I enjoy painting", role="user", metadata={"topic": "arts"}))
 
-    results = be.search(SearchQuery(text="hobby", limit=5, filters={"topic": "hobbies"}))
+    results = be.search(SearchQuery(text="hobby", limit=5, metadata={"topic": "hobbies"}))
     assert len(results) > 0
     assert all("chess" in r.memory.content.lower() for r in results)
 
