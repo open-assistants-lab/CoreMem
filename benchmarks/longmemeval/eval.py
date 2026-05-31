@@ -94,9 +94,11 @@ def _inject_sessions_batch(core: MemoryCore, haystack_sessions: list) -> float:
                 content=msg.get("content", ""),
                 role=msg.get("role", "user"),
                 session_id=sid,
+                user_id=msg.get("user_id", ""),
+                agent_id=msg.get("agent_id", ""),
             ))
     if batch:
-        core.backend.ingest_batch(batch)
+        core.store(batch)
     return time.time() - t0
 
 
