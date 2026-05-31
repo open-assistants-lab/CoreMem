@@ -57,16 +57,20 @@ session_A and overfits.
 
 ## Solution
 
-**Maximal Marginal Relevance (MMR) after scoring, before top-K selection.**
+**Maximal Marginal Relevance (MMR) after scoring, before cross-encoder rerank.**
 
 Core idea: iterate through scored results, greedily add the highest-scoring
 result from a new session, then add the next-highest from another new session,
-until top-K is full. If fewer than K unique sessions exist, fill remaining slots
-with the next-highest scored results.
+until `effective_limit` unique sessions are collected. Remaining slots (if any)
+are filled from highest-scoring results not yet selected.
 
 ```
-Input:  scored_results (sorted by score descending)
-Output: top-K results (score-sorted within, session-diverse across)
+Input:  scored_results (sorted by score descending), effective_limit
+Output: top-{effective_limit} results (score-sorted within, session-diverse across)
+
+Where effective_limit = limit * depth (same multiplier as the pre-MMR path).
+This ensures the cross-encoder gets a diverse candidate pool of the same
+size as today — not a starved 10-candidate set.
 
 Algorithm:
 1. seen_sessions = set()
@@ -76,28 +80,27 @@ Algorithm:
       if sid not in seen_sessions:
           diverse.append(r)
           seen_sessions.add(sid)
-          if len(diverse) >= K:
-              return diverse
-4. Fill remaining slots from unseen results (if needed)
-5. Return diverse[:K]
+          if len(diverse) >= effective_limit:
+              break
+4. If len(diverse) < effective_limit:
+      refill from remaining scored_results (not yet selected regardless of session)
+5. Return diverse[:effective_limit]
 ```
 
 **Session-less messages** get a synthetic key (`_no_session_{content_hash}`) to
-prevent infinite dedup.
-
-**Ordering**: results are still score-sorted within the diverse set (highest
-scoring session first, then second-highest, etc.). Not shuffled.
+prevent all session-less messages from colliding as one session.
 
 ## Where it fits
 
 ```
-User query
-  └─ backend.search() → raw results (HybridBackend: already deduplicated)
-       └─ heuristics.apply_all() → boosted scores
-            └─ [search_enhanced only] multi-query expansion merges N sub-queries
-                 └─ MMR diversity → deduplicate merged candidates across sub-queries  ← NEW
-                      └─ cross-encoder rerank → reranked top-K
-                           └─ return
+# For each expanded query
+backend.search() per sub-query (HybridBackend: already session-deduped)
+merge results across sub-queries
+heuristics.apply_all()           ← after merge, as in current code (core.py:198-204)
+sort by score desc
+MMR diversity                    ← NEW: deduplicate across sub-queries
+cross-encoder rerank
+return top-K
 ```
 
 **`search()` is unchanged.** HybridBackend already session-deduplicates. MMR only
@@ -129,8 +132,11 @@ python -c "
 import json
 b = json.load(open('results/before.json'))
 a = json.load(open('results/after.json'))
-for qt in a.get('by_type', {}):
+common = set(a.get('by_type', {})) & set(b.get('by_type', {}))
+for qt in sorted(common):
     for m in a['by_type'][qt]:
+        if m not in b['by_type'][qt]:
+            continue
         br = b['by_type'][qt][m]['recall']
         ar = a['by_type'][qt][m]['recall']
         delta = ar - br
@@ -184,5 +190,6 @@ test_mmr_fewer_sessions_than_k           → 2 sessions, K=5, fills remaining
 1. Add `_mmr_diversify(results, k)` to `heuristics.py`
 2. Call `_mmr_diversify()` in `MemoryCore.search_enhanced()` after query expansion merge, before cross-encoder rerank
 3. `MemoryCore.search()` unchanged — HybridBackend already deduplicates
-4. Run LongMemEval diff (all backends, all types — should not regress)
-5. If no regression, ship
+4. Fix pre-existing merge dedup bug: `id(r)` → `r.memory.id` (separate fix, same PR)
+5. Run LongMemEval diff (all backends, all types — should not regress)
+6. If no regression, ship
