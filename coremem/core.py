@@ -232,7 +232,7 @@ class MemoryCore:
         """
         return self._wakeup.deep_search(query=query, limit=limit)
 
-    def export(
+    def fetch(
         self,
         role: str | None = None,
         session_id: str | None = None,
@@ -244,14 +244,17 @@ class MemoryCore:
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Memory]:
-        """Paginated export. Returns one page of memories matching filters."""
+        """Fetch memories matching exact-match column filters.
+
+        Returns one page of results. Use :meth:`fetch_all` for unlimited retrieval.
+        """
         return self._backend.list(
             role=role, session_id=session_id, user_id=user_id, agent_id=agent_id,
             ts_after=ts_after, ts_before=ts_before,
             metadata=metadata, limit=limit, offset=offset,
         )
 
-    def export_all(
+    def fetch_all(
         self,
         role: str | None = None,
         session_id: str | None = None,
@@ -261,7 +264,7 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[Memory]:
-        """Export all matching memories. Internally loops with pagination."""
+        """Fetch all matching memories. Convenience wrapper around :meth:`fetch` with automatic pagination."""
         all_memories: list[Memory] = []
         offset = 0
         page_size = 1000
@@ -277,8 +280,8 @@ class MemoryCore:
             offset += len(page)
         return all_memories
 
-    def import_batch(self, memories: list[Memory]) -> list[str]:
-        """Batch import. Returns storage IDs. Delegates to backend.ingest_batch()."""
+    def store(self, memories: list[Memory]) -> list[str]:
+        """Store memories in bulk. Returns storage IDs. Delegates to :meth:`StoreBackend.ingest_batch`."""
         return self._backend.ingest_batch(memories)
 
     def count(self) -> int:
