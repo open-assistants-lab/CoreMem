@@ -102,6 +102,34 @@ def _inject_sessions_batch(core: MemoryCore, haystack_sessions: list) -> float:
     return time.time() - t0
 
 
+def _find_rank(results: list[Any], answer_sids: list[str]) -> int:
+    """Return the 1-based rank of the first matching answer session, or -1."""
+    for idx, r in enumerate(results):
+        if r.memory.session_id in answer_sids:
+            return idx + 1
+    return -1
+
+
+def _run_search(core: MemoryCore, query: str, limit: int, mode: str = "search") -> tuple[list[Any], float]:
+    """Run search with given mode and return (results, time)."""
+    t0 = time.time()
+    if mode == "search_enhanced":
+        results = core.search_enhanced(query, limit=limit)
+    else:
+        results = core.search(query, limit=limit)
+    return results, time.time() - t0
+
+
+def _score_results(
+    results: list[Any], answer_sids: list[str],
+) -> tuple[bool, int]:
+    """Score: (is_hit, 1-based rank or -1 for miss)."""
+    found = {r.memory.session_id for r in results}
+    hits = found & set(answer_sids)
+    rank = _find_rank(results, answer_sids)
+    return len(hits) > 0, rank
+
+
 def run_retrieval_benchmark(
     data_path: str | Path,
     backend: str = "chroma",
@@ -110,6 +138,7 @@ def run_retrieval_benchmark(
     k: int = 5,
     verbose: bool = True,
     memory_base: str = "/tmp/coremem_bench",
+    search_mode: str = "both",
 ) -> dict[str, Any]:
     questions = _load_questions(str(data_path), question_types=question_types, limit=limit)
 
@@ -117,15 +146,17 @@ def run_retrieval_benchmark(
         raise ValueError(f"No questions found in {data_path}")
 
     results: list[dict] = []
-    type_scores: dict[str, list[bool]] = {}
+    type_scores: dict[str, dict[str, list[bool]]] = {}
 
     if verbose:
         print(f"Backend: {backend}")
         print(f"Questions: {len(questions)}")
         print(f"Recall: R@{k}")
+        print(f"Search modes: {search_mode}")
         print("-" * 60)
 
     start_time = time.time()
+    modes = ["search", "search_enhanced"] if search_mode == "both" else [search_mode]
 
     for qi, q in enumerate(questions):
         q_id = q.get("question_id", f"q_{qi}")
@@ -147,60 +178,81 @@ def run_retrieval_benchmark(
         try:
             inject_time = _inject_sessions_batch(core, haystack)
 
-            t0 = time.time()
-            search_results = core.search(q_text, limit=k)
-            found = {r.memory.session_id for r in search_results}
-            hits = found & set(answer_sids)
-            is_hit = len(hits) > 0
-            search_time = time.time() - t0
+            mode_stats: dict[str, Any] = {}
+            for mode in modes:
+                search_results, search_time = _run_search(core, q_text, k, mode)
+                is_hit, rank = _score_results(search_results, answer_sids)
 
-            results.append({
+                mode_stats[mode] = {
+                    "recall": is_hit,
+                    "rank": rank,
+                    "search_time_s": round(search_time, 4),
+                }
+
+                if q_type not in type_scores:
+                    type_scores[q_type] = {}
+                if mode not in type_scores[q_type]:
+                    type_scores[q_type][mode] = []
+                type_scores[q_type][mode].append(is_hit)
+
+            result = {
                 "question_id": q_id,
                 "question_type": q_type,
-                "recall": is_hit,
                 "sessions_injected": len(haystack),
+                "answer_session_ids": sorted(answer_sids),
                 "inject_time_s": round(inject_time, 3),
-                "search_time_s": round(search_time, 4),
-                "matches": sorted(hits),
-            })
-
-            if q_type not in type_scores:
-                type_scores[q_type] = []
-            type_scores[q_type].append(is_hit)
+                "modes": mode_stats,
+            }
+            results.append(result)
 
             if verbose:
-                status = f"HIT ({len(hits)} of {len(answer_sids)})" if is_hit else "MISS"
-                print(
-                    f"  [{qi+1}/{len(questions)}] {q_id} ({q_type}): {status} "
-                    f"| inject={inject_time:.1f}s search={search_time:.4f}s",
-                    flush=True,
-                )
+                parts = [f"  [{qi+1}/{len(questions)}] {q_id} ({q_type})"]
+                for mode in modes:
+                    ms = mode_stats[mode]
+                    hit_str = "HIT" if ms["recall"] else "MISS"
+                    rank_str = f"rank={ms['rank']}" if ms["rank"] > 0 else "rank=N/A"
+                    parts.append(f"{mode}: {hit_str} ({rank_str} | {ms['search_time_s']:.4f}s)")
+                parts.append(f"inject={inject_time:.1f}s")
+                print(" | ".join(parts), flush=True)
 
         finally:
             shutil.rmtree(mem_path, ignore_errors=True)
 
     elapsed = time.time() - start_time
-    total_hits = sum(r["recall"] for r in results)
-    total = len(results) or 1
-    overall = total_hits / total
+
+    # Compute per-mode summary
+    per_mode: dict[str, dict] = {}
+    for m in modes:
+        hits = sum(1 for r in results if r["modes"][m]["recall"])
+        total = len(results) or 1
+        per_mode[m] = {"hits": hits, "total": total, "recall": hits / total}
 
     if verbose:
         print("-" * 60)
-        print(f"Overall R@{k}: {overall:.1%} ({total_hits}/{total})")
-        for qt, scores in sorted(type_scores.items()):
-            s = sum(scores)
-            print(f"  {qt}: {s}/{len(scores)} = {s/len(scores):.1%}")
+        for m in modes:
+            s = per_mode[m]
+            print(f"Overall {m} R@{k}: {s['recall']:.1%} ({s['hits']}/{s['total']})")
+        for qt in sorted(type_scores):
+            for m in modes:
+                scores = type_scores[qt].get(m, [])
+                if scores:
+                    s = sum(scores)
+                    print(f"  {qt} ({m}): {s}/{len(scores)} = {s/len(scores):.1%}")
         print(f"Time: {elapsed:.1f}s")
 
     return {
         "backend": backend,
         "k": k,
-        "total": total,
-        "hits": total_hits,
-        "recall": overall,
+        "per_mode": per_mode,
         "by_type": {
-            qt: {"hits": sum(s), "total": len(s), "recall": sum(s) / len(s) if s else 0}
-            for qt, s in type_scores.items()
+            qt: {
+                m: {
+                    "hits": sum(s), "total": len(s),
+                    "recall": sum(s) / len(s) if s else 0,
+                }
+                for m, s in modes_dict.items()
+            }
+            for qt, modes_dict in type_scores.items()
         },
         "results": results,
         "elapsed_s": round(elapsed, 1),
@@ -216,6 +268,8 @@ def main():
     parser.add_argument("--question-types", type=str, nargs="*", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--search-mode", type=str, default="both",
+                        choices=["search", "search_enhanced", "both"])
     args = parser.parse_args()
 
     run_retrieval_benchmark(
@@ -225,6 +279,7 @@ def main():
         limit=args.limit,
         k=args.k,
         verbose=True,
+        search_mode=args.search_mode,
     )
 
 
