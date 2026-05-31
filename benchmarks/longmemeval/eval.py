@@ -225,13 +225,26 @@ def run_retrieval_benchmark(
     for m in modes:
         hits = sum(1 for r in results if r["modes"][m]["recall"])
         total = len(results) or 1
-        per_mode[m] = {"hits": hits, "total": total, "recall": hits / total}
+        ranks = [r["modes"][m]["rank"] for r in results]
+        mrr = sum(1.0 / r for r in ranks if r > 0) / total
+        rank1 = sum(1 for r in ranks if r == 1) / total
+        per_mode[m] = {
+            "hits": hits, "total": total,
+            "recall": hits / total,
+            "mrr": mrr,
+            "rank_at_1": rank1,
+            "mean_rank": sum(r for r in ranks if r > 0) / max(hits, 1),
+        }
 
     if verbose:
         print("-" * 60)
         for m in modes:
             s = per_mode[m]
-            print(f"Overall {m} R@{k}: {s['recall']:.1%} ({s['hits']}/{s['total']})")
+            print(
+                f"Overall {m} R@{k}: {s['recall']:.1%} ({s['hits']}/{s['total']}) "
+                f"| MRR={s['mrr']:.3f} | Rank@1={s['rank_at_1']:.1%} "
+                f"| MeanRank={s['mean_rank']:.1f}"
+            )
         for qt in sorted(type_scores):
             for m in modes:
                 scores = type_scores[qt].get(m, [])
