@@ -4,6 +4,45 @@ All heuristics are zero-LLM, purely pattern-based.
 """
 
 import re
+from typing import Any
+
+
+# ── MMR Diversity ──────────────────────────────────────────────────────────
+
+
+def _mmr_diversify(results: list[Any], k: int) -> list[Any]:
+    """Session-diverse MMR reranking applied before cross-encoder.
+
+    Iterates through score-sorted results, picking the highest-scoring
+    message from each new session until k unique sessions are collected.
+    Remaining slots (if fewer than k sessions exist) are filled from the
+    highest-scoring results not yet selected.
+
+    Messages without a session_id get a synthetic key based on content hash
+    to prevent all session-less messages from colliding.
+    """
+    if not results or k <= 0:
+        return results[:k]
+
+    seen_sessions: set[str] = set()
+    diverse: list[Any] = []
+    overflow: list[Any] = []
+
+    for r in results:
+        sid = r.memory.session_id
+        key = sid if sid else f"_no_session_{hash(r.memory.content)}"
+        if key not in seen_sessions:
+            diverse.append(r)
+            seen_sessions.add(key)
+            if len(diverse) >= k:
+                break
+        else:
+            overflow.append(r)
+
+    if len(diverse) < k:
+        diverse.extend(overflow[:k - len(diverse)])
+
+    return diverse[:k]
 
 
 class SearchHeuristics:

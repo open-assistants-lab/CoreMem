@@ -15,7 +15,7 @@ Usage:
 """
 
 from coremem.core import MemoryCore
-from coremem.heuristics import SearchHeuristics
+from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import expand_queries
 from coremem.rerank import rerank
 from coremem.types import Memory, SearchQuery, SearchResult
@@ -24,5 +24,5 @@ __version__ = "0.2.1"
 
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SearchQuery",
-    "SearchHeuristics", "expand_queries", "rerank",
+    "SearchHeuristics", "expand_queries", "rerank", "_mmr_diversify",
 ]

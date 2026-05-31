@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from coremem.backends.base import StoreBackend
-from coremem.heuristics import SearchHeuristics
+from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.ingest import ingest_batch, ingest_message
 from coremem.layers import WakeUpContext
 from coremem.query import LLMProvider, expand_queries
@@ -190,9 +190,11 @@ class MemoryCore:
             )
             results = self._backend.search(sq)
             for r in results:
-                rid = id(r)
-                if rid not in seen_ids:
+                rid = r.memory.id
+                if rid and rid not in seen_ids:
                     seen_ids.add(rid)
+                    all_results.append(r)
+                elif not rid:
                     all_results.append(r)
 
         for r in all_results:
@@ -204,6 +206,9 @@ class MemoryCore:
             )
 
         all_results.sort(key=lambda r: r.score, reverse=True)
+
+        # Session-diverse MMR before cross-encoder to prevent overfit
+        all_results = _mmr_diversify(all_results, effective_limit)
 
         all_results = rerank(query, all_results)
 
