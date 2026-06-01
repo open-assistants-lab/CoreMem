@@ -40,16 +40,15 @@ class _OpenAIAdapter:
         self._base_url = base_url.rstrip("/")
 
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         body = {
             "model": self._model,
             "messages": messages,
             "temperature": 0.0,
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(
                 f"{self._base_url}/v1/chat/completions",
                 json=body, headers=headers,
@@ -96,7 +95,7 @@ class _AnthropicAdapter:
         if system:
             body["system"] = system
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(
                 f"{self._base_url}/v1/messages",
                 json=body, headers=headers,
@@ -108,6 +107,38 @@ class _AnthropicAdapter:
             content=content,
             model=data.get("model", self._model),
             usage=data.get("usage", {}),
+        )
+
+
+class _OllamaCloudAdapter:
+    """Ollama Cloud native /api/chat adapter."""
+
+    def __init__(self, model: str, api_key: str, base_url: str):
+        self._model = model
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+
+    async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": self._model,
+            "messages": messages,
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self._base_url}/api/chat",
+                json=body, headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        content = data.get("message", {}).get("content", "")
+        return ChatResponse(
+            content=content,
+            model=data.get("model", self._model),
         )
 
 
@@ -137,7 +168,7 @@ class _GeminiAdapter:
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(query, json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -162,6 +193,7 @@ _PROVIDER_META: dict[str, dict[str, str]] = {
 _PROVIDER_CLASSES: dict[str, type] = {
     "anthropic": _AnthropicAdapter,
     "gemini": _GeminiAdapter,
+    "ollama-cloud": _OllamaCloudAdapter,
     # openai, ollama, and unknown prefixes use _OpenAIAdapter
 }
 

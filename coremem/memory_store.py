@@ -64,7 +64,7 @@ class MemoryStore:
         ids = []
         now = datetime.now(timezone.utc).isoformat()
         for item in items:
-            oid = item.get("id") or str(uuid.uuid4())[:12]
+            oid = str(uuid.uuid4())[:12]  # ignore LLM-generated ID, use client UUID
             self._db.insert("observations", {
                 "id": oid,
                 "content": item.get("content", ""),
@@ -114,7 +114,7 @@ class MemoryStore:
     def insert_reflections(self, items: list[dict[str, Any]]) -> list[str]:
         ids = []
         for item in items:
-            rid = item.get("id") or str(uuid.uuid4())[:12]
+            rid = str(uuid.uuid4())[:12]  # ignore LLM-generated ID, use client UUID
             linked = item.get("linked_observation_ids", [])
             emb = item.get("embedding", "")
             self._db.insert("reflections", {
