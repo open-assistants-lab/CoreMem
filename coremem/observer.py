@@ -17,12 +17,13 @@ Input: A conversation log between a user and an AI assistant. Each message may i
 Output: A JSON array of observations. Each observation must have:
 - "id": a unique ID like "obs_<uuid>"
 - "content": ONE fact per observation, in plain English. Be exact with values (names, numbers, dates).
-- "priority": one of "\U0001f534" (high — precise value like name, address, number), "\U0001f7e1" (medium — preference, opinion), "\U0001f7e2" (low — context, trivia)
+- "priority": one of "\U0001f534" (high — ONLY facts with exact numeric/factual values: salaries, addresses, phone numbers, dates, specific stats like "5 engineers" or "3:42 marathon"), "\U0001f7e1" (medium — preferences, opinions, likes, dislikes, feelings about things), "\U0001f7e2" (low — background context, trivia, general statements without specific values)
 - "referenced_date": the date mentioned in the observation content, OR the message timestamp if the fact is time-sensitive (like "moved to SF"), or "" if none
 
 CRITICAL RULES:
 - One fact per observation. Do not combine multiple facts.
 - Use exact values as stated. Never paraphrase numbers or proper nouns.
+- **PRIORITY RULE**: 🔴 is ONLY for verifiable facts with numbers, dates, or proper names. "Likes hiking" is 🟡, "Runs 40mi/week" is 🔴. "Has a dog" is 🟢, "Has golden retriever named Max" is 🔴. Most observations should be 🟡. Use 🔴 sparingly (1-2 per conversation).
 - If the user CORRECTS previously stated information, capture both as separate observations with different timestamps.
 - Use message timestamps to establish chronology — e.g., "User moved to SF on 2026-05-31, previously lived in Chicago as of 2026-05-20."
 - If user_id is present, attribute facts to the correct user in multi-user conversations.

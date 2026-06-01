@@ -94,8 +94,8 @@ def score_observer(observations: list[dict]) -> dict:
         priorities.append(p)
 
     total = len(priorities)
-    high = sum(1 for p in priorities if "high" in p or "1f534" in p or "red" in p)
-    low = sum(1 for p in priorities if "low" in p or "1f7e2" in p or "green" in p)
+    high = sum(1 for p in priorities if "🔴" in p)
+    low = sum(1 for p in priorities if "🟢" in p)
 
     result["priority_high_pct"] = high / total if total else 0
     result["priority_low_pct"] = low / total if total else 0
