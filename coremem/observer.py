@@ -287,7 +287,20 @@ class ObserverPipeline:
             else:
                 continue  # no quote, or quote doesn't appear in source — drop
 
-            # Gate 2: string similarity dedup vs prior observations
+            # Gate 2: NLI entailment check (optional, transformers required)
+            try:
+                from coremem.nli import check_entailment, is_nli_available as _nli_available
+                if _nli_available():
+                    quote = obs.get("source_quote", "")
+                    content_text = obs.get("content", "")
+                    passed, confidence = check_entailment(quote, content_text)
+                    obs["confidence"] = confidence
+                    if not passed:
+                        continue
+            except ImportError:
+                pass  # NLI not installed — skip gate
+
+            # Gate 3: string similarity dedup vs prior observations
             if any(_string_similarity(content, p.get("content", "")) > 0.85 for p in prior):
                 continue
 

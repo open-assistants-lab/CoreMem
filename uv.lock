@@ -427,6 +427,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "httpx" },
+    { name = "hybriddb" },
+    { name = "transformers" },
+]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
@@ -435,6 +440,9 @@ dev = [
 hybrid = [
     { name = "hybriddb" },
 ]
+nli = [
+    { name = "transformers" },
+]
 observer = [
     { name = "httpx" },
 ]
@@ -442,6 +450,7 @@ observer = [
 [package.metadata]
 requires-dist = [
     { name = "chromadb", specifier = ">=0.5.0,<2.0.0" },
+    { name = "coremem", extras = ["hybrid", "observer", "nli"], marker = "extra == 'all'" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
     { name = "httpx", marker = "extra == 'observer'", specifier = ">=0.25.0" },
     { name = "hybriddb", marker = "extra == 'hybrid'", specifier = ">=0.4.0" },
@@ -449,8 +458,9 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "sentence-transformers", specifier = ">=2.0.0,<6.0.0" },
+    { name = "transformers", marker = "extra == 'nli'", specifier = ">=4.40.0" },
 ]
-provides-extras = ["hybrid", "observer", "dev"]
+provides-extras = ["hybrid", "observer", "nli", "all", "dev"]
 
 [[package]]
 name = "cuda-bindings"
