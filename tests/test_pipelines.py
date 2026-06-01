@@ -49,10 +49,14 @@ def populated_core(tmp_core):
 # ── Mock helpers ───────────────────────────────────────────────────────────
 
 
+def _mock_sentences_response():
+    return ChatResponse(content="User message 0 about projects and career goals")
+
+
 def _mock_observer_response():
     return ChatResponse(content='''[
-        {"id": "obs_1", "content": "User is working on multiple projects", "priority": "\\u2622", "referenced_date": ""},
-        {"id": "obs_2", "content": "User mentions career growth and goals", "priority": "\\u2622", "referenced_date": ""}
+        {"id": "obs_1", "content": "User is working on projects", "priority": "\\u2622", "referenced_date": "", "source_quote": "User message 0 about projects and career goals"},
+        {"id": "obs_2", "content": "User mentions career goals", "priority": "\\u2622", "referenced_date": "", "source_quote": "User message 1 about projects and career goals"}
     ]''')
 
 
@@ -85,7 +89,7 @@ class TestObserverPipelineMock:
         )
 
         with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat.return_value = _mock_observer_response()
+            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
             result = await pipeline.after_turn()
             assert result is not None
             assert len(result) == 2
@@ -115,7 +119,7 @@ class TestObserverPipelineMock:
         assert pipeline._last_observed_id is None
 
         with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat.return_value = _mock_observer_response()
+            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
             await pipeline.after_turn()
 
         assert pipeline._last_observed_id is not None
@@ -134,7 +138,7 @@ class TestObserverPipelineMock:
         )
 
         with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat.return_value = _mock_observer_response()
+            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
             result = await pipeline.after_turn()
 
         assert result is not None

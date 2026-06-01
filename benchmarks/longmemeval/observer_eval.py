@@ -179,7 +179,11 @@ async def run_observer_eval(
                     "session_index": sess_idx,
                     "session_id": sid,
                     "observations": [
-                        {"priority": o.get("priority", "?"), "content": o.get("content", "")}
+                        {
+                            "priority": o.get("priority", "?"),
+                            "content": o.get("content", ""),
+                            "source_quote": o.get("source_quote", ""),
+                        }
                         for o in session_obs
                     ],
                     "message_count": len(sess_messages),

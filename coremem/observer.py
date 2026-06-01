@@ -10,39 +10,85 @@ from coremem.providers import ChatResponse, LLMProvider, create_provider
 
 logger = logging.getLogger("coremem.observer")
 
-OBSERVER_PROMPT = """You are an observer agent. Your job is to extract key facts from a conversation and record them as precise, concise observations.
+SENTENCE_EXTRACT_PROMPT = """You are a sentence extractor. Your ONLY job is to copy-paste sentences from the conversation that contain facts about the user.
 
-Input: A conversation log between a user and an AI assistant. Each message may include contextual fields (user_id, agent_id, timestamp, metadata). Use these to disambiguate who said what and when.
-
-Output: A JSON array of observations. Each observation must have:
-- "id": a unique ID like "obs_<uuid>"
-- "content": ONE fact per observation, in plain English. Be exact with values (names, numbers, dates).
-- "priority": one of "\U0001f534" (high — ONLY facts with exact numeric/factual values: salaries, addresses, phone numbers, dates, specific stats like "5 engineers" or "3:42 marathon"), "\U0001f7e1" (medium — preferences, opinions, likes, dislikes, feelings about things), "\U0001f7e2" (low — background context, trivia, general statements without specific values)
-- "referenced_date": the date mentioned in the observation content, OR the message timestamp if the fact is time-sensitive (like "moved to SF"), or "" if none
-
-CRITICAL RULES:
-- One fact per observation. Do not combine multiple facts.
-- **DO NOT HALLUCINATE.** Only extract facts explicitly stated in the conversation. Never invent preferences, plans, events, or details not present in the messages. If the conversation doesn't contain enough facts, return fewer observations — quality over quantity. An empty array is better than invented facts.
-- Use exact values as stated. Never paraphrase numbers or proper nouns.
-- **PRIORITY RULE**: 🔴 is ONLY for verifiable facts with numbers, dates, or proper names. "Likes hiking" is 🟡, "Runs 40mi/week" is 🔴. "Has a dog" is 🟢, "Has golden retriever named Max" is 🔴. Most observations should be 🟡. Use 🔴 sparingly (1-2 per conversation).
-- If the user CORRECTS previously stated information, capture both as separate observations with different timestamps.
-- Use message timestamps to establish chronology — e.g., "User moved to SF on 2026-05-31, previously lived in Chicago as of 2026-05-20."
-- If user_id is present, attribute facts to the correct user in multi-user conversations.
-- Skip generic chat, greetings, and meta-commentary.
-- Skip observations already observed (listed below as known).
+RULES:
+- Copy-paste EXACT sentences from the conversation above. Do NOT rephrase, summarize, or change a single character.
+- Include ONLY sentences that contain verifiable facts about the user (names, numbers, locations, preferences, events, projects).
+- Skip: greetings, meta-commentary, assistant advice, questions the assistant asks.
+- One sentence per line. No bullet points, no numbering.
+- Return ONLY the sentences, nothing else.
 
 {conversation}
 
+Sentences containing facts about the user:"""
+
+
+SENTENCE_EXTRACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "extract_sentences",
+        "description": "Extract exact sentences from the conversation that contain facts about the user",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sentences": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Copy-pasted sentences from the conversation. One sentence per array item."
+                }
+            },
+            "required": ["sentences"]
+        }
+    }
+}
+
+OBSERVATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "record_observations",
+        "description": "Record observations extracted from verified conversation sentences",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "observations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Unique ID like obs_01"},
+                            "content": {"type": "string", "description": "ONE fact per observation"},
+                            "priority": {"type": "string", "enum": ["🔴", "🟡", "🟢"]},
+                            "referenced_date": {"type": "string"},
+                            "source_quote": {"type": "string", "description": "EXACT sentence from the source text that proves this fact"},
+                        },
+                        "required": ["id", "content", "priority", "referenced_date", "source_quote"]
+                    }
+                }
+            },
+            "required": ["observations"]
+        }
+    }
+}
+
+
+OBSERVER_PROMPT = """You are an observer agent. Extract key facts from the verified sentences below and record them as precise observations.
+
 {previous_context}
 
-Return ONLY the JSON array, no markdown wrapping, no explanation."""
+{sentences}
+
+Return observations via the record_observations tool. One fact per observation. Be exact with values. Use 🔴 for facts with numbers/dates/names, 🟡 for preferences, 🟢 for context. source_quote must be an EXACT copy from the sentences above."""
 
 
 class Observer:
     """Extract facts from conversation messages as discrete observations.
 
-    A single-turn LLM call. The ObserverPipeline handles scheduling, cursor
-    tracking, token counting, and dedup.
+    Uses two-pass extraction to eliminate hallucination:
+      Pass 1: Copy-paste factual sentences from conversation.
+      Pass 2: Create structured observations from verified sentences.
+    The ObserverPipeline handles scheduling, cursor tracking, token
+    counting, and dedup.
     """
 
     def __init__(self, model: str = "ollama:llama3.2"):
@@ -59,15 +105,38 @@ class Observer:
             for o in prior[:20]
         )
         conv_text = "\n".join(
-            f"[{m.get('role', 'user')}] {m.get('content', '')}"
-            for m in conversation[-300:]  # keep prompt size bounded
+            m.get("content", "")
+            for m in conversation[-300:]
         )
+
+        # Pass 1: Extract sentences via tool call (structured output)
+        sentence_prompt = SENTENCE_EXTRACT_PROMPT.format(conversation=conv_text)
+        sent_response = await self._provider.chat_with_tools(
+            chat_messages("", sentence_prompt), [SENTENCE_EXTRACT_TOOL],
+        )
+        sentences_text = sent_response.content.strip()
+        if not sentences_text or sentences_text.startswith("{"):
+            parsed = parse_json_array(sentences_text)
+            if parsed and "sentences" in parsed[0]:
+                sentences_text = "\n".join(parsed[0]["sentences"])
+            else:
+                sentences_text = sentences_text
+
+        if not sentences_text or sentences_text == "{}":
+            return []
+
+        # Pass 2: Create observations via tool call (structured output)
         user_prompt = OBSERVER_PROMPT.format(
-            conversation=conv_text,
+            sentences=sentences_text,
             previous_context=f"Known observations (do not repeat):\n{prior_text or '(none)'}",
         )
-        response = await self._provider.chat(chat_messages("", user_prompt))
-        return parse_json_array(response.content)
+        response = await self._provider.chat_with_tools(
+            chat_messages("", user_prompt), [OBSERVATION_TOOL],
+        )
+        parsed = parse_json_array(response.content)
+        if parsed and "observations" in parsed[0]:
+            return parsed[0]["observations"]
+        return parsed
 
 
 class ObserverPipeline:
@@ -196,11 +265,25 @@ class ObserverPipeline:
         observations = await self._observer.run(filtered, prior)
 
         # Post-hoc dedup: skip near-duplicates (simple string similarity)
+        # Also drop observations without valid, verifiable source quotes
         new_obs: list[dict[str, Any]] = []
+        source_text = " ".join(
+            m.content for m in messages if m.role != "tool"
+        )
         for obs in observations:
             content = obs.get("content", "")
+            source_quote = obs.get("source_quote", "")
+
+            # Gate 1: source quote must exist in conversation AND support the claim
+            if source_quote and _quote_verified(source_quote, content, source_text):
+                pass  # quote is valid
+            else:
+                continue  # no quote, or quote doesn't appear in source — drop
+
+            # Gate 2: string similarity dedup vs prior observations
             if any(_string_similarity(content, p.get("content", "")) > 0.85 for p in prior):
                 continue
+
             # Tag with session/agent/user context from the pipeline
             obs["session_id"] = self._session_id
             obs["user_id"] = messages[0].user_id if hasattr(messages[0], "user_id") else ""
@@ -221,3 +304,36 @@ def _string_similarity(a: str, b: str) -> float:
     """Simple string similarity using difflib."""
     from difflib import SequenceMatcher
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _quote_verified(quote: str, claim: str, source_text: str = "", threshold: float = 0.3) -> bool:
+    """Check whether the source quote supports the observation.
+
+    1. Quote must exist in the source conversation text (substring match)
+    2. Claim words must overlap with the quote (internal consistency)
+
+    If source_text is empty, skips the external verification step.
+    """
+    if not quote or not claim:
+        return False
+
+    # External: quote must appear in the source conversation
+    if source_text:
+        quote_lower = quote.lower().strip().strip('"').strip("'")
+        source_lower = source_text.lower()
+        if len(quote_lower) >= 10 and quote_lower not in source_lower:
+            return False
+
+    # Internal: claim words must overlap with the quote
+    claim_lower = claim.lower().strip()
+    quote_lower = quote.lower().strip()
+
+    if len(quote_lower) >= 10 and claim_lower in quote_lower:
+        return True
+
+    words = [w for w in claim_lower.split() if len(w) > 3]
+    if not words:
+        return True
+
+    matches = sum(1 for w in words if w in quote_lower)
+    return matches / len(words) >= threshold

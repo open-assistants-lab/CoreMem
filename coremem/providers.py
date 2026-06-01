@@ -16,6 +16,9 @@ class LLMProvider(Protocol):
     """Escape hatch for custom providers that don't match known prefixes."""
 
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse: ...
+    async def chat_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+    ) -> ChatResponse: ...
 
 
 # ── Response ──────────────────────────────────────────────────────────────
@@ -34,20 +37,23 @@ class ChatResponse:
 class _OpenAIAdapter:
     """OpenAI-compatible chat completions adapter."""
 
-    def __init__(self, model: str, api_key: str, base_url: str):
+    def __init__(self, model: str, api_key: str, base_url: str, json_mode: bool = False):
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._json_mode = json_mode
 
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        body = {
+        body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": 0.0,
         }
+        if self._json_mode:
+            body["response_format"] = {"type": "json_object"}
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.post(
                 f"{self._base_url}/v1/chat/completions",
@@ -57,6 +63,40 @@ class _OpenAIAdapter:
             data = resp.json()
         choice = data["choices"][0]
         content = choice["message"]["content"]
+        return ChatResponse(
+            content=content,
+            model=data.get("model", self._model),
+            usage=data.get("usage", {}),
+        )
+
+    async def chat_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+    ) -> ChatResponse:
+        """OpenAI-compatible tool/function calling."""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
+            "temperature": 0.0,
+            "thinking": {"type": "disabled"},
+        }
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self._base_url}/v1/chat/completions",
+                json=body, headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        choice = data["choices"][0]
+        tool_calls = choice["message"].get("tool_calls", [])
+        if tool_calls:
+            content = tool_calls[0]["function"]["arguments"]
+        else:
+            content = choice["message"].get("content", "")
         return ChatResponse(
             content=content,
             model=data.get("model", self._model),
@@ -109,6 +149,11 @@ class _AnthropicAdapter:
             usage=data.get("usage", {}),
         )
 
+    async def chat_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+    ) -> ChatResponse:
+        return await self.chat(messages)  # fallback
+
 
 class _OllamaCloudAdapter:
     """Ollama Cloud native /api/chat adapter."""
@@ -140,6 +185,11 @@ class _OllamaCloudAdapter:
             content=content,
             model=data.get("model", self._model),
         )
+
+    async def chat_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+    ) -> ChatResponse:
+        return await self.chat(messages)  # fallback
 
 
 class _GeminiAdapter:
@@ -178,6 +228,11 @@ class _GeminiAdapter:
             model=self._model,
             usage=data.get("usageMetadata", {}),
         )
+
+    async def chat_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+    ) -> ChatResponse:
+        return await self.chat(messages)  # fallback
 
 
 # ── Known provider prefixes ───────────────────────────────────────────────
