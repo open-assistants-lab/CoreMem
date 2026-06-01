@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0] — 2026-06-02 — Observer rewrite
+
+### Breaking changes
+- `coremem.nli` module removed. `bart-large-mnli` no longer a dependency.
+- `pip install coremem[nli]` is a no-op.
+- `Observer.run()` signature changed: `messages: list[Memory]` (was `conversation: list[dict]`); new `observation_date: str | None` arg.
+- `OBSERVATION_TOOL` schema: `priority` field removed. Observations no longer have a `priority` key.
+- `coremem[all]` no longer includes `nli`.
+
+### Added
+- `coremem.grounding.align_quote()` — 3-tier alignment gate (EXACT / FUZZY / drop). Port of `langextract/resolver.py:316-400`.
+- `AlignmentTier` and `AlignmentResult` types exported from `coremem.grounding`.
+- `Observer` and `ObserverPipeline` accept `enable_gleaning: bool = False` flag (raises `NotImplementedError` when True; reserved for future CogCanvas-style gleaning pass).
+- Schema migration for `observations.alignment_tier` and `observations.alignment_confidence` columns (idempotent, runs on `MemoryStore.__init__`).
+
+### Changed
+- `Observer` is now single-pass: one `chat_with_tools` call per `run()` (was two-pass with NLI verification).
+- Temperature default changed: 0.0 → 0.1 in `_OpenAIAdapter.chat_with_tools` (CogCanvas pattern).
+- Prompt format changed: native messages array with `[ts] content` prefix (was JSON-wrapped content).
+- System prompt rewritten: CogCanvas pattern with 2 few-shot examples demonstrating verbatim-quote contract.
+- FUZZY tier uses character-level `SequenceMatcher.ratio()` on whitespace+case-normalized strings (chose char-level over token-level because LLM source_quote drift is typically single-character/punctuation).
+
+### Bug fixes
+- **Bug #1:** `Observer.run` Pass 1 was reading `tool_calls` payload from `response.content` (always empty for tool calls). Now correctly reads from `tool_calls[0].function.arguments`.
+- **Bug #2:** Prompt input had `[role | ts | meta]` prefix but verification source did not. Now uses identical canonical text (`[ts] content`) for both.
+- **Bug #3:** `_quote_verified` internal check was inverted (checked if claim was substring of quote). Replaced by the 3-tier alignment gate.
+- **Bug #4:** Two-pass design dropped (Pass 1 was dead). Single LLM call with CogCanvas-style prompt + few-shot examples.
+- **Reflector filter:** Silently-broken priority filter (never matched emoji values) replaced with `importance >= 0.5` check.
+
+### Performance
+- Two-pass design dropped: per-observation time target down from ~500s to ~150s.
+- `bart-large-mnli` (1.6GB) no longer required for installation.
+
+### Verification
+- LongMemEval re-evaluation pending: target <10% hallucination on DeepSeek V4 Flash (down from 34-58% in 0.3.0).
+
 ## [0.3.0] — 2026-06-01
 
 ### Added
