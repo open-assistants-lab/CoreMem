@@ -193,9 +193,9 @@ await pipeline.after_turn()
 
 ```python
 class ObserverPipeline:
-    _last_observed_message_id: str | None     # watermark cursor
-    _turns_since_last_run: int                # min_turns throttle
-    _running: bool                            # prevents concurrent runs
+    _last_observed_id: str | None              # watermark — message ID of last observation
+    _turns_since_last_run: int                 # min_turns throttle
+    _running: bool                             # prevents concurrent runs
 ```
 
 ### Algorithm
@@ -203,16 +203,32 @@ class ObserverPipeline:
 ```
 after_turn():
   1. Increment _turns_since_last_run
-   2. Fetch recent messages: core.fetch(ts_after=_last_observed_ts_for_query, limit=max_messages)
-   3. Filter: skip role="tool" messages (tool outputs never contain user facts)
-   4. Count tokens in *new* messages only (since watermark)
-   5. If tokens < token_threshold OR turns < min_turns: return
-   6. Fetch prior observations: store.get_recent_observations(days=30, limit=50)
-   7. Call Observer.run(conversation, prior_observations)
-   8. Post-hoc dedup: skip new observations with >85% string similarity to existing
-   9. Insert remaining: store.insert_observations(...)
-   10. Update _last_observed_message_id from newest message processed
+  2. Fetch recent messages: core.fetch(limit=max_messages)
+     Messages are in natural order (most recent first via ts DESC).
+  3. Filter: skip role="tool" messages (tool outputs never contain user facts)
+  4. Find cutoff: locate _last_observed_id in the fetched set.
+     Messages newer than cutoff are "new".
+  5. Count tokens in *new* messages only (since watermark)
+  6. If tokens < token_threshold OR turns < min_turns: return (skip)
+  7. Fetch prior observations: store.get_recent_observations(days=30, limit=50)
+  8. Call Observer.run(conversation, prior_observations)
+  9. Post-hoc dedup: skip new observations with >85% string similarity to existing
+  10. Insert remaining: store.insert_observations(...)
+  11. Update _last_observed_id from newest message processed
 ```
+
+### Trigger
+
+Observer fires after each agent turn (`pipeline.after_turn()`), but only proceeds
+to the LLM call when **both** conditions are met:
+
+| Condition | Default | Rationale |
+|-----------|---------|-----------|
+| `token_threshold` | 8,000 | Enough new content to be worth extracting |
+| `min_turns` | 3 | Avoid running on trivial exchanges (hi/bye) |
+
+Until both are satisfied, `after_turn()` is a cheap no-op — it increments the turn
+counter, fetches messages to count tokens, and returns. No LLM calls, no writes.
 
 ### Observer LLM Call
 
