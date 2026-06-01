@@ -126,6 +126,18 @@ CREATE TABLE reflections (
 );
 ```
 
+### Scoping
+
+Observations and reflections are implicitly scoped by the session they were
+produced from. `ObserverPipeline` passes `session_id` to `MemoryCore.fetch()`
+(line 192 of the algorithm), which returns only that session's messages. The
+resulting observations belong to that session by construction — no explicit
+`session_id` column needed on the observations/reflections tables.
+
+If a future `MemoryStore.list_observations(session_id=...)` filter is needed,
+add a `session_id TEXT` column to both tables. Not required for v1 — each
+MemoryStore instance is isolated per session directory.
+
 ### API
 
 ```python
@@ -443,6 +455,25 @@ reflector = ReflectorPipeline(
 - No multi-agent observation (one Observer per session)
 - No cross-session reflection (Reflector operates within one session's observations)
 - No configurable MMR lambda for diversity (Observer/Reflector prompts are single-turn JSON extraction)
+
+### Why summarization stays in EA
+
+Summarization is a different category of operation — it is **destructive** (replaces
+messages with a summary system prompt), operates **inside the request loop** (before
+every LLM call), and manages the **agent's context window** — all agent runtime
+concerns. Observer and Reflector are **additive** background enrichment that write
+to separate tables.
+
+| | Observer | Reflector | Summarization |
+|---|---|---|---|
+| **Operation** | Creates observations | Creates reflections | Replaces messages |
+| **Trigger** | 8K new tokens since cursor | Every 24h | >50K total tokens before every LLM call |
+| **Frequency** | ~every 3 turns | ~once daily | Potentially any turn |
+| **Cursor** | `last_observed_message_id` | `last_run_observation_id` | Token budget per request |
+| **Domain** | Memory enrichment | Memory enrichment | Agent runtime context window |
+
+CoreMem is a storage/retrieval library. It creates and queries data. It should not
+decide what to delete — that's EA's responsibility as the agent runtime.
 
 ## Dependencies
 
