@@ -12,18 +12,20 @@ logger = logging.getLogger("coremem.observer")
 
 OBSERVER_PROMPT = """You are an observer agent. Your job is to extract key facts from a conversation and record them as precise, concise observations.
 
-Input: A conversation log between a user and an AI assistant.
+Input: A conversation log between a user and an AI assistant. Each message may include contextual fields (user_id, agent_id, timestamp, metadata). Use these to disambiguate who said what and when.
 
 Output: A JSON array of observations. Each observation must have:
 - "id": a unique ID like "obs_<uuid>"
 - "content": ONE fact per observation, in plain English. Be exact with values (names, numbers, dates).
 - "priority": one of "\U0001f534" (high — precise value like name, address, number), "\U0001f7e1" (medium — preference, opinion), "\U0001f7e2" (low — context, trivia)
-- "referenced_date": the date mentioned in the observation content, or "" if none
+- "referenced_date": the date mentioned in the observation content, OR the message timestamp if the fact is time-sensitive (like "moved to SF"), or "" if none
 
 CRITICAL RULES:
 - One fact per observation. Do not combine multiple facts.
 - Use exact values as stated. Never paraphrase numbers or proper nouns.
 - If the user CORRECTS previously stated information, capture both as separate observations with different timestamps.
+- Use message timestamps to establish chronology — e.g., "User moved to SF on 2026-05-31, previously lived in Chicago as of 2026-05-20."
+- If user_id is present, attribute facts to the correct user in multi-user conversations.
 - Skip generic chat, greetings, and meta-commentary.
 - Skip observations already observed (listed below as known).
 
@@ -135,7 +137,27 @@ class ObserverPipeline:
         for m in messages:
             if m.role == "tool":
                 continue
-            msg_dict: dict[str, Any] = {"role": m.role, "content": m.content}
+            meta_parts: list[str] = []
+            if getattr(m, "user_id", "") and getattr(m, "user_id", "") != self._session_id:
+                meta_parts.append(m.user_id)
+            if getattr(m, "agent_id", ""):
+                meta_parts.append(m.agent_id)
+            if getattr(m, "ts", None):
+                ts_str = m.ts.isoformat() if hasattr(m.ts, "isoformat") else str(m.ts)
+                meta_parts.append(ts_str[:19])  # YYYY-MM-DDTHH:MM:SS
+            if getattr(m, "metadata", None) and m.metadata:
+                if isinstance(m.metadata, dict):
+                    non_empty = {k: v for k, v in m.metadata.items() if v}
+                    if non_empty:
+                        meta_parts.append(str(non_empty))
+                elif m.metadata:
+                    meta_parts.append(str(m.metadata))
+
+            meta_str = f" | {' | '.join(meta_parts)}" if meta_parts else ""
+            msg_dict: dict[str, Any] = {
+                "role": m.role,
+                "content": f"[{m.role}{meta_str}] {m.content}",
+            }
             filtered.append(msg_dict)
             if not seen_watermark:
                 if m.id == self._last_observed_id:
@@ -165,6 +187,10 @@ class ObserverPipeline:
             content = obs.get("content", "")
             if any(_string_similarity(content, p.get("content", "")) > 0.85 for p in prior):
                 continue
+            # Tag with session/agent/user context from the pipeline
+            obs["session_id"] = self._session_id
+            obs["user_id"] = messages[0].user_id if hasattr(messages[0], "user_id") else ""
+            obs["agent_id"] = messages[0].agent_id if hasattr(messages[0], "agent_id") else ""
             new_obs.append(obs)
 
         if new_obs:

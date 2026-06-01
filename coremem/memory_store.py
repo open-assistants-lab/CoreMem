@@ -16,6 +16,9 @@ _OBSERVATIONS_SCHEMA = {
     "priority": "TEXT",
     "observation_ts": "TEXT",
     "referenced_date": "TEXT",
+    "user_id": "TEXT",
+    "agent_id": "TEXT",
+    "session_id": "TEXT",
 }
 
 _REFLECTIONS_SCHEMA = {
@@ -71,6 +74,9 @@ class MemoryStore:
                 "priority": item.get("priority", "medium"),
                 "observation_ts": item.get("observation_ts", now),
                 "referenced_date": item.get("referenced_date", ""),
+                "user_id": item.get("user_id", ""),
+                "agent_id": item.get("agent_id", ""),
+                "session_id": item.get("session_id", ""),
             })
             ids.append(oid)
         return ids
@@ -89,15 +95,22 @@ class MemoryStore:
     def get_observations_since(
         self, last_id: str | None = None, limit: int = 500,
     ) -> list[dict[str, Any]]:
-        """Cursor-based fetch — all observations after last_id."""
+        """Cursor-based fetch — all observations after last_id.
+
+        Uses observation_ts for ordering (not id) since IDs are UUIDs.
+        """
         if not last_id:
             return self._db.query("observations", order_by="observation_ts DESC", limit=limit)
-        # Get observations with id > last_id using SQL
+
+        # Get the timestamp of the last_id row, then fetch newer ones
         rows = self._db.raw_query(
-            f"SELECT * FROM observations WHERE id > ? ORDER BY observation_ts DESC LIMIT {limit}",
-            (last_id,),
+            "SELECT observation_ts FROM observations WHERE id = ?", (last_id,),
         )
-        return [dict(r) for r in rows]
+        if not rows:
+            return []
+        last_ts = rows[0]["observation_ts"]
+        return self._db.query("observations", where="observation_ts > ?",
+                              params=(last_ts,), order_by="observation_ts DESC", limit=limit)
 
     def get_recent_observations(self, days: int = 30, limit: int = 50) -> list[dict[str, Any]]:
         from datetime import timedelta

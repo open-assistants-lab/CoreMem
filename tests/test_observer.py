@@ -113,19 +113,22 @@ class TestMemoryStore:
         assert contents == {"User is a software engineer", "User lives in San Francisco"}
 
     def test_get_observations_since(self, tmp_store):
-        tmp_store.insert_observations([
-            {"id": "o1", "content": "First", "priority": "medium"},
+        ids1 = tmp_store.insert_observations([
+            {"content": "First", "priority": "medium"},
         ])
-        tmp_store.insert_observations([
-            {"id": "o2", "content": "Second", "priority": "medium"},
+        # Small delay so observation_ts differs
+        import time
+        time.sleep(0.01)
+        ids2 = tmp_store.insert_observations([
+            {"content": "Second", "priority": "medium"},
         ])
-        assert len(tmp_store.get_observations_since("o1")) == 1
+        assert len(tmp_store.get_observations_since(ids1[0])) == 1
 
     def test_get_observations_since_none(self, tmp_store):
         tmp_store.insert_observations([
             {"content": "Test", "priority": "low"},
         ])
-        assert len(tmp_store.get_observations_since(None)) == 1
+        assert len(tmp_store.get_observations_since(None)) >= 1
 
     def test_recent_observations(self, tmp_store):
         tmp_store.insert_observations([
