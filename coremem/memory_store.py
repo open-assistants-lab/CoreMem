@@ -1,4 +1,4 @@
-"""MemoryStore — observations and reflections backed by HybridDB."""
+"""MemoryStore — observations, metadata, and reflections backed by HybridDB."""
 
 from __future__ import annotations
 
@@ -13,15 +13,22 @@ from hybriddb import HybridDB
 _OBSERVATIONS_SCHEMA = {
     "id": "TEXT PRIMARY KEY",
     "content": "LONGTEXT",
-    "priority": "TEXT",
-    "observation_ts": "TEXT",
-    "referenced_date": "TEXT",
     "source_quote": "TEXT",
-    "importance": "REAL",
-    "entities": "TEXT",
+    "referenced_date": "TEXT",
+    "observation_ts": "TEXT",
     "user_id": "TEXT",
     "agent_id": "TEXT",
     "session_id": "TEXT",
+}
+
+_OBSERVATION_METADATA_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "observation_id": "TEXT",
+    "importance": "REAL",
+    "entities": "TEXT",
+    "priority": "TEXT",
+    "confidence": "REAL",
+    "enrichment_ts": "TEXT",
 }
 
 _REFLECTIONS_SCHEMA = {
@@ -35,20 +42,20 @@ _REFLECTIONS_SCHEMA = {
     "session_id": "TEXT",
 }
 
-_HIGH_PRIORITY = {"high", "critical", "important", "urgent"}
-_MEDIUM_PRIORITY = {"medium"}
 
-
-def _priority_tier(priority: str) -> int:
-    return 0 if priority.lower() in _HIGH_PRIORITY else 1 if priority.lower() in _MEDIUM_PRIORITY else 2
+def _join_meta(observations: list[dict]) -> list[dict]:
+    """Flatten observation + metadata into a single dict for backward compat."""
+    return observations
 
 
 class MemoryStore:
     """Storage for observations and reflections.
 
-    Uses a single HybridDB instance with two tables. Observations are
-    extracted facts from conversation messages. Reflections are synthesized
-    patterns discovered from observations.
+    Observations are split into two tables:
+      - ``observations`` — immutable facts (content, source_quote, scope).
+      - ``observation_metadata`` — mutable enrichment (importance, entities,
+        priority, confidence). Enrichment rows can be added over time by
+        the Observer, Reflector, or human verification.
 
     Args:
         path: Directory for the HybridDB data.
@@ -63,31 +70,63 @@ class MemoryStore:
         existing = set(self._db.list_tables())
         if "observations" not in existing:
             self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
+        if "observation_metadata" not in existing:
+            self._db.create_table("observation_metadata", _OBSERVATION_METADATA_SCHEMA)
         if "reflections" not in existing:
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
 
-    # ── Observations ──────────────────────────────────────────────────
+    # ── Observations (fact layer — immutable) ───────────────────────────
 
     def insert_observations(self, items: list[dict[str, Any]]) -> list[str]:
+        """Insert observations + metadata. Returns observation IDs."""
         ids = []
         now = datetime.now(timezone.utc).isoformat()
         for item in items:
-            oid = str(uuid.uuid4())[:12]  # ignore LLM-generated ID, use client UUID
+            oid = str(uuid.uuid4())[:12]
+
+            # Fact row — immutable
             self._db.insert("observations", {
                 "id": oid,
                 "content": item.get("content", ""),
-                "priority": item.get("priority", "medium"),
-                "observation_ts": item.get("observation_ts", now),
-                "referenced_date": item.get("referenced_date", ""),
                 "source_quote": item.get("source_quote", ""),
-                "importance": item.get("importance", 0.5),
-                "entities": json.dumps(item.get("entities", [])),
+                "referenced_date": item.get("referenced_date", ""),
+                "observation_ts": item.get("observation_ts", now),
                 "user_id": item.get("user_id", ""),
                 "agent_id": item.get("agent_id", ""),
                 "session_id": item.get("session_id", ""),
             })
+
+            # Metadata row — initial enrichment from Observer
+            mid = str(uuid.uuid4())[:12]
+            self._db.insert("observation_metadata", {
+                "id": mid,
+                "observation_id": oid,
+                "importance": item.get("importance", 0.5),
+                "entities": json.dumps(item.get("entities", [])),
+                "priority": item.get("priority", "medium"),
+                "confidence": 1.0,
+                "enrichment_ts": now,
+            })
+
             ids.append(oid)
         return ids
+
+    def _query_joined(
+        self, table: str = "observations", where: str = "",
+        params: tuple = (), order_by: str = "observation_ts DESC",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Query observations LEFT JOIN metadata, returning flattened rows."""
+        rows = self._db.raw_query(
+            f"SELECT o.*, m.importance, m.entities, m.priority, m.confidence "
+            f"FROM observations o "
+            f"LEFT JOIN observation_metadata m ON m.observation_id = o.id "
+            + (f"WHERE {where} " if where else "")
+            + f"ORDER BY o.{order_by} "
+            + (f"LIMIT {limit}" if limit else ""),
+            params,
+        )
+        return [dict(r) for r in rows]
 
     def get_observations(
         self, ts_after: str | None = None, limit: int = 50,
@@ -99,24 +138,23 @@ class MemoryStore:
         where_parts: list[str] = []
         params: list[Any] = []
         if ts_after:
-            where_parts.append("observation_ts > ?")
+            where_parts.append("o.observation_ts > ?")
             params.append(ts_after)
         if user_id:
-            where_parts.append("user_id = ?")
+            where_parts.append("o.user_id = ?")
             params.append(user_id)
         if session_id:
-            where_parts.append("session_id = ?")
+            where_parts.append("o.session_id = ?")
             params.append(session_id)
         if agent_id:
-            where_parts.append("agent_id = ?")
+            where_parts.append("o.agent_id = ?")
             params.append(agent_id)
         if metadata:
             for k, v in metadata.items():
-                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                where_parts.append(f"json_extract(o.source_quote, '$.{k}') = ?")
                 params.append(str(v))
         where = " AND ".join(where_parts) if where_parts else ""
-        return self._db.query("observations", where=where, params=tuple(params),
-                              order_by="observation_ts DESC", limit=limit)
+        return self._query_joined(where=where, params=tuple(params), limit=limit)
 
     def get_observations_since(
         self, last_id: str | None = None, limit: int = 500,
@@ -125,26 +163,22 @@ class MemoryStore:
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Cursor-based fetch — all observations after last_id.
-
-        Uses observation_ts for ordering (not id) since IDs are UUIDs.
-        Additional scope filters narrow by user/session/agent/metadata.
-        """
+        """Cursor-based fetch — all observations after last_id."""
         where_parts: list[str] = []
         params: list[Any] = []
 
         if user_id:
-            where_parts.append("user_id = ?")
+            where_parts.append("o.user_id = ?")
             params.append(user_id)
         if session_id:
-            where_parts.append("session_id = ?")
+            where_parts.append("o.session_id = ?")
             params.append(session_id)
         if agent_id:
-            where_parts.append("agent_id = ?")
+            where_parts.append("o.agent_id = ?")
             params.append(agent_id)
         if metadata:
             for k, v in metadata.items():
-                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                where_parts.append(f"json_extract(o.source_quote, '$.{k}') = ?")
                 params.append(str(v))
 
         if last_id:
@@ -154,12 +188,11 @@ class MemoryStore:
             if not rows:
                 return []
             last_ts = rows[0]["observation_ts"]
-            where_parts.append("observation_ts > ?")
+            where_parts.append("o.observation_ts > ?")
             params.append(last_ts)
 
         where = " AND ".join(where_parts) if where_parts else ""
-        return self._db.query("observations", where=where, params=tuple(params),
-                              order_by="observation_ts DESC", limit=limit)
+        return self._query_joined(where=where, params=tuple(params), limit=limit)
 
     def get_recent_observations(self, days: int = 30, limit: int = 50,
                                  user_id: str | None = None,
