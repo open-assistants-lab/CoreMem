@@ -142,12 +142,10 @@ class ReflectorPipeline:
         if len(observations) < self._min_observations:
             return None
 
-        # Priority sampling for large observation sets
+        # Priority sampling for large observation sets (0.4.0: use importance)
         if len(observations) > 200:
-            high_med = [o for o in observations
-                        if o.get("priority", "").lower() in ("high", "medium")]
-            green = [o for o in observations
-                     if o.get("priority", "").lower() not in ("high", "medium")]
+            high_med = [o for o in observations if o.get("importance", 0) >= 0.5]
+            green = [o for o in observations if o.get("importance", 0) < 0.5]
             green = sorted(green, key=lambda o: o.get("observation_ts", ""), reverse=True)[:100]
             observations = high_med + green
 
