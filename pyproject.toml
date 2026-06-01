@@ -26,9 +26,11 @@ dependencies = [
 
 [project.optional-dependencies]
 hybrid = ["hybriddb>=0.4.0"]
+observer = ["httpx>=0.25.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "httpx>=0.25.0",
 ]
 
 [build-system]
