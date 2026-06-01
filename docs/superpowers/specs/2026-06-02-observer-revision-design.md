@@ -156,8 +156,9 @@ class ObserverPipeline:
 `tool_calls[0].function.arguments`, returns parsed observations or `[]` on
 parse failure / empty `tool_calls`. `temperature=0.1`.
 
-`enable_gleaning=True` raises `NotImplementedError` with a pointer to the
-CogCanvas pattern. Hook only; no implementation.
+`enable_gleaning=True` is **rejected at construction time** (in `__init__`)
+with `NotImplementedError("gleaning pass not implemented; see docs/observer-hallucination-review.md for the CogCanvas pattern")`. Fail fast so
+misconfiguration is caught before the first LLM call.
 
 ### `coremem/observer_utils.py` (unchanged)
 
@@ -279,8 +280,12 @@ async def _maybe_run(self) -> list[dict] | None:
     # 2. Build canonical text (built ONCE, used twice for prompt and verification)
     canonical_lines: list[str] = []
     for m in new_messages:
-        if m.content:
-            canonical_lines.append(f"[{m.ts}] {m.content}")
+        if m.content and m.ts is not None:
+            ts_str = m.ts.isoformat()[:19]   # YYYY-MM-DDTHH:MM:SS
+            canonical_lines.append(f"[{ts_str}] {m.content}")
+        elif m.content:
+            # Skip messages with no timestamp — they can't be quoted deterministically
+            continue
     canonical_text = "\n".join(canonical_lines)
 
     # 3. Single LLM call
@@ -289,10 +294,11 @@ async def _maybe_run(self) -> list[dict] | None:
         {"role": "user", "content": _build_context_block(prior_observations, observation_date)},
     ]
     for m in new_messages:
-        if m.content:
+        if m.content and m.ts is not None:
+            ts_str = m.ts.isoformat()[:19]
             messages_for_llm.append({
                 "role": m.role,
-                "content": f"[{m.ts}] {m.content}",
+                "content": f"[{ts_str}] {m.content}",
             })
     response = await self._provider.chat_with_tools(messages_for_llm, [OBSERVATION_TOOL])
     observations = _parse_tool_response(response)
