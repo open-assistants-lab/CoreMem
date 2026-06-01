@@ -2,7 +2,12 @@
 
 Pure function, stdlib only. Checks whether a quote appears as a
 sub-string of a source text, with three confidence tiers:
-EXACT (difflib-perfect token match), FUZZY (LCS ratio >= 0.75),
+EXACT (token-list match after whitespace + case normalization),
+FUZZY (character-level SequenceMatcher.ratio() on whitespace+case-
+normalized strings, >= 0.75 threshold — chosen over token-level
+because LLM source_quote values drift by single characters or
+punctuation, e.g. "engineer." vs "engineer" or "I'm" vs "I am",
+which would be token-mismatches but should still pass),
 NONE (drop the observation).
 """
 
@@ -36,6 +41,14 @@ def align_quote(quote: str, source: str) -> AlignmentResult:
     matching. Returns EXACT if the quote's tokens form a contiguous
     window in the source, FUZZY if SequenceMatcher.ratio() on the
     character sequences is >= 0.75, otherwise NONE.
+
+    ``char_interval`` semantics:
+    - EXACT: points to the matched substring in ``source``.
+    - FUZZY: points to the longest common substring (LCS) between
+      ``source`` and ``quote`` (computed on case+whitespace-normalized
+      strings; the returned indices are valid for the original
+      ``source`` for ASCII text).
+    - NONE: ``None``.
     """
     if not quote or not source:
         return AlignmentResult(AlignmentTier.NONE, 0.0, None)
@@ -55,32 +68,31 @@ def align_quote(quote: str, source: str) -> AlignmentResult:
     for i in range(len(source_tokens) - len(quote_tokens) + 1):
         window = source_tokens[i : i + len(quote_tokens)]
         if window == quote_tokens:
-            char_interval = _token_window_to_char_span(
-                source, source_tokens, i, i + len(quote_tokens)
+            char_interval = _char_span_for_token_range(
+                source, i, i + len(quote_tokens)
             )
             return AlignmentResult(AlignmentTier.EXACT, 1.0, char_interval)
 
-    # FUZZY: SequenceMatcher ratio on characters (LCS-based)
-    sm = SequenceMatcher(None, source, quote)
+    # FUZZY: char-level SequenceMatcher on lowered strings (LCS-based).
+    # Char-level (not token-level) so single-character / punctuation
+    # drift in the LLM's source_quote (e.g. "engineer." vs "engineer")
+    # still passes the gate.
+    sm = SequenceMatcher(None, source_lower, quote_lower)
     ratio = sm.ratio()
     if ratio >= _FUZZY_THRESHOLD:
-        block = sm.find_longest_match(0, len(source), 0, len(quote))
+        block = sm.find_longest_match(0, len(source_lower), 0, len(quote_lower))
         char_interval = (block.a, block.a + block.size)
         return AlignmentResult(AlignmentTier.FUZZY, ratio, char_interval)
 
     return AlignmentResult(AlignmentTier.NONE, 0.0, None)
 
 
-def _token_window_to_char_span(
+def _char_span_for_token_range(
     source: str,
-    source_tokens: list[str],
     start: int,
     end: int,
 ) -> tuple[int, int]:
-    """Map a token-index range in source_tokens to (char_start, char_end) in source."""
-    if start >= len(source_tokens):
-        return (len(source), len(source))
-    # Walk through source to find char offsets
+    """Map a token-index range to (char_start, char_end) in source."""
     char_start = -1
     char_end = -1
     token_idx = 0

@@ -238,39 +238,37 @@ def align_quote(quote: str, source: str) -> AlignmentResult:
     for i in range(len(source_tokens) - len(quote_tokens) + 1):
         window = source_tokens[i : i + len(quote_tokens)]
         if window == quote_tokens:
-            char_interval = _token_window_to_char_span(
-                source, source_tokens, i, i + len(quote_tokens)
+            char_interval = _char_span_for_token_range(
+                source, i, i + len(quote_tokens)
             )
             return AlignmentResult(AlignmentTier.EXACT, 1.0, char_interval)
 
-    # FUZZY: SequenceMatcher ratio on tokens
-    sm = SequenceMatcher(None, source_tokens, quote_tokens)
+    # FUZZY: char-level SequenceMatcher on lowered strings (LCS-based).
+    # Deliberate deviation from the original plan's reference: the plan
+    # specified token-level SequenceMatcher (and a token-index -> char-span
+    # helper), but the actual implementation is char-level on whitespace
+    # + case-normalized strings, returning char indices into source
+    # directly. Char-level catches single-character / punctuation drift
+    # in the LLM's source_quote (e.g. "engineer." vs "engineer",
+    # "I'm" vs "I am") that would be token-mismatches under token-level.
+    sm = SequenceMatcher(None, source_lower, quote_lower)
     ratio = sm.ratio()
     if ratio >= _FUZZY_THRESHOLD:
         block = sm.find_longest_match(
-            0, len(source_tokens), 0, len(quote_tokens)
+            0, len(source_lower), 0, len(quote_lower)
         )
-        char_interval = _token_window_to_char_span(
-            source, source_tokens, block.a, block.a + block.size
-        )
+        char_interval = (block.a, block.a + block.size)
         return AlignmentResult(AlignmentTier.FUZZY, ratio, char_interval)
 
     return AlignmentResult(AlignmentTier.NONE, 0.0, None)
 
 
-def _token_window_to_char_span(
+def _char_span_for_token_range(
     source: str,
-    source_tokens: list[str],
     start: int,
     end: int,
 ) -> tuple[int, int]:
-    """Map a token-index range in source_tokens to (char_start, char_end) in source."""
-    if start >= len(source_tokens):
-        return (len(source), len(source))
-    first_token = source_tokens[start]
-    last_token = source_tokens[end - 1]
-    # Walk through source to find char offsets
-    cursor = 0
+    """Map a token-index range to (char_start, char_end) in source."""
     char_start = -1
     char_end = -1
     token_idx = 0

@@ -77,6 +77,30 @@ class TestAlignFuzzy:
         assert r.tier == AlignmentTier.FUZZY
         assert r.confidence >= 0.75
 
+    def test_fuzzy_char_interval_is_substring(self):
+        # Trailing-punctuation drift — FUZZY char_interval should be a
+        # non-empty sub-string of source (the longest common substring).
+        source = "engineer"
+        r = align_quote("engineer.", source)
+        assert r.tier == AlignmentTier.FUZZY
+        assert r.char_interval is not None
+        start, end = r.char_interval
+        matched = source[start:end]
+        assert len(matched) > 0
+        assert matched in source
+
+    def test_fuzzy_char_interval_in_middle(self):
+        # Inserted/clipped drift in the middle of source — FUZZY tier,
+        # char_interval points to the LCS within source.
+        source = "I am a software engineer"
+        r = align_quote("I am a software engineer.", source)
+        assert r.tier == AlignmentTier.FUZZY
+        assert r.char_interval is not None
+        start, end = r.char_interval
+        matched = source[start:end]
+        assert len(matched) > 0
+        assert matched in source
+
 
 # ── align_quote: NONE tier ─────────────────────────────────────────────────
 

@@ -100,9 +100,13 @@ Tier semantics:
 - **EXACT** — `difflib.SequenceMatcher` on whitespace-tokenized strings
   returns a matching block covering the full quote. Returns `char_interval`
   pointing to that block in `source`. Confidence = 1.0.
-- **FUZZY** — `SequenceMatcher.ratio()` on tokens ≥ 0.75. Minor rephrasing,
-  whitespace drift, or trailing punctuation differences. Confidence = the
-  ratio.
+- **FUZZY** — `SequenceMatcher.ratio()` on character sequences
+  (whitespace + case normalized) ≥ 0.75. Returns `char_interval` pointing
+  to the longest common substring (LCS) between `source` and `quote`.
+  Chosen over token-level because LLM source_quote values drift by single
+  characters or punctuation (e.g. "engineer." vs "engineer", "I'm" vs
+  "I am") which would be token-mismatches but should still pass.
+  Confidence = the ratio.
 - **NONE** — ratio < 0.75. Drop the observation.
 
 Edge cases handled (case-insensitive via lowercase-before-tokenize):
