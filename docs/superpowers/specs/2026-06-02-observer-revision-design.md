@@ -166,14 +166,17 @@ misconfiguration is caught before the first LLM call.
 
 ### `coremem/reflector.py` (patch)
 
-Fix the silently-broken priority filter:
+Fix the silently-broken priority filter (two lines in
+`ReflectorPipeline.run_now()`):
 
 ```python
 # Was (broken — never matched emoji values):
 o.get("priority", "").lower() in ("high", "medium")
+o.get("priority", "").lower() not in ("high", "medium")
 
 # Now:
 o.get("importance", 0) >= 0.5
+o.get("importance", 0) < 0.5
 ```
 
 ### `coremem/memory_store.py` (patch)
@@ -411,6 +414,15 @@ row. Heavier but acceptable at this scale (single-user SQLite-like store).
 `Memory.metadata` and `Memory.role` are **not** propagated to the observation.
 `role` is implicit in the LLM's selection of which facts to extract;
 `metadata` is used for fetch-time filtering only.
+
+### `confidence` field (legacy, now constant)
+
+The `confidence` field on `observation_metadata` was set by the NLI gate's
+`check_entailment()` return value. With NLI removed, the field is no longer
+written by the pipeline. It stays at its default of `1.0` (set in
+`MemoryStore.insert_observations()`). Old observations may have non-default
+values from the NLI era; the column is left in place and ignored. A future
+spec can drop the column or repurpose it.
 
 ## Dependency changes
 
