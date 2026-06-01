@@ -22,21 +22,20 @@ competitor analysis. Not blocking, not urgent — queue for a future sprint.
 | # | What | Effort | Expected gain | How |
 |---|------|--------|--------------|-----|
 | 6 | **Observer: mechanical compression** | Medium | 0% hallucination | For tool-call-driven agents (coding), skip LLM extraction. Compress `tool_name + tool_input + tool_output` into title + narrative mechanically. agentmemory's `buildSyntheticCompression()` approach. Not applicable for conversation memory. |
-| 7 | **Observer: default model switch** | Config | -60% hallucination | Default from `ollama:llama3.2` → `openai:gpt-4o-mini` or `anthropic:claude-haiku-4-5`. Document tradeoffs: cost vs accuracy. Keep source_quote gate as safety net. |
-| 8 | **Heuristics: negation penalty** | 5 lines | +1% | Query "not/never/without" → penalize content containing those terms. Lowers false positives on negative queries. |
-| 9 | **Heuristics: entity overlap** | 20 lines | +1-2% | Match named entities (people, companies, locations) between query and content. Uses spaCy small model (~13MB). Already available via `entities` field on observations. |
+
+| 7 | **Heuristics: negation penalty** | 5 lines | +1% | Query "not/never/without" → penalize content containing those terms. Lowers false positives on negative queries. |
+| 8 | **Heuristics: entity overlap** | 20 lines | +1-2% | Match named entities (people, companies, locations) between query and content. Uses spaCy small model (~13MB). Already available via `entities` field on observations. |
 
 ## Eval Pipeline
 
 | # | What | Effort | Expected gain | How |
 |---|------|--------|--------------|-----|
-| 10 | **Observer eval: hallucination ground truth** | Manual | N/A | Label 10-20 LongMemEval questions manually. Mark which observations are correct/fabricated. Use as golden set for regression testing when changing models/prompts. |
+| 9 | **Observer eval: hallucination ground truth** | Manual | N/A | Label 10-20 LongMemEval questions manually. Mark which observations are correct/fabricated. Use as golden set for regression testing when changing models/prompts. |
 
 ---
 
 ## Implementation order (if prioritizing)
 
 1. Add `tokenize=porter` (1 line, instant gain)
-2. Switch Observer default model to stronger one
-3. ChromaDB 512-token window
-4. Golden set for hallucination regression
+2. ChromaDB 512-token window
+3. Golden set for hallucination regression
