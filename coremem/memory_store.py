@@ -94,23 +94,46 @@ class MemoryStore:
 
     def get_observations_since(
         self, last_id: str | None = None, limit: int = 500,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Cursor-based fetch — all observations after last_id.
 
         Uses observation_ts for ordering (not id) since IDs are UUIDs.
+        Additional scope filters narrow by user/session/agent/metadata.
         """
-        if not last_id:
-            return self._db.query("observations", order_by="observation_ts DESC", limit=limit)
+        where_parts: list[str] = []
+        params: list[Any] = []
 
-        # Get the timestamp of the last_id row, then fetch newer ones
-        rows = self._db.raw_query(
-            "SELECT observation_ts FROM observations WHERE id = ?", (last_id,),
-        )
-        if not rows:
-            return []
-        last_ts = rows[0]["observation_ts"]
-        return self._db.query("observations", where="observation_ts > ?",
-                              params=(last_ts,), order_by="observation_ts DESC", limit=limit)
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(str(v))
+
+        if last_id:
+            rows = self._db.raw_query(
+                "SELECT observation_ts FROM observations WHERE id = ?", (last_id,),
+            )
+            if not rows:
+                return []
+            last_ts = rows[0]["observation_ts"]
+            where_parts.append("observation_ts > ?")
+            params.append(last_ts)
+
+        where = " AND ".join(where_parts) if where_parts else ""
+        return self._db.query("observations", where=where, params=tuple(params),
+                              order_by="observation_ts DESC", limit=limit)
 
     def get_recent_observations(self, days: int = 30, limit: int = 50) -> list[dict[str, Any]]:
         from datetime import timedelta

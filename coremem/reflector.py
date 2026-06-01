@@ -87,6 +87,10 @@ class ReflectorPipeline:
 
     Args:
         store: MemoryStore instance for reading observations + reflections.
+        user_id: If set, only reflect on observations from this user.
+        session_id: If set, only reflect on observations from this session.
+        agent_id: If set, only reflect on observations involving this agent.
+        metadata: If set, only reflect on observations with matching metadata.
         model: Provider model string (default ``"openai:gpt-4o"``).
         embedding_fn: Embedding function for cosine similarity quality gate.
         interval_hours: How often to run (default 24).
@@ -96,12 +100,20 @@ class ReflectorPipeline:
     def __init__(
         self,
         store: Any,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         model: str = "openai:gpt-4o",
         embedding_fn: Any = None,
         interval_hours: int = 24,
         min_observations: int = 10,
     ):
         self._store = store
+        self._user_id = user_id
+        self._session_id = session_id
+        self._agent_id = agent_id
+        self._metadata = metadata
         self._reflector = Reflector(model=model)
         self._embedding_fn = embedding_fn
         self._interval_hours = interval_hours
@@ -121,6 +133,10 @@ class ReflectorPipeline:
         """Force a run regardless of timer."""
         observations = self._store.get_observations_since(
             last_id=self._last_run_observation_id, limit=500,
+            user_id=self._user_id,
+            session_id=self._session_id,
+            agent_id=self._agent_id,
+            metadata=self._metadata,
         )
 
         if len(observations) < self._min_observations:

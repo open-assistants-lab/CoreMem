@@ -79,6 +79,9 @@ class ObserverPipeline:
         core: MemoryCore instance for reading conversation messages.
         store: MemoryStore instance for writing observations.
         session_id: Session identifier for cursor tracking and fetch filtering.
+        user_id: If set, only observe messages from this user.
+        agent_id: If set, only observe messages involving this agent.
+        metadata: If set, only observe messages with matching metadata keys.
         model: Provider model string (default ``"ollama:llama3.2"``).
         token_threshold: Fire after this many new tokens (default 8000).
         min_turns: Minimum turns between runs (default 3).
@@ -90,6 +93,9 @@ class ObserverPipeline:
         core: Any,
         store: Any,
         session_id: str,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         model: str = "ollama:llama3.2",
         token_threshold: int = 8000,
         min_turns: int = 3,
@@ -98,6 +104,9 @@ class ObserverPipeline:
         self._core = core
         self._store = store
         self._session_id = session_id
+        self._user_id = user_id
+        self._agent_id = agent_id
+        self._metadata = metadata
         self._observer = Observer(model=model)
         self._token_threshold = token_threshold
         self._min_turns = min_turns
@@ -126,6 +135,9 @@ class ObserverPipeline:
     async def _maybe_run(self) -> list[dict[str, Any]] | None:
         messages = self._core.fetch(
             session_id=self._session_id,
+            user_id=self._user_id,
+            agent_id=self._agent_id,
+            metadata=self._metadata,
             limit=self._max_messages,
         )
 
