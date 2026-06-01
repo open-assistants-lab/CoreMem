@@ -19,6 +19,8 @@ _OBSERVATIONS_SCHEMA = {
     "user_id": "TEXT",
     "agent_id": "TEXT",
     "session_id": "TEXT",
+    "alignment_tier": "TEXT",         # NEW: 0.4.0
+    "alignment_confidence": "REAL",   # NEW: 0.4.0
 }
 
 _OBSERVATION_METADATA_SCHEMA = {
@@ -70,10 +72,48 @@ class MemoryStore:
         existing = set(self._db.list_tables())
         if "observations" not in existing:
             self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
+        else:
+            self._migrate_observations_v2()
         if "observation_metadata" not in existing:
             self._db.create_table("observation_metadata", _OBSERVATION_METADATA_SCHEMA)
         if "reflections" not in existing:
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
+
+    def _list_observation_columns(self) -> set[str]:
+        """Return column names in the observations table via PRAGMA."""
+        rows = self._db.raw_query("PRAGMA table_info(observations)")
+        return {r["name"] for r in rows}
+
+    def _migrate_observations_v2(self) -> None:
+        """0.4.0 migration: add alignment_tier and alignment_confidence columns.
+
+        Idempotent: skip if columns already exist.
+        """
+        existing_cols = self._list_observation_columns()
+        if "alignment_tier" in existing_cols and "alignment_confidence" in existing_cols:
+            return
+        if hasattr(self._db, "add_column"):
+            if "alignment_tier" not in existing_cols:
+                self._db.add_column("observations", "alignment_tier", "TEXT")
+            if "alignment_confidence" not in existing_cols:
+                self._db.add_column("observations", "alignment_confidence", "REAL")
+        else:
+            self._migrate_via_recreate()
+
+    def _migrate_via_recreate(self) -> None:
+        """Fallback migration: rename old table, create new, copy data."""
+        import uuid as _uuid
+        old_name = f"observations_old_{_uuid.uuid4().hex[:8]}"
+        self._db.raw_query(f"ALTER TABLE observations RENAME TO {old_name}")
+        self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
+        copy_cols = {"id", "content", "source_quote", "referenced_date", "observation_ts",
+                     "user_id", "agent_id", "session_id"}
+        select_list = ", ".join(sorted(copy_cols))
+        self._db.raw_query(
+            f"INSERT INTO observations ({select_list}) "
+            f"SELECT {select_list} FROM {old_name}"
+        )
+        self._db.raw_query(f"DROP TABLE {old_name}")
 
     # ── Observations (fact layer — immutable) ───────────────────────────
 
@@ -94,6 +134,8 @@ class MemoryStore:
                 "user_id": item.get("user_id", ""),
                 "agent_id": item.get("agent_id", ""),
                 "session_id": item.get("session_id", ""),
+                "alignment_tier": item.get("alignment_tier", ""),
+                "alignment_confidence": item.get("alignment_confidence", 0.0),
             })
 
             # Metadata row — initial enrichment from Observer
