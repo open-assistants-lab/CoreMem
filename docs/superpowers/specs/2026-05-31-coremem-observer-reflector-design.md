@@ -151,6 +151,7 @@ store = MemoryStore(path="./memory")
 # Observations
 store.insert_observations([{...}, ...])
 store.get_observations(ts_after="2026-05-01", limit=50)
+store.get_observations_since(last_id: str | None, limit: int)  # cursor-based for Reflector
 store.get_recent_observations(days=30, limit=50)
 
 # Reflections
@@ -210,7 +211,7 @@ class ObserverPipeline:
 ```
 after_turn():
   1. Increment _turns_since_last_run
-  2. Fetch recent messages: core.fetch(limit=max_messages)
+  2. Fetch recent messages: core.fetch(session_id=self._session_id, limit=max_messages)
      Messages are in natural order (most recent first via ts DESC).
   3. Filter: skip role="tool" messages (tool outputs never contain user facts)
   4. Find cutoff: locate _last_observed_id in the fetched set.
@@ -333,7 +334,7 @@ class ReflectorPipeline:
 ```
 maybe_run():
   1. If now - _last_run_ts < interval_hours * 3600: return
-  2. Fetch observations since _last_run_observation_id
+  2. Fetch new observations: store.get_observations_since(last_id=_last_run_observation_id, limit=500)
   3. If count < min_observations: return
   4. Fetch prior reflections: store.get_reflections(limit=10)
    5. Priority sampling: if observations > 200, include all 🔴+🟡, sample 🟢 by recency
