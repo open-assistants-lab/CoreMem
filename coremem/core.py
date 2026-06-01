@@ -173,9 +173,16 @@ class MemoryCore:
         """
         queries = expand_queries(query, llm_provider=self._llm_provider)
 
+        # Query-type-aware depth: counting/temporal need broader candidate pools.
+        if SearchHeuristics.is_counting_question(query):
+            depth = max(depth, 10)
+        elif any(cue in query.lower() for cue in ("before", "after", "since", "when did", "what year")):
+            depth = max(depth, 7)
+
         effective_limit = limit * depth
         all_results: list[SearchResult] = []
-        seen_ids: set[int] = set()
+        seen_ids: set[str] = set()
+        seen_content: set[int] = set()
 
         for q in queries:
             sq = SearchQuery(
@@ -189,11 +196,26 @@ class MemoryCore:
                 metadata=metadata or {},
             )
             results = self._backend.search(sq)
+
+            # Normalize scores per sub-query to [0, 1] so no single
+            # sub-query dominates the merged candidate pool.
+            if results:
+                max_score = max(r.score for r in results)
+                min_score = min(r.score for r in results)
+                score_range = max_score - min_score
+                if score_range > 0:
+                    for r in results:
+                        r.score = (r.score - min_score) / score_range
+
             for r in results:
                 rid = r.memory.id
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
-                    all_results.append(r)
+                    # Content dedup: skip near-duplicate messages across sub-queries
+                    ch = hash(r.memory.content[:200])
+                    if ch not in seen_content:
+                        seen_content.add(ch)
+                        all_results.append(r)
                 elif not rid:
                     all_results.append(r)
 

@@ -4,6 +4,7 @@ All heuristics are zero-LLM, purely pattern-based.
 """
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -54,6 +55,8 @@ class SearchHeuristics:
     """
 
     KEYWORD_OVERLAP_WEIGHT = 1.0
+    FUZZY_THRESHOLD = 0.75
+    FUZZY_WEIGHT = 0.4
     TEMPORAL_BOOST_FACTOR = 0.15
     PERSON_NAME_BOOST = 0.40
     QUOTED_PHRASE_BOOST = 0.60
@@ -74,6 +77,7 @@ class SearchHeuristics:
     def keyword_overlap(cls, query: str, content: str, score: float) -> float:
         """Boost score when query keywords appear in content.
 
+        Exact unigram match + bigram match + fuzzy fallback for near-misses.
         fused = score * (1 + weight * keyword_overlap_ratio)
         """
         q_words = {w.lower() for w in re.findall(r"\w+", query) if len(w) > 2}
@@ -81,9 +85,32 @@ class SearchHeuristics:
         if not q_words:
             return score
 
-        c_words = set(re.findall(r"\w+", content.lower()))
-        overlap = len(q_words & c_words) / len(q_words)
-        return score * (1 + cls.KEYWORD_OVERLAP_WEIGHT * overlap)
+        c_words_lower = re.findall(r"\w+", content.lower())
+        c_words = set(c_words_lower)
+
+        # Exact unigram overlap
+        exact = len(q_words & c_words) / len(q_words) if q_words else 0
+
+        # Bigram overlap — catches "coffee creamer" vs single-word matches
+        q_bigrams = {" ".join(w.lower() for w in bigram)
+                     for bigram in zip(re.findall(r"\w+", query), re.findall(r"\w+", query)[1:])
+                     if bigram[0] not in cls.STOP_WORDS}
+        c_text = " ".join(c_words_lower)
+        bigram_hits = sum(1 for bg in q_bigrams if bg in c_text)
+        bigram_overlap = bigram_hits / len(q_bigrams) if q_bigrams else 0
+
+        # Fuzzy fallback — near-misses like "creamers" vs "creamer"
+        fuzzy_hits = 0
+        for qw in q_words:
+            if qw not in c_words:
+                for cw in c_words:
+                    if SequenceMatcher(None, qw, cw).ratio() >= cls.FUZZY_THRESHOLD:
+                        fuzzy_hits += 1
+                        break
+        fuzzy_overlap = fuzzy_hits / len(q_words) if q_words else 0
+
+        total_overlap = exact + 0.5 * bigram_overlap + cls.FUZZY_WEIGHT * fuzzy_overlap
+        return score * (1 + cls.KEYWORD_OVERLAP_WEIGHT * total_overlap)
 
     @classmethod
     def temporal_boost(cls, query: str, content_ts: str | None, score: float) -> float:
