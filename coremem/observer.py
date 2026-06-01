@@ -22,6 +22,7 @@ Output: A JSON array of observations. Each observation must have:
 
 CRITICAL RULES:
 - One fact per observation. Do not combine multiple facts.
+- **DO NOT HALLUCINATE.** Only extract facts explicitly stated in the conversation. Never invent preferences, plans, events, or details not present in the messages. If the conversation doesn't contain enough facts, return fewer observations — quality over quantity. An empty array is better than invented facts.
 - Use exact values as stated. Never paraphrase numbers or proper nouns.
 - **PRIORITY RULE**: 🔴 is ONLY for verifiable facts with numbers, dates, or proper names. "Likes hiking" is 🟡, "Runs 40mi/week" is 🔴. "Has a dog" is 🟢, "Has golden retriever named Max" is 🔴. Most observations should be 🟡. Use 🔴 sparingly (1-2 per conversation).
 - If the user CORRECTS previously stated information, capture both as separate observations with different timestamps.

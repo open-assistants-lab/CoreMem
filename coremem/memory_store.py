@@ -28,6 +28,8 @@ _REFLECTIONS_SCHEMA = {
     "linked_observation_ids": "TEXT",
     "score": "REAL",
     "embedding": "TEXT",
+    "user_id": "TEXT",
+    "session_id": "TEXT",
 }
 
 _HIGH_PRIORITY = {"high", "critical", "important", "urgent"}
@@ -83,13 +85,31 @@ class MemoryStore:
 
     def get_observations(
         self, ts_after: str | None = None, limit: int = 50,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        where = ""
-        params: tuple = ()
+        where_parts: list[str] = []
+        params: list[Any] = []
         if ts_after:
-            where = "observation_ts > ?"
-            params = (ts_after,)
-        return self._db.query("observations", where=where, params=params,
+            where_parts.append("observation_ts > ?")
+            params.append(ts_after)
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(str(v))
+        where = " AND ".join(where_parts) if where_parts else ""
+        return self._db.query("observations", where=where, params=tuple(params),
                               order_by="observation_ts DESC", limit=limit)
 
     def get_observations_since(
@@ -135,11 +155,15 @@ class MemoryStore:
         return self._db.query("observations", where=where, params=tuple(params),
                               order_by="observation_ts DESC", limit=limit)
 
-    def get_recent_observations(self, days: int = 30, limit: int = 50) -> list[dict[str, Any]]:
+    def get_recent_observations(self, days: int = 30, limit: int = 50,
+                                 user_id: str | None = None,
+                                 session_id: str | None = None,
+                                 agent_id: str | None = None) -> list[dict[str, Any]]:
         from datetime import timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        return self._db.query("observations", where="observation_ts > ?",
-                              params=(cutoff,), limit=limit)
+        return self.get_observations(ts_after=cutoff, limit=limit,
+                                     user_id=user_id, session_id=session_id,
+                                     agent_id=agent_id)
 
     def search_observations(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         results = self._db.search("observations", "content", query, limit=limit)
@@ -150,7 +174,7 @@ class MemoryStore:
     def insert_reflections(self, items: list[dict[str, Any]]) -> list[str]:
         ids = []
         for item in items:
-            rid = str(uuid.uuid4())[:12]  # ignore LLM-generated ID, use client UUID
+            rid = str(uuid.uuid4())[:12]
             linked = item.get("linked_observation_ids", [])
             emb = item.get("embedding", "")
             self._db.insert("reflections", {
@@ -160,12 +184,26 @@ class MemoryStore:
                 "linked_observation_ids": json.dumps(linked),
                 "score": item.get("score", 1.0),
                 "embedding": json.dumps(emb.tolist()) if hasattr(emb, "tolist") else str(emb),
+                "user_id": item.get("user_id", ""),
+                "session_id": item.get("session_id", ""),
             })
             ids.append(rid)
         return ids
 
-    def get_reflections(self, limit: int = 10) -> list[dict[str, Any]]:
-        return self._db.query("reflections", order_by="score DESC", limit=limit)
+    def get_reflections(self, limit: int = 10,
+                        user_id: str | None = None,
+                        session_id: str | None = None) -> list[dict[str, Any]]:
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(where_parts) if where_parts else ""
+        return self._db.query("reflections", where=where, params=tuple(params),
+                              order_by="score DESC", limit=limit)
 
     def search_reflections(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         results = self._db.search("reflections", "content", query, limit=limit)

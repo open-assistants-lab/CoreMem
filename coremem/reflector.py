@@ -167,6 +167,11 @@ class ReflectorPipeline:
                     emb = emb.tolist()
                 r["embedding"] = emb
             r["score"] = 1.0
+            # Tag with scope from pipeline
+            if self._user_id:
+                r["user_id"] = self._user_id
+            if self._session_id:
+                r["session_id"] = self._session_id
             good.append(r)
 
         if good:
