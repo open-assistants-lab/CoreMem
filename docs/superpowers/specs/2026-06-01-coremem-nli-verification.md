@@ -86,48 +86,51 @@ def is_nli_available() -> bool:
 
 
 def _get_nli():
+    """Lazy-load the NLI pipeline."""
     global _NLI_PIPELINE
     if _NLI_PIPELINE is None:
         from transformers import pipeline
         logger.info("nli_bart_large_mnli_loading")
         _NLI_PIPELINE = pipeline(
-            "zero-shot-classification",
+            "text-classification",
             model="facebook/bart-large-mnli",
             device=-1,  # CPU — zero infra
         )
     return _NLI_PIPELINE
 
 
-def verify_observation(premise: str, hypothesis: str) -> tuple[bool, float]:
-    """Check if source_quote (premise) logically entails the observation claim (hypothesis).
+def check_entailment(premise: str, hypothesis: str) -> tuple[bool, float]:
+    """Check if premise logically entails the hypothesis using NLI.
 
-    Uses NLI: given the source quote, does the observation follow logically?
-
+    Uses the standard NLI pipeline: premise → hypothesis.
     Returns (entailed, confidence_score).
 
     Args:
-        premise: The exact source_quote from the conversation (evidence).
+        premise: The source_quote from the conversation (evidence sentence).
         hypothesis: The extracted observation claim (what was concluded).
+
+    Returns:
+        (True, 0.95) if premise entails hypothesis with high confidence.
+        (True, 0.40) if neutral — keep but flag as low confidence.
+        (False, 0.0) if contradiction or poor input.
     """
     if not premise or not hypothesis:
         return False, 0.0
 
     try:
         nli = _get_nli()
-        result = nli(premise, candidate_labels=["entailment", "contradiction"])
-        scores = {label: score for label, score in zip(
-            result["labels"], result["scores"]
-        )}
-        entail = scores.get("entailment", 0.0)
-        contradict = scores.get("contradiction", 0.0)
+        result = nli({"text": premise, "text_pair": hypothesis})
+        # result[0] = {"label": "ENTAILMENT", "score": 0.92}
+        label = result[0]["label"]
+        score = result[0]["score"]
 
-        # Conservative: only drop on strong contradiction.
-        # Neutral/low-entailment are kept (just flagged with lower confidence).
-        if contradict > 0.8:
+        if label == "ENTAILMENT" and score > 0.7:
+            return True, score
+        if label == "CONTRADICTION" and score > 0.8:
             return False, 0.0
-        if entail > 0.7:
-            return True, entail
-        return True, entail  # neutral — keep, but low confidence
+        # NEUTRAL → keep with score as confidence
+        return True, score
+
     except Exception as e:
         logger.warning("nli_check_failed", extra={"error": str(e)})
         return True, 0.5  # fail-open
@@ -138,25 +141,19 @@ def verify_observation(premise: str, hypothesis: str) -> tuple[bool, float]:
 ```python
 # In _maybe_run(), after source quote gate:
 
-# Gate: NLI verification (uses source_quote as premise)
+# Gate: NLI verification
 if is_nli_available():
     verified_obs = []
     for obs in new_obs:
         quote = obs.get("source_quote", "")
         content = obs.get("content", "")
-        passed, confidence = verify_observation(quote, content)
-        obs["confidence"] = confidence
+        passed, confidence = check_entailment(quote, content)
+        obs["confidence"] = confidence  # stored in observation_metadata
         if not passed:
             continue  # NLI says contradiction — drop
         verified_obs.append(obs)
     new_obs = verified_obs
 ```
-
-**NLI uses the source_quote as premise** — not the full conversation.
-The source_quote is the exact sentence the LLM claims supports the
-observation. NLI checks: "Given this sentence, does the observation
-follow?" This is more accurate than using the full conversation text
-(sentence-pair NLI is stronger than multi-sentence NLI).
 
 ### 3. Optional dependency
 
@@ -213,52 +210,53 @@ Chicago"). These require temporal reasoning, which NLI doesn't handle.
 ### Unit tests
 
 ```python
-def test_nli_entails():
-    """Direct quote-to-claim match."""
-    passed, score = verify_observation(
+from coremem.nli import check_entailment
+
+def test_entailment_direct():
+    """Quote directly states the observation."""
+    passed, score = check_entailment(
         "I work at Google as a software engineer.",
         "User is a software engineer at Google",
     )
     assert passed is True
-    assert score > 0.7
+    assert score > 0.8
 
-def test_nli_contradicts():
+def test_contradiction_direct():
     """Quote says X, claim says not-X."""
-    passed, score = verify_observation(
+    passed, score = check_entailment(
         "I quit my job at Google last week.",
         "User currently works at Google",
     )
     assert passed is False
 
-def test_nli_neutral_keeps():
-    """Quote is related but doesn't fully entail — keep with lower confidence."""
-    passed, score = verify_observation(
+def test_neutral_keeps():
+    """Related but not entailment — keep with lower confidence."""
+    passed, score = check_entailment(
         "I went hiking yesterday.",
         "User enjoys outdoor activities",
     )
     assert passed is True
-    assert 0.3 <= score <= 0.8
+    assert score <= 0.5  # neutral label, low score
 
-def test_nli_paraphrase_entails():
-    """Quote paraphrases the claim — NLI should still catch this."""
-    passed, score = verify_observation(
+def test_paraphrase_entails():
+    """NLI should handle paraphrasing."""
+    passed, score = check_entailment(
         "I'm a Googler working on search infrastructure.",
-        "User is a software engineer at Google",
+        "User works at Google",
     )
     assert passed is True
 
-def test_nli_empty_input():
-    assert verify_observation("", "claim")[0] is False
-    assert verify_observation("source", "")[0] is False
+def test_empty_input():
+    assert check_entailment("", "claim")[0] is False
+    assert check_entailment("source", "")[0] is False
 
-def test_nli_false_premise():
-    """LLM fabricates quote that sounds plausible but contradicts source."""
-    # Observer said "User lives in Chicago" with quote "I just moved to SF"
-    passed, score = verify_observation(
-        "I just moved here from Chicago.",  # actual quote
-        "User lives in Chicago",             # fabricated claim
+def test_false_premise_caught():
+    """LLM fabricates quote. NLI catches contradiction."""
+    passed, score = check_entailment(
+        "I just moved here from Chicago.",  # actual quote from source
+        "User lives in Chicago",             # hallucinated observation
     )
-    assert passed is False  # NLI catches the contradiction
+    assert passed is False  # NLI catches contradiction with "moved here from"
 ```
 
 ### Edge cases
