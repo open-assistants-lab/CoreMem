@@ -121,12 +121,12 @@ def check_entailment(premise: str, hypothesis: str) -> tuple[bool, float]:
         nli = _get_nli()
         result = nli({"text": premise, "text_pair": hypothesis})
         # result[0] = {"label": "ENTAILMENT", "score": 0.92}
-        label = result[0]["label"]
+        label = result[0]["label"].lower()
         score = result[0]["score"]
 
-        if label == "ENTAILMENT" and score > 0.7:
+        if label == "entailment" and score > 0.7:
             return True, score
-        if label == "CONTRADICTION" and score > 0.8:
+        if label == "contradiction" and score > 0.8:
             return False, 0.0
         # NEUTRAL → keep with score as confidence
         return True, score
@@ -172,19 +172,13 @@ NLI is opt-in. If `transformers` is not installed, the gate is skipped
 | Metric | Value |
 |--------|-------|
 | Model | `facebook/bart-large-mnli` (1.6GB) |
-| First load | ~8s (download from HuggingFace) + ~3s (CPU init) |
-| Per-check latency | ~50ms (CPU, single sentence pair) |
-| Batch throughput | ~20 checks/second |
+| First load | ~5s (download from HuggingFace if not cached) + ~2s (CPU init) |
+| Per-check latency | ~50ms (CPU), ~5ms (GPU with `device=0`) |
+| Batch throughput | ~20 checks/second (CPU) |
 | RAM overhead | ~2GB at rest |
-| Accuracy on MNLI | 95%+ |
 
-**Source_quote-as-premise matters.** NLI models are trained on sentence
-pairs (premise → hypothesis), not long-form → short-form. Using the
-source_quote (one sentence) as premise gives 95%+ accuracy. Using the
-full conversation (10+ sentences) drops accuracy to ~80%.
-
-For 10 observations per question: 10 × 50ms = **0.5s overhead**. Negligible
-vs the LLM call (2-10s).
+**GPU support** — set `device=0` in `_get_nli()` for CUDA if available.
+CPU (default) works for all users with zero infra.
 
 ## Hallucination reduction estimate
 
@@ -193,11 +187,19 @@ Based on the 9-run experiments (DeepSeek, average 50% hallucination):
 | Gate | Catch rate | Remaining |
 |------|-----------|-----------|
 | Source quote only (current) | ~20% of fabricated quotes | 40% hallucination |
-| + NLI verification | ~90% of remaining | **~4% hallucination** |
+| + NLI verification | ~90% of remaining | **~4-10% hallucination** |
 
-The 10% NLI can't catch are claims that are logically entailed but factually
-wrong (e.g., "User lives in Chicago" when source says "I used to live in
-Chicago"). These require temporal reasoning, which NLI doesn't handle.
+The 4-10% NLI can't catch are claims where the source_quote is a
+partial match. Example: quote says "I used to live in Chicago" and
+observation claims "User lives in Chicago" — NLI might miss the
+tense mismatch and classify as NEUTRAL. These require temporal
+reasoning, which NLI doesn't handle.
+
+**Actual accuracy must be empirically verified.** MNLI benchmark
+accuracy (95%+) is for general English entailment. Observation
+verification accuracy on our specific task (conversation → claim)
+will likely be 85-95%. The 10-question eval after implementation
+will give the real number.
 
 ## Non-goals
 
