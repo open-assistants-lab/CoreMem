@@ -183,6 +183,8 @@ async def run_observer_eval(
                             "priority": o.get("priority", "?"),
                             "content": o.get("content", ""),
                             "source_quote": o.get("source_quote", ""),
+                            "importance": o.get("importance", 0.5),
+                            "entities": o.get("entities", []),
                         }
                         for o in session_obs
                     ],

@@ -61,8 +61,10 @@ OBSERVATION_TOOL = {
                             "priority": {"type": "string", "enum": ["🔴", "🟡", "🟢"]},
                             "referenced_date": {"type": "string"},
                             "source_quote": {"type": "string", "description": "EXACT sentence from the source text that proves this fact"},
+                            "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "0.8-1.0 = identity, contact info, job, salary, deadline. 0.5-0.7 = preference, habit, project. 0.1-0.4 = context, trivia, passing mention"},
+                            "entities": {"type": "array", "items": {"type": "string"}, "description": "Named entities mentioned: people, companies, products, locations, dates"},
                         },
-                        "required": ["id", "content", "priority", "referenced_date", "source_quote"]
+                        "required": ["id", "content", "priority", "referenced_date", "source_quote", "importance", "entities"]
                     }
                 }
             },
@@ -78,7 +80,12 @@ OBSERVER_PROMPT = """You are an observer agent. Extract key facts from the verif
 
 {sentences}
 
-Return observations via the record_observations tool. One fact per observation. Be exact with values. Use 🔴 for facts with numbers/dates/names, 🟡 for preferences, 🟢 for context. source_quote must be an EXACT copy from the sentences above."""
+Return observations via the record_observations tool. One fact per observation. Be exact with values.
+
+PRIORITY: 🔴 for facts with numbers/dates/names/salaries, 🟡 for preferences/opinions, 🟢 for context/trivia.
+IMPORTANCE: 0.8-1.0 for identity/contact/job/salary. 0.5-0.7 for preferences/habits/projects. 0.1-0.4 for context/trivia.
+ENTITIES: List all named entities mentioned (people, companies, products, locations). Empty list if none.
+source_quote: EXACT copy-paste from the sentences above."""
 
 
 class Observer:
