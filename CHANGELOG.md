@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] — 2026-06-01
+
+### Added
+- **Fuzzy keyword matching** — `difflib` (stdlib) fallback catches near-misses like "creamers" vs "creamer". +4% recall on LongMemEval.
+- **Bigram keyword overlap** — "coffee creamer" matches as a phrase, not just individual words. +2% recall.
+- **MMR session diversity reranking** — `_mmr_diversify()` in `search_enhanced()` prevents cross-encoder overfit by deduplicating sessions pre-rerank.
+- **Score normalization** in `search_enhanced` merge — prevents one sub-query from dominating the candidate pool. +4% recall.
+- **Content dedup** — hash-based deduplication before cross-encoder. +2% recall.
+- **Query-type-aware depth** — counting questions get `depth=10`, temporal `depth=7`, default `depth=5`.
+- **Incremental eval save/resume** — `--output` + `--resume` flags for multi-hour LongMemEval runs.
+- **Per-question failure capture** — detailed diagnostics for missed questions.
+
+### Changed
+- **search 75.4% → 84.0% recall** (25-question sample). **search_enhanced 93.0% → 100%**.
+- `id(r)` → `r.memory.id` merge dedup fix in `search_enhanced()`.
+- Error handling in eval: ChromaDB crashes skip question but save progress.
+- `seen_ids: set[int]` → `set[str]` to match TEXT PRIMARY KEY migration.
+
 ## [0.2.1] — 2026-05-31
 
 ### Changed

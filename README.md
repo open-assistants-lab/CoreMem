@@ -1,10 +1,10 @@
 # CoreMem
 
-> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **98.0% R@5 on LongMemEval (500 questions)** in the Executive Assistant retrieval stack — no LLM, no tuning, no cloud.
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **93.0% R@5 on LongMemEval (500 questions)** with `search_enhanced`, **75.4%** with the zero-LLM `search()` path.
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
-**Dual-backend architecture.** Drop-in backends (ChromaDB baseline, HybridDB enhanced) with the same API. Ranking pipeline: backend retrieval → deterministic heuristics → recency-aware rescoring → session-aware retrieval.
+**Dual-backend architecture.** Drop-in backends (ChromaDB baseline, HybridDB enhanced) with the same API. Ranking pipeline: backend retrieval → deterministic heuristics → MMR session diversity → recency-aware rescoring → session-deduplicated retrieval.
 
 ```python
 from coremem import MemoryCore
@@ -33,22 +33,25 @@ CoreMem solves all three:
 | Component | What it does |
 |-----------|-------------|
 | **Semantic search** | Embedding similarity via ChromaDB or HybridDB |
-| **Deterministic heuristics** | Keyword overlap, temporal recency, person-name boost, quoted-phrase matching |
-| **Session deduplication** | One result per conversation, with full context retrieval |
+| **Deterministic heuristics** | Keyword overlap (fuzzy + bigram), temporal recency, person-name boost, quoted-phrase matching |
+| **MMR session diversity** | One result per session, preventing cross-encoder overfit |
+| **Score normalization** | Per-sub-query normalization in enhanced search for balanced merging |
 
-## LongMemEval Results (500 questions, no LLM, no tuning)
+## LongMemEval Results (500 questions, zero LLM tuning)
 
-| Metric | Score |
-|--------|-------|
-| R@5 | **98.0%** |
-| R@10 | **98.4%** |
-| MRR | 0.944 |
-| P@5 | 0.592 |
-| F1@5 | 0.684 |
-| Selectivity | 11.5% haystack scanned |
-| Rank distribution | #1: 91.8%, #2-3: 5.0%, #4-5: 1.2%, #6-10: 0.4%, >10: 1.6% |
+| Mode | R@5 | MRR | Rank@1 |
+|------|-----|-----|--------|
+| `search()` | 75.4% | 0.562 | 45.8% |
+| `search_enhanced()` | **93.0%** | 0.892 | 86.6% |
 
-Outperforms MemPalace raw (96.6%) and matches their hybrid v4 held-out (98.4%) — with zero tuning, zero dev-set peeking.
+| Question type | `search` | `search_enhanced` |
+|---------------|----------|-------------------|
+| multi-session | 76.7% | **96.2%** |
+| knowledge-update | 82.1% | **97.4%** |
+| single-session-user | 72.9% | **94.3%** |
+| temporal-reasoning | 74.4% | **91.7%** |
+| single-session-assistant | 76.8% | **89.3%** |
+| single-session-preference | 60.0% | **76.7%** |
 
 ## Installation
 
@@ -110,7 +113,7 @@ Deterministic, zero-LLM scoring boosts applied to every result:
 
 | Heuristic | What it catches |
 |-----------|----------------|
-| `keyword_overlap` | Exact word matches between query and content |
+| `keyword_overlap` | Exact + fuzzy (difflib) + bigram matches between query and content |
 | `temporal_boost` | Queries with "latest", "current", "recently" |
 | `recency_decay` | Unconditional exponential decay (30-day half-life) |
 | `person_name_boost` | Proper name mentions in content |

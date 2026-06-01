@@ -156,6 +156,8 @@ store.get_recent_observations(days=30, limit=50)
 # Reflections
 store.insert_reflections([{...}, ...])
 store.get_reflections(limit=10)
+store.search_observations(query, limit=10)   → list[dict]
+store.search_reflections(query, limit=10)    → list[dict]
 store.apply_decay()       # reduces scores for reflections older than N days
 ```
 
@@ -214,9 +216,15 @@ after_turn():
   4. Find cutoff: locate _last_observed_id in the fetched set.
      Messages newer than the watermark ID are "new".
      On first run (_last_observed_id is None), ALL messages are new.
-     If the watermark ID is not found (deleted), fall back to processing
-     up to max_messages (safe — dedup step 9 catches duplicates).
-  5. Count tokens in *new* messages only (since watermark)
+   If the watermark ID is not found (deleted), fall back to processing
+      up to max_messages (safe — dedup step 9 catches duplicates).
+
+      Edge case: if _last_observed_id is older than max_messages entries ago,
+      core.fetch() won't return it. The fallback processes up to max_messages
+      new entries — the Observer re-checks old messages against prior observations
+      (step 9), so duplicates are caught. No data loss, at most a slightly
+      larger prompt on the first run after a long gap.
+   5. Count tokens in *new* messages only (since watermark)
   6. If tokens < token_threshold OR turns < min_turns: return (skip)
   7. Fetch prior observations: store.get_recent_observations(days=30, limit=50)
   8. Call Observer.run(conversation, prior_observations)
@@ -298,10 +306,11 @@ a configurable timer — not per-turn.
 from coremem.reflector import ReflectorPipeline
 
 reflector = ReflectorPipeline(
-    store=store,                            # reads observations, writes reflections
-    model="openai:gpt-4o",                 # strong model for reasoning
-    interval_hours=24,                      # how often to run (default)
-    min_observations=10,                    # skip if fewer observations (default)
+    store=store,                        # reads observations, writes reflections
+    model="openai:gpt-4o",             # strong model for reasoning
+    embedding_fn=embed,                # for quality gate cosine similarity
+    interval_hours=24,                  # how often to run (default)
+    min_observations=10,                # skip if fewer observations (default)
 )
 
 # After each agent turn — no-op unless interval has elapsed
@@ -480,7 +489,7 @@ reflector = ReflectorPipeline(
 
 ## Migration Path
 
-1. Add `coremem/providers.py`, `coremem/memory_store.py` to CoreMem
+1. Add `coremem/providers.py`, `coremem/memory_store.py`, `coremem/observer_utils.py` to CoreMem
 2. Add `coremem/observer.py`, `coremem/reflector.py`
 3. Add `[observer]` extra to CoreMem's `pyproject.toml`: `httpx` (only new dependency)
 4. Keep EA's observation middleware as-is until CoreMem release
