@@ -21,6 +21,7 @@ Add `coremem[observer]` extra providing:
 | Module | Contents |
 |--------|----------|
 | `coremem/providers.py` | Lightweight provider factory (`create_provider("openai:gpt-4o")` → `.chat()`) |
+| `coremem/observer_utils.py` | Shared LLM helpers — JSON parsing, message formatting (used by both) |
 | `coremem/observer.py` | `Observer` + `ObserverPipeline` (per-turn fact extraction) |
 | `coremem/reflector.py` | `Reflector` + `ReflectorPipeline` (scheduled pattern discovery) |
 | `coremem/memory_store.py` | `MemoryStore` — observations + reflections tables (extracted from EA) |
@@ -105,6 +106,10 @@ everyone — Groq, Together, DeepSeek, OpenRouter, Fireworks, Mistral, Perplexit
 xAI, Cohere, Anyscale, Cerebras, etc.), it works with zero code changes.
 
 ## MemoryStore
+
+MemoryStore manages observations and reflections in its own HybridDB instance
+(separate from the conversation store used by MemoryCore). Each has its own path,
+tables, and ChromaDB indexes.
 
 ### Schema
 
@@ -207,7 +212,10 @@ after_turn():
      Messages are in natural order (most recent first via ts DESC).
   3. Filter: skip role="tool" messages (tool outputs never contain user facts)
   4. Find cutoff: locate _last_observed_id in the fetched set.
-     Messages newer than cutoff are "new".
+     Messages newer than the watermark ID are "new".
+     On first run (_last_observed_id is None), ALL messages are new.
+     If the watermark ID is not found (deleted), fall back to processing
+     up to max_messages (safe — dedup step 9 catches duplicates).
   5. Count tokens in *new* messages only (since watermark)
   6. If tokens < token_threshold OR turns < min_turns: return (skip)
   7. Fetch prior observations: store.get_recent_observations(days=30, limit=50)
@@ -253,6 +261,29 @@ class Observer:
 Prompt uses the existing `OBSERVER_PROMPT` from EA with restructuring: conversation
 text only appears once (not duplicated as both `conversation` and `previous_context`
 template variables).
+
+### Shared Utilities
+
+Both `Observer` and `Reflector` use the same LLM message format (plain `list[dict]`)
+and JSON parsing. These live in `coremem/observer_utils.py` — a separate module
+so Reflector doesn't import from Observer:
+
+```python
+# coremem/observer_utils.py
+
+def _parse_json_array(text: str) -> list[dict]:
+    """Parse LLM response as JSON array, with markdown-fence stripping."""
+    # (same logic as EA's observation.py)
+
+def _chat_messages(system: str, user: str) -> list[dict]:
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+```
+
+Both `coremem/observer.py` and `coremem/reflector.py` import from
+`coremem/observer_utils.py`. Neither depends on the other.
 
 ## ReflectorPipeline
 
@@ -333,30 +364,23 @@ comparison. CoreMem already depends on `sentence-transformers` — it reuses the
 embedding model used for semantic search. No new dependency.
 
 ```python
-from coremem.embedding import embed
+import numpy as np
 
-def _is_redundant(new_text, existing_reflections, threshold=0.9):
-    new_emb = embed(new_text)
+def _is_redundant(new_text, existing_reflections, embedding_fn, threshold=0.9):
+    new_emb = embedding_fn(new_text)
     for r in existing_reflections:
         stored_emb = r.get("embedding")
-        if stored_emb and cosine_sim(new_emb, stored_emb) > threshold:
+        if stored_emb and _cosine(new_emb, stored_emb) > threshold:
             return True
     return False
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 ```
 
-### Message Format
-
-Observer and Reflector LLM calls use plain dicts for messages — not EA's `Message`
-class (which lives in the SDK). The provider factory accepts `list[dict[str, Any]]`:
-
-```python
-response = await self._provider.chat([
-    {"role": "system", "content": "You are an Observer. Return only valid JSON."},
-    {"role": "user", "content": prompt},
-])
-```
-
-This keeps CoreMem's provider layer framework-agnostic — no dependency on EA's SDK types.
+`embedding_fn` is the same function used by HybridDB for semantic search (e.g.,
+`sentence-transformers` model). It is passed through MemoryStore → ReflectorPipeline
+at construction time. No new embedding dependency.
 
 ## Separation of Concerns
 
