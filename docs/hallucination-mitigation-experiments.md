@@ -35,6 +35,7 @@ match after stripping quotes/whitespace and lowercasing.
 | 7 | **DeepSeek V4 Pro** — larger model variant | 59% | 9.2 | 1080s | Larger model fabricates MORE (more confident output) |
 | 8 | **Two-pass extraction** — Pass 1: copy sentences, Pass 2: observe | 58% | 9.7 | 500s | Pass 1 also fabricates sentences — can't copy-paste verbatim |
 | 9 | **Tool calling** — forced structured output via `tool_calls` API | 61% | 9.3 | 189s | Schema constraint doesn't fix copy-paste capability |
+| 10 | **NLI verification** — bart-large-mnli checks source_quote → claim entailment | 60% | 9.5 | 505s | NLI gates internal consistency. Fabricated quotes are internally consistent with fabricated claims — can't detect co-fabrication |
 
 ## Root Cause
 
@@ -51,32 +52,32 @@ paraphrasing, not copy-paste.
 
 ## What Worked
 
-The **source quote gate** infrastructure is solid:
+The **source quote gate** and **NLI gate** form a two-layer defense:
 
-1. Prompt requires `source_quote` field in every observation
-2. Post-hoc verification checks quote exists verbatim in source conversation text
-3. Observations without verifiable quotes are dropped
+| Gate | What it catches | Catch rate |
+|------|----------------|-----------|
+| Source quote | Fabricated quotes not verbatim in source | ~20% |
+| NLI entailment | Real quotes that don't logically support the claim (internal inconsistency) | ~5% |
+| **Combined** | Different failure modes, complementary | ~25% |
 
-This gate is model-agnostic and will work with any LLM. It currently catches
-fabricated quotes at a ~40% rate (drops false positives but can't eliminate
-upstream fabrication).
+Both gates are model-agnostic. The NLI gate uses `bart-large-mnli` (1.6GB,
+optional, fail-open if `transformers` not installed). Neither catches the
+dominant failure mode: co-fabrication where the LLM invents both quote AND
+claim together in an internally consistent pair.
 
 ## Recommendations
 
-### 1. Default to a model with strong instruction-following
+### 1. Accept DeepSeek as a dev/demo model
 
-```python
-# Recommended production defaults
-Observer(model="openai:gpt-4o-mini")     # $0.15/M tokens, near-zero hallucination
-Observer(model="anthropic:claude-haiku") # $0.25/M tokens, strong JSON compliance
-```
+The gate infrastructure provides defense-in-depth. For development and demos,
+DeepSeek at 34-63% hallucination is acceptable if users understand the
+limitation. For production, a stronger model is needed.
 
-These models have significantly better "copy-paste verbatim" capability.
+### 2. Keep all three gates for defense-in-depth
 
-### 2. Keep the gate for defense-in-depth
-
-The source_quote gate adds a safety layer that catches edge cases even with
-strong models. Mem0 and other systems don't have this — they just trust the LLM.
+- **Source quote gate** (always on) — catches fabricated quotes
+- **NLI gate** (optional, `pip install coremem[observer]`) — catches internal inconsistency
+- **String similarity dedup** (always on) — catches near-duplicate observations
 
 ### 3. Document model tradeoffs
 
