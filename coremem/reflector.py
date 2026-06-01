@@ -28,6 +28,7 @@ CRITICAL RULES:
 - Discover multi-observation patterns. Single facts do not need reflection.
 - If observations contradict ("lives in Seattle" vs "lives in Denver"), note the change: "Previously in Seattle, now in Denver as of DATE. Reason: ..."
 - Generate predictions where patterns warrant: "May relocate again within 2 years based on past behavior."
+- Workflow and process patterns are valuable. User_id and session_id indicate who/recurrence. Capture: "User checks Jira every Monday morning" or "Deploys via staging → Jenkins → production pipeline." Use domain="workflow" for these.
 - Quality over quantity. 3-5 meaningful reflections are better than 15 trivial ones.
 
 {observations}
