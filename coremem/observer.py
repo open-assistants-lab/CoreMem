@@ -10,14 +10,28 @@ from coremem.providers import ChatResponse, LLMProvider, create_provider
 
 logger = logging.getLogger("coremem.observer")
 
-OBSERVER_SYSTEM = (
-    "You are an Observer. Extract discrete observations about the user from "
-    "the conversation. Return ONLY a JSON array. Each observation is an object "
-    "with keys: content, priority (high/medium/low), referenced_date (or null). "
-    "Focus on: personal facts, preferences, goals, relationships, skills, "
-    "events, locations, projects, and life changes. Do not repeat existing "
-    "observations. Skip trivial remarks or assistant-only turns."
-)
+OBSERVER_PROMPT = """You are an observer agent. Your job is to extract key facts from a conversation and record them as precise, concise observations.
+
+Input: A conversation log between a user and an AI assistant.
+
+Output: A JSON array of observations. Each observation must have:
+- "id": a unique ID like "obs_<uuid>"
+- "content": ONE fact per observation, in plain English. Be exact with values (names, numbers, dates).
+- "priority": one of "\U0001f534" (high — precise value like name, address, number), "\U0001f7e1" (medium — preference, opinion), "\U0001f7e2" (low — context, trivia)
+- "referenced_date": the date mentioned in the observation content, or "" if none
+
+CRITICAL RULES:
+- One fact per observation. Do not combine multiple facts.
+- Use exact values as stated. Never paraphrase numbers or proper nouns.
+- If the user CORRECTS previously stated information, capture both as separate observations with different timestamps.
+- Skip generic chat, greetings, and meta-commentary.
+- Skip observations already observed (listed below as known).
+
+{conversation}
+
+{previous_context}
+
+Return ONLY the JSON array, no markdown wrapping, no explanation."""
 
 
 class Observer:
@@ -40,21 +54,16 @@ class Observer:
             f"- [{o.get('priority', 'medium')}] {o.get('content', '')}"
             for o in prior[:20]
         )
-        user_prompt = (
-            f"Conversation:\n\n{_format_conversation(conversation)}\n\n"
-            f"Existing observations (dedup — do not repeat):\n{prior_text or '(none)'}"
+        conv_text = "\n".join(
+            f"[{m.get('role', 'user')}] {m.get('content', '')}"
+            for m in conversation[-300:]  # keep prompt size bounded
         )
-        response = await self._provider.chat(chat_messages(OBSERVER_SYSTEM, user_prompt))
+        user_prompt = OBSERVER_PROMPT.format(
+            conversation=conv_text,
+            previous_context=f"Known observations (do not repeat):\n{prior_text or '(none)'}",
+        )
+        response = await self._provider.chat(chat_messages("", user_prompt))
         return parse_json_array(response.content)
-
-
-def _format_conversation(messages: list[dict[str, Any]]) -> str:
-    lines = []
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        lines.append(f"[{role}] {content}")
-    return "\n".join(lines)
 
 
 class ObserverPipeline:

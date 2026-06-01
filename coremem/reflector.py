@@ -13,16 +13,28 @@ from coremem.providers import create_provider
 
 logger = logging.getLogger("coremem.reflector")
 
-REFLECTOR_SYSTEM = (
-    "You discover patterns and meaning from observations about a user. "
-    "Return ONLY a JSON array of reflections. Each reflection is an object "
-    "with keys: content (the insight), domain (one of: preference, career, "
-    "lifestyle, relationship, skill, health, finance, travel, project, "
-    "education, other), linked_observation_ids (array of observation IDs "
-    "that support this reflection), confidence (0.0–1.0). "
-    "Look for: recurring themes, behavior patterns, value shifts, goal "
-    "trajectories, cross-domain connections. Do not repeat prior reflections."
-)
+REFLECTOR_PROMPT = """You are a reflection agent. Your job is to think about what you know about a user and discover patterns, relationships, and deeper meaning.
+
+Input: All observations collected about the user, plus any previous reflections for context.
+
+Output: A JSON array of reflections. Each reflection must have:
+- "id": a unique ID like "refl_<uuid>"
+- "content": A synthesized insight — not a fact, but what the facts MEAN when considered together. Patterns, contradictions, values, trajectories, predictions.
+- "domain": Category label (preference, career, lifestyle, relationship, skill, value, habit, health, finance, etc.)
+- "linked_observation_ids": List of observation IDs that support this reflection
+
+CRITICAL RULES:
+- Do NOT repeat facts. Observations already say "lives in Denver." You say WHY it matters — "Has relocated twice for family; values school quality above career."
+- Discover multi-observation patterns. Single facts do not need reflection.
+- If observations contradict ("lives in Seattle" vs "lives in Denver"), note the change: "Previously in Seattle, now in Denver as of DATE. Reason: ..."
+- Generate predictions where patterns warrant: "May relocate again within 2 years based on past behavior."
+- Quality over quantity. 3-5 meaningful reflections are better than 15 trivial ones.
+
+{observations}
+
+{previous_reflections}
+
+Return ONLY the JSON array, no markdown wrapping, no explanation."""
 
 
 class Reflector:
@@ -46,11 +58,11 @@ class Reflector:
             f"- [{r.get('domain', 'general')}] {r.get('content', '')}"
             for r in prior[:10]
         )
-        user_prompt = (
-            f"Recent observations:\n\n{obs_text}\n\n"
-            f"Prior reflections (do not repeat):\n{prior_text or '(none)'}"
+        user_prompt = REFLECTOR_PROMPT.format(
+            observations=obs_text,
+            previous_reflections=f"Prior reflections (do not repeat):\n{prior_text or '(none)'}",
         )
-        response = await self._provider.chat(chat_messages(REFLECTOR_SYSTEM, user_prompt))
+        response = await self._provider.chat(chat_messages("", user_prompt))
         return parse_json_array(response.content)
 
 
