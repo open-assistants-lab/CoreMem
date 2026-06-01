@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from hybriddb import HybridDB
-
 
 _OBSERVATIONS_SCHEMA = {
     "id": "TEXT PRIMARY KEY",
@@ -120,7 +119,7 @@ class MemoryStore:
     def insert_observations(self, items: list[dict[str, Any]]) -> list[str]:
         """Insert observations + metadata. Returns observation IDs."""
         ids = []
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for item in items:
             oid = str(uuid.uuid4())[:12]
 
@@ -160,9 +159,9 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         """Query observations LEFT JOIN metadata, returning flattened rows."""
         rows = self._db.raw_query(
-            f"SELECT o.*, m.importance, m.entities, m.priority, m.confidence "
-            f"FROM observations o "
-            f"LEFT JOIN observation_metadata m ON m.observation_id = o.id "
+            "SELECT o.*, m.importance, m.entities, m.priority, m.confidence "
+            "FROM observations o "
+            "LEFT JOIN observation_metadata m ON m.observation_id = o.id "
             + (f"WHERE {where} " if where else "")
             + f"ORDER BY o.{order_by} "
             + (f"LIMIT {limit}" if limit else ""),
@@ -241,7 +240,7 @@ class MemoryStore:
                                  session_id: str | None = None,
                                  agent_id: str | None = None) -> list[dict[str, Any]]:
         from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         return self.get_observations(ts_after=cutoff, limit=limit,
                                      user_id=user_id, session_id=session_id,
                                      agent_id=agent_id)
@@ -293,7 +292,7 @@ class MemoryStore:
     def apply_decay(self, half_life_days: int = 30) -> int:
         """Reduce scores for reflections older than N days. Returns count."""
         from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=half_life_days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=half_life_days)).isoformat()  # noqa: F841
         rows = self._db.query("reflections", where="score > 0.1", limit=1000)
         count = 0
         for row in rows:

@@ -100,8 +100,8 @@ Return ONLY a JSON object with keys: insight, domain, diversity, depth, contradi
 
 
 async def evaluate_prompts(provider: str, judge_provider: str) -> dict[str, Any]:
-    from coremem.observer import Observer, ObserverPipeline
-    from coremem.reflector import Reflector, ReflectorPipeline
+    from coremem.observer import ObserverPipeline
+    from coremem.reflector import ReflectorPipeline
 
     d1 = tempfile.mkdtemp()
     d2 = tempfile.mkdtemp()

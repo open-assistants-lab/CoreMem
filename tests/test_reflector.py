@@ -21,7 +21,6 @@ from coremem.memory_store import MemoryStore
 from coremem.providers import ChatResponse
 from coremem.reflector import ReflectorPipeline
 
-
 pytestmark = pytest.mark.asyncio
 
 

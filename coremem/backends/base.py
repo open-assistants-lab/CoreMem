@@ -18,7 +18,6 @@ class StoreBackend(ABC):
     @abstractmethod
     def ingest(self, memory: Memory, embedding: list[float] | None = None) -> str:
         """Store a memory. Returns the storage ID.
-        
         Args:
             memory: The memory to store.
             embedding: Optional pre-computed embedding vector. When provided,

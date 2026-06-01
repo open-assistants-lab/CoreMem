@@ -29,7 +29,7 @@ class TestMigration:
         assert "alignment_confidence" in columns
 
     def test_insert_observations_writes_alignment_fields(self, tmp_store):
-        ids = tmp_store.insert_observations([{
+        tmp_store.insert_observations([{
             "content": "test",
             "source_quote": "test",
             "importance": 0.5,
@@ -43,7 +43,7 @@ class TestMigration:
 
     def test_migration_is_idempotent(self):
         d = tempfile.mkdtemp()
-        store1 = MemoryStore(path=d)
+        MemoryStore(path=d)
         store2 = MemoryStore(path=d)
         columns = {r["name"] for r in store2._db.raw_query("PRAGMA table_info(observations)")}
         assert "alignment_tier" in columns

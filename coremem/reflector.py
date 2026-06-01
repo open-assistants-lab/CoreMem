@@ -173,7 +173,7 @@ class ReflectorPipeline:
             good.append(r)
 
         if good:
-            new_ids = self._store.insert_reflections(good)
+            new_ids = self._store.insert_reflections(good)  # noqa: F841
             if observations:
                 self._last_run_observation_id = observations[-1].get("id")
             self._last_run_ts = time.time()

@@ -29,10 +29,10 @@ __all__ = [
 
 # Conditionally export observer/reflector (requires httpx)
 try:
-    from coremem.observer import Observer, ObserverPipeline  # noqa: F401
-    from coremem.reflector import Reflector, ReflectorPipeline  # noqa: F401
     from coremem.memory_store import MemoryStore  # noqa: F401
+    from coremem.observer import Observer, ObserverPipeline  # noqa: F401
     from coremem.providers import create_provider  # noqa: F401
+    from coremem.reflector import Reflector, ReflectorPipeline  # noqa: F401
     __all__.extend([
         "Observer", "ObserverPipeline", "Reflector", "ReflectorPipeline",
         "MemoryStore", "create_provider",

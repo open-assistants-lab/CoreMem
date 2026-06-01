@@ -12,7 +12,7 @@ The fused ranking formula:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from coremem.backends.base import StoreBackend
 from coremem.types import Memory, SearchQuery, SearchResult
@@ -139,7 +139,7 @@ class HybridBackend(StoreBackend):
                 "user_id": m.user_id,
                 "agent_id": m.agent_id,
                 "metadata": json.dumps(m.metadata),
-                "ts": m.ts.isoformat() if m.ts else datetime.now(timezone.utc).isoformat(),
+                "ts": m.ts.isoformat() if m.ts else datetime.now(UTC).isoformat(),
             })
         self._db.insert_batch("messages", rows)
         return ids

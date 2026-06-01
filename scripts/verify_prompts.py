@@ -20,10 +20,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 import sys
 import tempfile
-from datetime import datetime, timezone
 
 # ── Test conversations ────────────────────────────────────────────────────
 
@@ -214,7 +212,7 @@ async def main():
             )
             try:
                 reflections = await reflector.run_now()
-            except Exception as e:
+            except Exception:
                 reflections = []
             if reflections:
                 reflector_score = score_reflector(reflections)

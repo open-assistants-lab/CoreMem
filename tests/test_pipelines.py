@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,7 +11,6 @@ import pytest
 from coremem.observer import ObserverPipeline
 from coremem.providers import ChatResponse
 from coremem.types import Memory
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -22,8 +20,8 @@ pytestmark = pytest.mark.asyncio
 
 def _make_core_with_messages(messages: list[Memory]):
     """Create a MemoryCore-like stub that returns the given messages from fetch()."""
-    from coremem.core import MemoryCore
     from coremem.backends.hybrid import HybridBackend
+    from coremem.core import MemoryCore
     d = tempfile.mkdtemp()
     backend = HybridBackend(path=d)
     core = MemoryCore(backend=backend)
@@ -83,7 +81,7 @@ def _mock_fabricated_tool_response() -> ChatResponse:
 
 class TestObserverPipelineAlignment:
     async def test_valid_quote_is_inserted_with_alignment_tier(self):
-        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
         messages = [
             Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
         ]
@@ -111,7 +109,7 @@ class TestObserverPipelineAlignment:
             store._test_cleanup()
 
     async def test_fabricated_quote_is_dropped(self):
-        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
         messages = [
             Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
         ]
@@ -136,7 +134,7 @@ class TestObserverPipelineAlignment:
             store._test_cleanup()
 
     async def test_below_token_threshold_skips(self):
-        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
         messages = [
             Memory(id="m1", role="user", content="Short", ts=ts),
         ]
@@ -154,7 +152,7 @@ class TestObserverPipelineAlignment:
             store._test_cleanup()
 
     async def test_dedup_against_prior_observations(self):
-        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
         messages = [
             Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
         ]
