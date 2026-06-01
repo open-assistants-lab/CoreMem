@@ -25,10 +25,17 @@ class LLMProvider(Protocol):
 
 
 class ChatResponse:
-    def __init__(self, content: str, model: str = "", usage: dict[str, int] | None = None):
+    def __init__(
+        self,
+        content: str,
+        model: str = "",
+        usage: dict[str, int] | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ):
         self.content = content
         self.model = model
         self.usage = usage or {}
+        self.tool_calls = tool_calls
 
 
 # ── Adapters ──────────────────────────────────────────────────────────────
@@ -81,7 +88,7 @@ class _OpenAIAdapter:
             "messages": messages,
             "tools": tools,
             "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
-            "temperature": 0.0,
+            "temperature": 0.1,
             "thinking": {"type": "disabled"},
         }
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -101,6 +108,7 @@ class _OpenAIAdapter:
             content=content,
             model=data.get("model", self._model),
             usage=data.get("usage", {}),
+            tool_calls=tool_calls or None,
         )
 
 

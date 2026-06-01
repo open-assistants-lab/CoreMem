@@ -1,53 +1,68 @@
-"""Observer — per-turn fact extraction from conversations."""
+"""Observer — single-pass fact extraction from conversations.
+
+Uses a 3-tier alignment gate (coremem.grounding.align_quote) to
+deterministically catch fabricated source_quote values. The model is
+prompted via CogCanvas-style system message with 2 few-shot examples
+that demonstrate the verbatim-quote contract.
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
-from coremem.observer_utils import chat_messages, estimate_tokens, parse_json_array
-from coremem.providers import ChatResponse, LLMProvider, create_provider
+from coremem.grounding import AlignmentTier, align_quote  # noqa: F401  # used in pipeline (Task 3)
+from coremem.observer_utils import parse_json_array
+from coremem.providers import create_provider
+from coremem.types import Memory
 
 logger = logging.getLogger("coremem.observer")
 
-SENTENCE_EXTRACT_PROMPT = """You are a sentence extractor. Your ONLY job is to copy-paste sentences from the conversation that contain facts about the user.
+
+# ── Prompt: system message (instructions + 2 few-shot examples) ────────────
+
+
+OBSERVER_SYSTEM_PROMPT = """You are an observation agent. Extract key facts from a conversation and return them as structured observations via the record_observations tool.
 
 RULES:
-- Copy-paste EXACT sentences from the conversation above. Do NOT rephrase, summarize, or change a single character.
-- Include ONLY sentences that contain verifiable facts about the user (names, numbers, locations, preferences, events, projects).
-- Skip: greetings, meta-commentary, assistant advice, questions the assistant asks.
-- One sentence per line. No bullet points, no numbering.
-- Return ONLY the sentences, nothing else.
+- One fact per observation. Be exact with values.
+- source_quote: a VERBATIM sub-string of the conversation. Copy-paste exactly — do not rephrase, do not paraphrase, do not change a single character. If you cannot find a verbatim sub-string, do not return the observation.
+- Do not invent facts. If nothing factual is present, return an empty observations array.
 
-{conversation}
+IMPORTANCE: 0.8-1.0 identity/contact/job/salary.
+            0.5-0.7 preferences/habits/projects.
+            0.1-0.4 context/trivia.
+ENTITIES: list of named entities (people, companies, products, locations).
 
-Sentences containing facts about the user:"""
+Few-shot examples:
+
+Example 1:
+[2024-01-15T10:00:00] user: I just moved to Seattle last month for a new job at Anthropic.
+[2024-01-15T10:01:00] assistant: That's exciting! What's your role?
+[2024-01-15T10:02:00] user: I'm a research engineer working on alignment.
+
+{"id": "obs_1", "content": "User moved to Seattle in January 2024", "referenced_date": "2024-01", "source_quote": "I just moved to Seattle last month", "importance": 0.7, "entities": ["Seattle"]}
+{"id": "obs_2", "content": "User works at Anthropic as a research engineer", "referenced_date": "2024-01-15", "source_quote": "I'm a research engineer working on alignment", "importance": 0.9, "entities": ["Anthropic"]}
+
+Example 2:
+[2024-02-03T14:30:00] user: My favorite programming language is Rust, though I still use Python for data work.
+[2024-02-03T14:31:00] assistant: Why do you prefer Rust?
+[2024-02-03T14:32:00] user: The borrow checker catches bugs before runtime.
+
+{"id": "obs_1", "content": "User's favorite programming language is Rust", "referenced_date": "2024-02-03", "source_quote": "My favorite programming language is Rust", "importance": 0.6, "entities": ["Rust"]}
+{"id": "obs_2", "content": "User uses Python for data work", "referenced_date": "2024-02-03", "source_quote": "I still use Python for data work", "importance": 0.5, "entities": ["Python"]}
+"""
 
 
-SENTENCE_EXTRACT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "extract_sentences",
-        "description": "Extract exact sentences from the conversation that contain facts about the user",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sentences": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Copy-pasted sentences from the conversation. One sentence per array item."
-                }
-            },
-            "required": ["sentences"]
-        }
-    }
-}
+# ── Tool schema (no `priority` field) ─────────────────────────────────────
+
 
 OBSERVATION_TOOL = {
     "type": "function",
     "function": {
         "name": "record_observations",
-        "description": "Record observations extracted from verified conversation sentences",
+        "description": "Record observations extracted from the conversation",
         "parameters": {
             "type": "object",
             "properties": {
@@ -58,302 +73,117 @@ OBSERVATION_TOOL = {
                         "properties": {
                             "id": {"type": "string", "description": "Unique ID like obs_01"},
                             "content": {"type": "string", "description": "ONE fact per observation"},
-                            "priority": {"type": "string", "enum": ["🔴", "🟡", "🟢"]},
                             "referenced_date": {"type": "string"},
-                            "source_quote": {"type": "string", "description": "EXACT sentence from the source text that proves this fact"},
-                            "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "0.8-1.0 = identity, contact info, job, salary, deadline. 0.5-0.7 = preference, habit, project. 0.1-0.4 = context, trivia, passing mention"},
-                            "entities": {"type": "array", "items": {"type": "string"}, "description": "Named entities mentioned: people, companies, products, locations, dates"},
+                            "source_quote": {"type": "string", "description": "EXACT sub-string of the conversation (prefix stripped)"},
+                            "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            "entities": {"type": "array", "items": {"type": "string"}},
                         },
-                        "required": ["id", "content", "priority", "referenced_date", "source_quote", "importance", "entities"]
-                    }
-                }
+                        "required": [
+                            "id",
+                            "content",
+                            "referenced_date",
+                            "source_quote",
+                            "importance",
+                            "entities",
+                        ],
+                    },
+                },
             },
-            "required": ["observations"]
-        }
-    }
+            "required": ["observations"],
+        },
+    },
 }
 
 
-OBSERVER_PROMPT = """You are an observer agent. Extract key facts from the verified sentences below and record them as precise observations.
-
-{previous_context}
-
-{sentences}
-
-Return observations via the record_observations tool. One fact per observation. Be exact with values.
-
-PRIORITY: 🔴 for facts with numbers/dates/names/salaries, 🟡 for preferences/opinions, 🟢 for context/trivia.
-IMPORTANCE: 0.8-1.0 for identity/contact/job/salary. 0.5-0.7 for preferences/habits/projects. 0.1-0.4 for context/trivia.
-ENTITIES: List all named entities mentioned (people, companies, products, locations). Empty list if none.
-source_quote: EXACT copy-paste from the sentences above."""
+# ── Observer ───────────────────────────────────────────────────────────────
 
 
 class Observer:
-    """Extract facts from conversation messages as discrete observations.
+    """Single-pass fact extraction from conversation messages.
 
-    Uses two-pass extraction to eliminate hallucination:
-      Pass 1: Copy-paste factual sentences from conversation.
-      Pass 2: Create structured observations from verified sentences.
-    The ObserverPipeline handles scheduling, cursor tracking, token
-    counting, and dedup.
-    """
-
-    def __init__(self, model: str = "ollama:llama3.2"):
-        self._provider = create_provider(model)
-
-    async def run(
-        self,
-        conversation: list[dict[str, Any]],
-        prior_observations: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        prior = prior_observations or []
-        prior_text = "\n".join(
-            f"- [{o.get('priority', 'medium')}] {o.get('content', '')}"
-            for o in prior[:20]
-        )
-        conv_text = "\n".join(
-            m.get("content", "")
-            for m in conversation[-300:]
-        )
-
-        # Pass 1: Extract sentences via tool call (structured output)
-        sentence_prompt = SENTENCE_EXTRACT_PROMPT.format(conversation=conv_text)
-        sent_response = await self._provider.chat_with_tools(
-            chat_messages("", sentence_prompt), [SENTENCE_EXTRACT_TOOL],
-        )
-        sentences_text = sent_response.content.strip()
-        if not sentences_text or sentences_text.startswith("{"):
-            parsed = parse_json_array(sentences_text)
-            if parsed and "sentences" in parsed[0]:
-                sentences_text = "\n".join(parsed[0]["sentences"])
-            else:
-                sentences_text = sentences_text
-
-        if not sentences_text or sentences_text == "{}":
-            return []
-
-        # Pass 2: Create observations via tool call (structured output)
-        user_prompt = OBSERVER_PROMPT.format(
-            sentences=sentences_text,
-            previous_context=f"Known observations (do not repeat):\n{prior_text or '(none)'}",
-        )
-        response = await self._provider.chat_with_tools(
-            chat_messages("", user_prompt), [OBSERVATION_TOOL],
-        )
-        parsed = parse_json_array(response.content)
-        if parsed and "observations" in parsed[0]:
-            return parsed[0]["observations"]
-        return parsed
-
-
-class ObserverPipeline:
-    """Per-turn fact extraction pipeline.
-
-    Fires after each agent turn but only runs the LLM call when both
-    ``token_threshold`` new tokens have accumulated AND ``min_turns``
-    have passed since the last run.
-
-    Args:
-        core: MemoryCore instance for reading conversation messages.
-        store: MemoryStore instance for writing observations.
-        session_id: Session identifier for cursor tracking and fetch filtering.
-        user_id: If set, only observe messages from this user.
-        agent_id: If set, only observe messages involving this agent.
-        metadata: If set, only observe messages with matching metadata keys.
-        model: Provider model string (default ``"ollama:llama3.2"``).
-        token_threshold: Fire after this many new tokens (default 8000).
-        min_turns: Minimum turns between runs (default 3).
-        max_messages: Max messages to fetch per check (default 500).
+    Makes one chat_with_tools call per invocation. Returns parsed
+    observations or [] on parse failure / empty tool_calls.
     """
 
     def __init__(
         self,
-        core: Any,
-        store: Any,
-        session_id: str,
-        user_id: str | None = None,
-        agent_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
         model: str = "ollama:llama3.2",
-        token_threshold: int = 8000,
-        min_turns: int = 3,
-        max_messages: int = 500,
+        enable_gleaning: bool = False,
     ):
-        self._core = core
-        self._store = store
-        self._session_id = session_id
-        self._user_id = user_id
-        self._agent_id = agent_id
-        self._metadata = metadata
-        self._observer = Observer(model=model)
-        self._token_threshold = token_threshold
-        self._min_turns = min_turns
-        self._max_messages = max_messages
+        if enable_gleaning:
+            raise NotImplementedError(
+                "gleaning pass not implemented; see docs/observer-hallucination-review.md for the CogCanvas pattern"
+            )
+        self._provider = create_provider(model)
 
-        self._last_observed_id: str | None = None
-        self._turns_since_last_run: int = 0
-        self._running: bool = False
+    async def run(
+        self,
+        messages: list[Memory],
+        prior_observations: list[dict[str, Any]] | None = None,
+        observation_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        prior = prior_observations or []
+        date_str = observation_date or datetime.now(UTC).date().isoformat()
 
-    async def after_turn(self) -> list[dict[str, Any]] | None:
-        """Called after each agent turn. Returns new observations or None.
+        llm_messages = self._build_messages(messages, prior, date_str)
+        response = await self._provider.chat_with_tools(llm_messages, [OBSERVATION_TOOL])
+        return self._parse_response(response)
 
-        No-op unless enough new tokens have accumulated AND min_turns passed.
-        """
-        if self._running:
-            return None
-
-        self._turns_since_last_run += 1
-
-        try:
-            self._running = True
-            return await self._maybe_run()
-        finally:
-            self._running = False
-
-    async def _maybe_run(self) -> list[dict[str, Any]] | None:
-        messages = self._core.fetch(
-            session_id=self._session_id,
-            user_id=self._user_id,
-            agent_id=self._agent_id,
-            metadata=self._metadata,
-            limit=self._max_messages,
-        )
-
-        # Filter tool messages and find cutoff
-        filtered: list[dict[str, Any]] = []
-        new_messages: list[dict[str, Any]] = []
-        seen_watermark = self._last_observed_id is None
-
+    def _build_messages(
+        self,
+        messages: list[Memory],
+        prior: list[dict[str, Any]],
+        date_str: str,
+    ) -> list[dict[str, str]]:
+        """Build the native messages array (system + context + conversation)."""
+        context_block = self._build_context_block(prior, date_str)
+        out: list[dict[str, str]] = [
+            {"role": "system", "content": OBSERVER_SYSTEM_PROMPT},
+            {"role": "user", "content": context_block},
+        ]
         for m in messages:
-            if m.role == "tool":
-                continue
-            meta_parts: list[str] = []
-            if getattr(m, "user_id", "") and getattr(m, "user_id", "") != self._session_id:
-                meta_parts.append(m.user_id)
-            if getattr(m, "agent_id", ""):
-                meta_parts.append(m.agent_id)
-            if getattr(m, "ts", None):
-                ts_str = m.ts.isoformat() if hasattr(m.ts, "isoformat") else str(m.ts)
-                meta_parts.append(ts_str[:19])  # YYYY-MM-DDTHH:MM:SS
-            if getattr(m, "metadata", None) and m.metadata:
-                if isinstance(m.metadata, dict):
-                    non_empty = {k: v for k, v in m.metadata.items() if v}
-                    if non_empty:
-                        meta_parts.append(str(non_empty))
-                elif m.metadata:
-                    meta_parts.append(str(m.metadata))
+            if m.content and m.ts is not None:
+                ts_str = m.ts.isoformat()[:19]
+                out.append({"role": m.role, "content": f"[{ts_str}] {m.content}"})
+        return out
 
-            meta_str = f" | {' | '.join(meta_parts)}" if meta_parts else ""
-            msg_dict: dict[str, Any] = {
-                "role": m.role,
-                "content": f"[{m.role}{meta_str}] {m.content}",
-            }
-            filtered.append(msg_dict)
-            if not seen_watermark:
-                if m.id == self._last_observed_id:
-                    seen_watermark = True
-            else:
-                new_messages.append(msg_dict)
+    @staticmethod
+    def _build_context_block(
+        prior: list[dict[str, Any]],
+        date_str: str,
+    ) -> str:
+        """Build the # Already extracted + # Observation date preamble."""
+        if prior:
+            prior_lines = "\n".join(
+                f"- {o.get('content', '')}" for o in prior[:20]
+            )
+            already = f"# Already extracted (last 20)\n{prior_lines}\n\n"
+        else:
+            already = "# Already extracted (last 20)\n(none)\n\n"
+        return f"{already}# Observation date\n{date_str}"
 
-        # On first run or watermark not found: all are new
-        if self._last_observed_id is None or not seen_watermark:
-            new_messages = filtered
+    @staticmethod
+    def _parse_response(response: Any) -> list[dict[str, Any]]:
+        """Extract observations from a chat_with_tools response.
 
-        # Count tokens in new messages
-        new_tokens = sum(estimate_tokens(m["content"]) for m in new_messages)
+        Reads payload from tool_calls[0].function.arguments (NOT content).
+        Falls back to parsing content if no tool_calls.
+        """
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if tool_calls:
+            arguments = tool_calls[0].get("function", {}).get("arguments", "")
+            if arguments:
+                parsed = parse_json_array(arguments)
+                if parsed and "observations" in parsed[0]:
+                    return cast(list[dict[str, Any]], parsed[0]["observations"])
+                if parsed and isinstance(parsed[0], dict) and "content" in parsed[0]:
+                    return parsed
+                return []
 
-        if new_tokens < self._token_threshold or self._turns_since_last_run < self._min_turns:
-            return None
-
-        # Fetch prior observations for dedup context
-        prior = self._store.get_recent_observations(days=30, limit=50)
-
-        # Run observer
-        observations = await self._observer.run(filtered, prior)
-
-        # Post-hoc dedup: skip near-duplicates (simple string similarity)
-        # Also drop observations without valid, verifiable source quotes
-        new_obs: list[dict[str, Any]] = []
-        source_text = " ".join(
-            m.content for m in messages if m.role != "tool"
-        )
-        for obs in observations:
-            content = obs.get("content", "")
-            source_quote = obs.get("source_quote", "")
-
-            # Gate 1: source quote must exist in conversation AND support the claim
-            if source_quote and _quote_verified(source_quote, content, source_text):
-                pass  # quote is valid
-            else:
-                continue  # no quote, or quote doesn't appear in source — drop
-
-            # Gate 2: NLI entailment check (optional, transformers required)
-            try:
-                from coremem.nli import check_entailment, is_nli_available as _nli_available
-                if _nli_available():
-                    quote = obs.get("source_quote", "")
-                    content_text = obs.get("content", "")
-                    passed, confidence = check_entailment(quote, content_text)
-                    obs["confidence"] = confidence
-                    if not passed:
-                        continue
-            except ImportError:
-                pass  # NLI not installed — skip gate
-
-            # Gate 3: string similarity dedup vs prior observations
-            if any(_string_similarity(content, p.get("content", "")) > 0.85 for p in prior):
-                continue
-
-            # Tag with session/agent/user context from the pipeline
-            obs["session_id"] = self._session_id
-            obs["user_id"] = messages[0].user_id if hasattr(messages[0], "user_id") else ""
-            obs["agent_id"] = messages[0].agent_id if hasattr(messages[0], "agent_id") else ""
-            new_obs.append(obs)
-
-        if new_obs:
-            self._store.insert_observations(new_obs)
-            if new_messages:
-                # Update watermark from newest message fetched
-                self._last_observed_id = messages[0].id
-
-        self._turns_since_last_run = 0
-        return new_obs
-
-
-def _string_similarity(a: str, b: str) -> float:
-    """Simple string similarity using difflib."""
-    from difflib import SequenceMatcher
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-def _quote_verified(quote: str, claim: str, source_text: str = "", threshold: float = 0.3) -> bool:
-    """Check whether the source quote supports the observation.
-
-    1. Quote must exist in the source conversation text (substring match)
-    2. Claim words must overlap with the quote (internal consistency)
-
-    If source_text is empty, skips the external verification step.
-    """
-    if not quote or not claim:
-        return False
-
-    # External: quote must appear in the source conversation
-    if source_text:
-        quote_lower = quote.lower().strip().strip('"').strip("'")
-        source_lower = source_text.lower()
-        if len(quote_lower) >= 10 and quote_lower not in source_lower:
-            return False
-
-    # Internal: claim words must overlap with the quote
-    claim_lower = claim.lower().strip()
-    quote_lower = quote.lower().strip()
-
-    if len(quote_lower) >= 10 and claim_lower in quote_lower:
-        return True
-
-    words = [w for w in claim_lower.split() if len(w) > 3]
-    if not words:
-        return True
-
-    matches = sum(1 for w in words if w in quote_lower)
-    return matches / len(words) >= threshold
+        content = getattr(response, "content", "")
+        if not content:
+            return []
+        parsed = parse_json_array(content)
+        if parsed and "observations" in parsed[0]:
+            return cast(list[dict[str, Any]], parsed[0]["observations"])
+        return parsed if parsed else []

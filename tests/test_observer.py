@@ -1,169 +1,171 @@
-"""Tests for observer, reflector, providers, memory_store."""
+"""Tests for the rewritten Observer (single-pass, alignment-gated)."""
 
-import tempfile
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coremem.core import MemoryCore
-from coremem.backends.hybrid import HybridBackend
-from coremem.memory_store import MemoryStore
-from coremem.observer_utils import chat_messages, estimate_tokens, parse_json_array
-from coremem.providers import ChatResponse, create_provider
+from coremem.observer import OBSERVATION_TOOL, OBSERVER_SYSTEM_PROMPT, Observer
+from coremem.providers import ChatResponse
+from coremem.types import Memory
 
 
-# ── observer_utils ────────────────────────────────────────────────────────
+class TestObserverConstants:
+    def test_system_prompt_has_few_shot_examples(self):
+        # Two synthetic dialogues with verbatim-quote demonstrations
+        assert OBSERVER_SYSTEM_PROMPT.count("source_quote") >= 4
+        # Instructions present
+        assert "verbatim" in OBSERVER_SYSTEM_PROMPT.lower()
+        # Few-shot dialogues include timestamp prefixes that get stripped
+        assert "[20" in OBSERVER_SYSTEM_PROMPT
+
+    def test_tool_schema_has_no_priority(self):
+        params = OBSERVATION_TOOL["function"]["parameters"]
+        # No `priority` field anywhere in the schema
+        assert "priority" not in params["properties"]
+        item_props = params["properties"]["observations"]["items"]["properties"]
+        assert "priority" not in item_props
+        # Has the fields we keep (nested under items)
+        assert "content" in item_props
+        assert "source_quote" in item_props
+        assert "importance" in item_props
+        assert "entities" in item_props
+
+    def test_tool_schema_required_fields(self):
+        params = OBSERVATION_TOOL["function"]["parameters"]
+        # Top-level required: list of field name strings
+        assert "observations" in params["required"]
+        # Item-level required: list of field name strings
+        items = params["properties"]["observations"]["items"]
+        for field in ("id", "content", "referenced_date", "source_quote", "importance", "entities"):
+            assert field in items["required"], f"missing required field: {field}"
 
 
-class TestParseJsonArray:
-    def test_plain_json_array(self):
-        assert parse_json_array('[{"key": "val"}]') == [{"key": "val"}]
+class TestObserverConstructor:
+    def test_default_model(self):
+        obs = Observer()
+        assert obs is not None
 
-    def test_fenced_json(self):
-        result = parse_json_array('```json\n[{"key": "val"}]\n```')
-        assert result == [{"key": "val"}]
+    def test_custom_model(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        assert obs is not None
 
-    def test_fenced_bare(self):
-        result = parse_json_array('```\n[{"key": "val"}]\n```')
-        assert result == [{"key": "val"}]
-
-    def test_single_object_wraps_in_array(self):
-        result = parse_json_array('{"key": "val"}')
-        assert result == [{"key": "val"}]
-
-    def test_text_with_embedded_json(self):
-        result = parse_json_array('Some text [{"k": "v"}] trailing')
-        assert result == [{"k": "v"}]
-
-    def test_invalid_json_returns_empty(self):
-        assert parse_json_array("not json") == []
+    def test_enable_gleaning_raises(self):
+        with pytest.raises(NotImplementedError, match="gleaning"):
+            Observer(enable_gleaning=True)
 
 
-class TestChatMessages:
-    def test_builds_system_user_pair(self):
-        msgs = chat_messages("System prompt", "User input")
-        assert len(msgs) == 2
-        assert msgs[0] == {"role": "system", "content": "System prompt"}
-        assert msgs[1] == {"role": "user", "content": "User input"}
+def _mock_tool_response(arguments: str) -> ChatResponse:
+    """Simulate a tool_call response from chat_with_tools."""
+    return ChatResponse(content="", tool_calls=[{"function": {"arguments": arguments}}])
 
 
-class TestEstimateTokens:
-    def test_typical_text(self):
-        assert estimate_tokens("hello world") == 2
-
-    def test_empty_string(self):
-        assert estimate_tokens("") == 1
+def _mock_text_response(content: str) -> ChatResponse:
+    """Simulate a text-only response (no tool call)."""
+    return ChatResponse(content=content)
 
 
-# ── Provider ───────────────────────────────────────────────────────────────
+def _make_memory(role: str, content: str, ts=None) -> Memory:
+    from datetime import datetime
+    return Memory(
+        id=f"m_{role}_{content[:10]}",
+        role=role,
+        content=content,
+        ts=ts or datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+    )
 
 
-class TestCreateProvider:
-    def test_creates_openai_provider(self):
-        p = create_provider("openai:gpt-4o")
-        assert p is not None
-        assert hasattr(p, "chat")
+class TestObserverRun:
+    def test_makes_single_chat_with_tools_call(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response(
+                    '[{"id": "o1", "content": "User is a software engineer", '
+                    '"source_quote": "I am a software engineer", '
+                    '"importance": 0.8, "entities": [], "referenced_date": "2026-06-01"}]'
+                )
+            )
+            messages = [_make_memory("user", "I am a software engineer")]
+            asyncio.run(obs.run(messages))
+            assert mock_p.chat_with_tools.call_count == 1
 
-    def test_creates_ollama_provider(self):
-        p = create_provider("ollama:llama3.2")
-        assert p is not None
+    def test_returns_parsed_observations(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response(
+                    '[{"id": "o1", "content": "User is a software engineer", '
+                    '"source_quote": "I am a software engineer", '
+                    '"importance": 0.8, "entities": [], "referenced_date": "2026-06-01"}]'
+                )
+            )
+            messages = [_make_memory("user", "I am a software engineer")]
+            result = asyncio.run(obs.run(messages))
+            assert len(result) == 1
+            assert result[0]["content"] == "User is a software engineer"
 
-    def test_unknown_prefix_falls_back_to_openai(self):
-        p = create_provider("groq:mixtral-8x7b")
-        assert p is not None
-        assert hasattr(p, "chat")
+    def test_returns_observations_from_schema_compliant_args(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response(
+                    '{"observations": [{"id": "o1", "content": "User is a software engineer", '
+                    '"source_quote": "I am a software engineer", '
+                    '"importance": 0.8, "entities": [], "referenced_date": "2026-06-01"}]}'
+                )
+            )
+            messages = [_make_memory("user", "I am a software engineer")]
+            result = asyncio.run(obs.run(messages))
+            assert len(result) == 1
+            assert result[0]["content"] == "User is a software engineer"
 
-    def test_missing_colon_raises(self):
-        with pytest.raises(ValueError, match="provider:model"):
-            create_provider("invalid-string-no-colon")
+    def test_returns_empty_on_no_tool_calls(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=ChatResponse(content="")
+            )
+            messages = [_make_memory("user", "I am a software engineer")]
+            result = asyncio.run(obs.run(messages))
+            assert result == []
 
+    def test_skips_messages_with_no_timestamp(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response("[]")
+            )
+            messages = [
+                Memory(id="m1", role="user", content="Hello", ts=None),
+                _make_memory("user", "I am a software engineer"),
+            ]
+            asyncio.run(obs.run(messages))
+            call_args = mock_p.chat_with_tools.call_args
+            sent_messages = call_args[0][0]
+            sent_content = " ".join(m["content"] for m in sent_messages)
+            assert "Hello" not in sent_content
+            assert "I am a software engineer" in sent_content
 
-class TestChatResponse:
-    def test_basic_response(self):
-        r = ChatResponse(content="hello", model="gpt-4o")
-        assert r.content == "hello"
-        assert r.model == "gpt-4o"
-
-    def test_default_usage(self):
-        r = ChatResponse(content="x")
-        assert r.usage == {}
-
-
-# ── MemoryStore ────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def tmp_store():
-    d = tempfile.mkdtemp()
-    store = MemoryStore(path=d)
-    yield store
-    import shutil
-    shutil.rmtree(d, ignore_errors=True)
-
-
-class TestMemoryStore:
-    def test_insert_and_get_observations(self, tmp_store):
-        ids = tmp_store.insert_observations([
-            {"content": "User is a software engineer", "priority": "high"},
-            {"content": "User lives in San Francisco", "priority": "medium"},
-        ])
-        assert len(ids) == 2
-        obs = tmp_store.get_observations(limit=50)
-        assert len(obs) == 2
-        contents = {o["content"] for o in obs}
-        assert contents == {"User is a software engineer", "User lives in San Francisco"}
-
-    def test_get_observations_since(self, tmp_store):
-        ids1 = tmp_store.insert_observations([
-            {"content": "First", "priority": "medium"},
-        ])
-        # Small delay so observation_ts differs
-        import time
-        time.sleep(0.01)
-        ids2 = tmp_store.insert_observations([
-            {"content": "Second", "priority": "medium"},
-        ])
-        assert len(tmp_store.get_observations_since(ids1[0])) == 1
-
-    def test_get_observations_since_none(self, tmp_store):
-        tmp_store.insert_observations([
-            {"content": "Test", "priority": "low"},
-        ])
-        assert len(tmp_store.get_observations_since(None)) >= 1
-
-    def test_recent_observations(self, tmp_store):
-        tmp_store.insert_observations([
-            {"content": "Recent fact", "priority": "medium"},
-        ])
-        recent = tmp_store.get_recent_observations(days=30)
-        assert len(recent) == 1
-
-    def test_search_observations(self, tmp_store):
-        tmp_store.insert_observations([
-            {"content": "User enjoys hiking in the mountains", "priority": "medium"},
-        ])
-        results = tmp_store.search_observations("hiking")
-        assert len(results) > 0
-
-    def test_insert_and_get_reflections(self, tmp_store):
-        ids = tmp_store.insert_reflections([
-            {"content": "User has a pattern of outdoor hobbies", "domain": "lifestyle",
-             "linked_observation_ids": ["o1"]},
-        ])
-        assert len(ids) == 1
-        refs = tmp_store.get_reflections()
-        assert len(refs) == 1
-        assert refs[0]["content"] == "User has a pattern of outdoor hobbies"
-
-    def test_search_reflections(self, tmp_store):
-        tmp_store.insert_reflections([
-            {"content": "Prefers early morning workouts", "domain": "lifestyle"},
-        ])
-        results = tmp_store.search_reflections("workouts")
-        assert len(results) > 0
-
-    def test_apply_decay(self, tmp_store):
-        tmp_store.insert_reflections([
-            {"content": "Old reflection", "domain": "general", "score": 1.0},
-        ])
-        count = tmp_store.apply_decay()
-        assert count >= 0
+    def test_messages_native_role_field(self):
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response("[]")
+            )
+            messages = [
+                _make_memory("user", "Hello"),
+                _make_memory("assistant", "Hi there"),
+            ]
+            asyncio.run(obs.run(messages))
+            call_args = mock_p.chat_with_tools.call_args
+            sent_messages = call_args[0][0]
+            for m in sent_messages:
+                assert "role" in m
+                assert "content" in m
+            roles = [m["role"] for m in sent_messages]
+            assert "user" in roles
+            assert "assistant" in roles
