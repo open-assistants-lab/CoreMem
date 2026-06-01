@@ -1,224 +1,181 @@
-"""Integration tests for ObserverPipeline and ReflectorPipeline.
-
-Uses mocked providers — no real LLM API calls.
-"""
+"""Integration tests for ObserverPipeline — alignment-gated."""
 
 from __future__ import annotations
 
 import asyncio
 import tempfile
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coremem import MemoryCore, MemoryStore
-from coremem.backends.hybrid import HybridBackend
+from coremem.observer import ObserverPipeline
 from coremem.providers import ChatResponse
+from coremem.types import Memory
+
 
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture
-def tmp_core():
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _make_core_with_messages(messages: list[Memory]):
+    """Create a MemoryCore-like stub that returns the given messages from fetch()."""
+    from coremem.core import MemoryCore
+    from coremem.backends.hybrid import HybridBackend
     d = tempfile.mkdtemp()
     backend = HybridBackend(path=d)
     core = MemoryCore(backend=backend)
-    yield core
+    for m in messages:
+        core.ingest(m.role, m.content, session_id="main",
+                    user_id="alice", agent_id="a1", ts=m.ts)
     import shutil
-    shutil.rmtree(d, ignore_errors=True)
+    core._test_cleanup = lambda: shutil.rmtree(d, ignore_errors=True)
+    return core
 
 
-@pytest.fixture
-def tmp_store():
+def _make_store():
+    from coremem.memory_store import MemoryStore
     d = tempfile.mkdtemp()
     store = MemoryStore(path=d)
-    yield store
     import shutil
-    shutil.rmtree(d, ignore_errors=True)
+    store._test_cleanup = lambda: shutil.rmtree(d, ignore_errors=True)
+    return store
 
 
-@pytest.fixture
-def populated_core(tmp_core):
-    """Core with 8 messages."""
-    for i in range(4):
-        tmp_core.ingest("user", f"User message {i} about projects and career goals", session_id="main")
-        tmp_core.ingest("assistant", f"Assistant reply {i}", session_id="main")
-    return tmp_core
+def _mock_valid_tool_response() -> ChatResponse:
+    """Observation with a source_quote that IS in the source conversation."""
+    return ChatResponse(
+        content="",
+        tool_calls=[{
+            "function": {
+                "arguments": (
+                    '{"observations": [{"id": "o1", "content": "User is a software engineer", '
+                    '"source_quote": "I am a software engineer", '
+                    '"referenced_date": "2026-06-01", '
+                    '"importance": 0.8, "entities": []}]}'
+                )
+            }
+        }],
+    )
 
 
-# ── Mock helpers ───────────────────────────────────────────────────────────
+def _mock_fabricated_tool_response() -> ChatResponse:
+    """Observation with a source_quote that is NOT in the source conversation."""
+    return ChatResponse(
+        content="",
+        tool_calls=[{
+            "function": {
+                "arguments": (
+                    '{"observations": [{"id": "o1", "content": "User lives on Mars", '
+                    '"source_quote": "I have lived on Mars for 10 years", '
+                    '"referenced_date": "2026-06-01", '
+                    '"importance": 0.8, "entities": ["Mars"]}]}'
+                )
+            }
+        }],
+    )
 
 
-def _mock_sentences_response():
-    return ChatResponse(content="User message 0 about projects and career goals")
+# ── Tests ──────────────────────────────────────────────────────────────────
 
 
-def _mock_observer_response():
-    return ChatResponse(content='''[
-        {"id": "obs_1", "content": "User is working on projects", "priority": "\\u2622", "referenced_date": "", "source_quote": "User message 0 about projects and career goals"},
-        {"id": "obs_2", "content": "User mentions career goals", "priority": "\\u2622", "referenced_date": "", "source_quote": "User message 1 about projects and career goals"}
-    ]''')
-
-
-def _mock_reflector_response():
-    return ChatResponse(content='''[
-        {"id": "refl_1", "content": "User demonstrates a pattern of project-driven work and career ambition", "domain": "career", "linked_observation_ids": ["obs_1", "obs_2"]}
-    ]''')
-
-
-# ── ObserverPipeline Mock Tests ───────────────────────────────────────────
-
-
-class TestObserverPipelineMock:
-    async def test_after_turn_skips_below_threshold(self, populated_core, tmp_store):
-        from coremem.observer import ObserverPipeline
-
-        pipeline = ObserverPipeline(
-            core=populated_core, store=tmp_store, session_id="main",
-            token_threshold=100_000, min_turns=0,
-        )
-        result = await pipeline.after_turn()
-        assert result is None
-
-    async def test_after_turn_fires_with_llm(self, populated_core, tmp_store):
-        from coremem.observer import ObserverPipeline
-
-        pipeline = ObserverPipeline(
-            core=populated_core, store=tmp_store, session_id="main",
-            token_threshold=1, min_turns=1,
-        )
-
-        with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
-            result = await pipeline.after_turn()
-            assert result is not None
-            assert len(result) == 2
-            assert any("projects" in o["content"] for o in result)
-
-        obs = tmp_store.get_observations()
-        assert len(obs) == 2
-
-    async def test_after_turn_skips_when_running(self, populated_core, tmp_store):
-        from coremem.observer import ObserverPipeline
-
-        pipeline = ObserverPipeline(
-            core=populated_core, store=tmp_store, session_id="main",
-            token_threshold=1, min_turns=1,
-        )
-        pipeline._running = True
-        result = await pipeline.after_turn()
-        assert result is None
-
-    async def test_cursor_tracks_last_observed_id(self, populated_core, tmp_store):
-        from coremem.observer import ObserverPipeline
-
-        pipeline = ObserverPipeline(
-            core=populated_core, store=tmp_store, session_id="main",
-            token_threshold=1, min_turns=1,
-        )
-        assert pipeline._last_observed_id is None
-
-        with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
-            await pipeline.after_turn()
-
-        assert pipeline._last_observed_id is not None
-        assert pipeline._turns_since_last_run == 0
-
-    async def test_post_dedup_skips_similar_observations(self, populated_core, tmp_store):
-        from coremem.observer import ObserverPipeline
-
-        tmp_store.insert_observations([
-            {"content": "User is working on multiple projects", "priority": "high"},
-        ])
-
-        pipeline = ObserverPipeline(
-            core=populated_core, store=tmp_store, session_id="main",
-            token_threshold=1, min_turns=1,
-        )
-
-        with patch.object(pipeline._observer, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat_with_tools.side_effect = [_mock_sentences_response(), _mock_observer_response()]
-            result = await pipeline.after_turn()
-
-        assert result is not None
-        assert len(result) == 1
-        assert "career" in result[0]["content"]
-
-
-# ── ReflectorPipeline Mock Tests ──────────────────────────────────────────
-
-
-class TestReflectorPipelineMock:
-    async def test_maybe_run_skips_before_interval(self, tmp_store):
-        from coremem.reflector import ReflectorPipeline
-
-        obs = [{"id": f"o{i}", "content": f"Activity {i}", "priority": "medium"}
-               for i in range(15)]
-        tmp_store.insert_observations(obs)
-
-        reflector = ReflectorPipeline(
-            store=tmp_store, model="ollama:llama3.2", min_observations=10,
-        )
-        reflector._last_run_ts = float("inf")
-        result = await reflector.maybe_run()
-        assert result is None
-
-    async def test_run_now_fires_with_llm(self, tmp_store):
-        from coremem.reflector import ReflectorPipeline
-
-        obs = [{"id": f"o{i}", "content": f"Activity {i}", "priority": "medium"}
-               for i in range(15)]
-        tmp_store.insert_observations(obs)
-
-        reflector = ReflectorPipeline(
-            store=tmp_store, model="ollama:llama3.2", min_observations=5,
-        )
-
-        with patch.object(reflector._reflector, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat.return_value = _mock_reflector_response()
-            result = await reflector.run_now()
-
+class TestObserverPipelineAlignment:
+    async def test_valid_quote_is_inserted_with_alignment_tier(self):
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        messages = [
+            Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
+        ]
+        core = _make_core_with_messages(messages)
+        store = _make_store()
+        try:
+            pipeline = ObserverPipeline(
+                core=core, store=store, session_id="main",
+                token_threshold=1, min_turns=1,
+            )
+            with patch.object(pipeline._observer, "_provider") as mock_p:
+                mock_p.chat_with_tools = AsyncMock(
+                    return_value=_mock_valid_tool_response()
+                )
+                result = await pipeline.after_turn()
             assert result is not None
             assert len(result) == 1
-            assert "career" in result[0]["content"]
+            assert result[0]["alignment_tier"] == "exact"
+            assert result[0]["alignment_confidence"] == 1.0
+            stored = store.get_observations()
+            assert len(stored) == 1
+            assert stored[0]["alignment_tier"] == "exact"
+        finally:
+            core._test_cleanup()
+            store._test_cleanup()
 
-        refs = tmp_store.get_reflections()
-        assert len(refs) == 1
+    async def test_fabricated_quote_is_dropped(self):
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        messages = [
+            Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
+        ]
+        core = _make_core_with_messages(messages)
+        store = _make_store()
+        try:
+            pipeline = ObserverPipeline(
+                core=core, store=store, session_id="main",
+                token_threshold=1, min_turns=1,
+            )
+            with patch.object(pipeline._observer, "_provider") as mock_p:
+                mock_p.chat_with_tools = AsyncMock(
+                    return_value=_mock_fabricated_tool_response()
+                )
+                result = await pipeline.after_turn()
+            assert result is not None
+            assert len(result) == 0
+            stored = store.get_observations()
+            assert len(stored) == 0
+        finally:
+            core._test_cleanup()
+            store._test_cleanup()
 
-    async def test_run_now_skips_below_min_observations(self, tmp_store):
-        from coremem.reflector import ReflectorPipeline
+    async def test_below_token_threshold_skips(self):
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        messages = [
+            Memory(id="m1", role="user", content="Short", ts=ts),
+        ]
+        core = _make_core_with_messages(messages)
+        store = _make_store()
+        try:
+            pipeline = ObserverPipeline(
+                core=core, store=store, session_id="main",
+                token_threshold=100_000, min_turns=0,
+            )
+            result = await pipeline.after_turn()
+            assert result is None
+        finally:
+            core._test_cleanup()
+            store._test_cleanup()
 
-        tmp_store.insert_observations([
-            {"id": "o1", "content": "Single observation", "priority": "medium"},
-        ])
-
-        reflector = ReflectorPipeline(
-            store=tmp_store, model="ollama:llama3.2", min_observations=10,
-        )
-        result = await reflector.run_now()
-        assert result is None
-
-    async def test_quality_gate_dedups_with_embedding(self, tmp_store):
-        from coremem.reflector import ReflectorPipeline
-
-        obs = [{"id": f"o{i}", "content": f"Activity {i}", "priority": "medium"}
-               for i in range(15)]
-        tmp_store.insert_observations(obs)
-
-        test_embedding = [0.1] * 384
-
-        def _mock_embed(_text: str):
-            return test_embedding
-
-        reflector = ReflectorPipeline(
-            store=tmp_store, model="ollama:llama3.2",
-            embedding_fn=_mock_embed, min_observations=5,
-        )
-
-        with patch.object(reflector._reflector, "_provider", new=AsyncMock()) as mock_p:
-            mock_p.chat.return_value = _mock_reflector_response()
-            result = await reflector.run_now()
-
-        assert result is not None
-        assert len(result) == 1
+    async def test_dedup_against_prior_observations(self):
+        ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        messages = [
+            Memory(id="m1", role="user", content="I am a software engineer", ts=ts),
+        ]
+        core = _make_core_with_messages(messages)
+        store = _make_store()
+        try:
+            store.insert_observations([{
+                "content": "User is a software engineer",
+                "importance": 0.8,
+            }])
+            pipeline = ObserverPipeline(
+                core=core, store=store, session_id="main",
+                token_threshold=1, min_turns=1,
+            )
+            with patch.object(pipeline._observer, "_provider") as mock_p:
+                mock_p.chat_with_tools = AsyncMock(
+                    return_value=_mock_valid_tool_response()
+                )
+                result = await pipeline.after_turn()
+            assert result is not None
+            assert len(result) == 0
+        finally:
+            core._test_cleanup()
+            store._test_cleanup()

@@ -12,7 +12,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from coremem.grounding import AlignmentTier, align_quote  # noqa: F401  # used in pipeline (Task 3)
+from coremem.grounding import AlignmentTier, align_quote
 from coremem.observer_utils import parse_json_array
 from coremem.providers import create_provider
 from coremem.types import Memory
@@ -187,3 +187,138 @@ class Observer:
         if parsed and "observations" in parsed[0]:
             return cast(list[dict[str, Any]], parsed[0]["observations"])
         return parsed if parsed else []
+
+
+# ── ObserverPipeline ───────────────────────────────────────────────────────
+
+
+class ObserverPipeline:
+    """Per-turn fact extraction pipeline with alignment-gated verification.
+
+    Fires after each agent turn but only runs the LLM call when both
+    ``token_threshold`` new tokens have accumulated AND ``min_turns``
+    have passed since the last run.
+    """
+
+    def __init__(
+        self,
+        core: Any,
+        store: Any,
+        session_id: str,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        model: str = "ollama:llama3.2",
+        token_threshold: int = 8000,
+        min_turns: int = 3,
+        max_messages: int = 500,
+        enable_gleaning: bool = False,
+    ):
+        if enable_gleaning:
+            raise NotImplementedError(
+                "gleaning pass not implemented; see docs/observer-hallucination-review.md for the CogCanvas pattern"
+            )
+        self._core = core
+        self._store = store
+        self._session_id = session_id
+        self._user_id = user_id
+        self._agent_id = agent_id
+        self._metadata = metadata
+        self._observer = Observer(model=model, enable_gleaning=enable_gleaning)
+        self._token_threshold = token_threshold
+        self._min_turns = min_turns
+        self._max_messages = max_messages
+
+        self._last_observed_id: str | None = None
+        self._turns_since_last_run: int = 0
+        self._running: bool = False
+
+    async def after_turn(self) -> list[dict[str, Any]] | None:
+        """Called after each agent turn. Returns new observations or None."""
+        if self._running:
+            return None
+        self._turns_since_last_run += 1
+        try:
+            self._running = True
+            return await self._maybe_run()
+        finally:
+            self._running = False
+
+    async def _maybe_run(self) -> list[dict[str, Any]] | None:
+        messages = self._core.fetch(
+            session_id=self._session_id,
+            user_id=self._user_id,
+            agent_id=self._agent_id,
+            metadata=self._metadata,
+            limit=self._max_messages,
+        )
+
+        new_messages: list[Memory] = []
+        seen_watermark = self._last_observed_id is None
+        for m in messages:
+            if m.role == "tool":
+                continue
+            if not seen_watermark:
+                if m.id == self._last_observed_id:
+                    seen_watermark = True
+                continue
+            new_messages.append(m)
+        if not seen_watermark:
+            new_messages = [m for m in messages if m.role != "tool"]
+
+        canonical_lines: list[str] = []
+        for m in new_messages:
+            if m.content and m.ts is not None:
+                ts_str = m.ts.isoformat()[:19]
+                canonical_lines.append(f"[{ts_str}] {m.content}")
+        canonical_text = "\n".join(canonical_lines)
+
+        new_tokens = sum(_estimate_tokens_line(line) for line in canonical_lines)
+        if new_tokens < self._token_threshold or self._turns_since_last_run < self._min_turns:
+            return None
+
+        prior = self._store.get_recent_observations(days=30, limit=50)
+
+        observations = await self._observer.run(new_messages, prior)
+
+        new_obs: list[dict[str, Any]] = []
+        for obs in observations:
+            quote = obs.get("source_quote", "").strip()
+            content = obs.get("content", "").strip()
+            if not quote or not content:
+                continue
+
+            result = align_quote(quote, canonical_text)
+            if result.tier == AlignmentTier.NONE:
+                continue
+            obs["alignment_tier"] = result.tier.value
+            obs["alignment_confidence"] = result.confidence
+
+            if any(_string_similarity(content, p.get("content", "")) > 0.85 for p in prior):
+                continue
+
+            obs["session_id"] = self._session_id
+            obs["user_id"] = self._user_id or ""
+            obs["agent_id"] = self._agent_id or ""
+            new_obs.append(obs)
+
+        if new_obs:
+            self._store.insert_observations(new_obs)
+        if messages:
+            self._last_observed_id = messages[0].id
+        self._turns_since_last_run = 0
+        return new_obs
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _estimate_tokens_line(text: str) -> int:
+    """Rough token count: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
+def _string_similarity(a: str, b: str) -> float:
+    """Simple string similarity using difflib."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
