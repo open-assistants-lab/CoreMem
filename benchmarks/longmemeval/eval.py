@@ -306,6 +306,36 @@ def run_retrieval_benchmark(
                     parts.append(f"[saved {len(completed_ids)}/{len(questions)}]")
                 print(" | ".join(parts), flush=True)
 
+        except Exception as exc:
+            if verbose:
+                print(f"  [{qi+1}/{len(questions)}] {q_id}: ERROR ({exc})", flush=True)
+            # Mark as failed for both modes
+            result = {
+                "question_id": q_id,
+                "question_type": q_type,
+                "error": str(exc)[:200],
+                "modes": {m: {"recall": False, "rank": -1} for m in modes},
+            }
+            results.append(result)
+            completed_ids.add(q_id)
+            for m in modes:
+                if q_type not in type_scores:
+                    type_scores[q_type] = {}
+                if m not in type_scores[q_type]:
+                    type_scores[q_type][m] = []
+                type_scores[q_type][m].append(False)
+            failures.append({"question": q_text, "question_type": q_type, "error": str(exc)[:200]})
+
+            if output_path:
+                _save_progress(output_path, {
+                    "options": {"backend": backend, "k": k, "search_mode": search_mode},
+                    "results": results,
+                    "_type_scores": type_scores,
+                    "_failures": failures,
+                    "_completed": len(completed_ids),
+                    "_total": len(questions),
+                })
+
         finally:
             shutil.rmtree(mem_path, ignore_errors=True)
 
