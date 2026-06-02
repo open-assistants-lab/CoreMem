@@ -590,9 +590,16 @@ alignment gate is already sufficient to catch fabrications downstream.
 
 **Change:** rewrite the prompt to:
 > "Extract user-attributable facts, preferences, plans, and context. If the
-> conversation contains user statements of any kind, extract at least one
-> observation. The alignment gate will catch any fabrications downstream —
-> your job is to be liberal, not conservative."
+> conversation contains user statements of any kind, attempt to extract at
+> least one observation. If you cannot find a verbatim sub-string for a fact,
+> do not return that observation — the alignment gate handles grounding. Be
+> liberal in what you consider worth recording."
+
+The "no verbatim, no observation" rule is **preserved** (it was always a
+separate line in the 0.4.0 prompt); only the "return empty if nothing
+factual" line is removed. This prevents the model from inventing quotes
+when forced to extract at least one, while removing the conservative
+"factual" gating.
 
 **Cost:** zero code change, one prompt edit. **Impact:** single largest recall unlock.
 
@@ -602,15 +609,29 @@ The Observer currently scores `importance` per-fact, and the Reflector filters
 by threshold. The 0.4.0 Q4 finding (Observer gave 0.30/0.40 to a discrete life
 event) shows the per-fact importance signal is miscalibrated by ~0.2.
 
-**Change:**
-- Schema: `importance REAL` → `importance REAL NULL` (additive; existing rows
-  become `NULL`)
-- Observer: does NOT score importance. Returns `importance: None`.
-- Reflector: assigns `importance` to all facts and reflections with calibrated
-  anchors (0.7+ identity/life event, 0.4-0.6 preferences/plans, <0.4 throwaway).
-- Retrieval: ranks uncalibrated facts by recency+relevance until Reflector fills.
+**Important schema note:** in 0.4.0, `importance` lives in the
+`observation_metadata` table (separate from `observations`) with type `REAL`
+and **no NOT NULL constraint**. The 0.4.0 Observer always provides a value
+(via `item.get("importance", 0.5)`), so existing rows have `importance=0.5` or
+the model-emitted value — never NULL. The schema change is therefore **not a
+SQL migration**; it's a behavior change in what the Observer emits.
 
-**Cost:** ~30 lines (prompt, parse, store).
+**Change:**
+- Observer: stops providing an `importance` value. New observations have
+  `importance=NULL` in `observation_metadata`.
+- Reflector: assigns `importance` to all facts with calibrated anchors
+  (0.7+ identity/life event, 0.4-0.6 preferences/plans, <0.4 throwaway).
+- Existing 0.4.0 rows: **unchanged** — keep their existing non-null
+  `importance` values. Reflector respects non-null values and only fills
+  NULL rows.
+- Retrieval: ranks NULL-importance facts by recency+relevance until Reflector
+  fills.
+
+**Cost:** ~30 lines (prompt, parse, store, Reflector logic update).
+
+**Risks:** existing 0.4.0 callers that read `importance` will see `None` for
+new rows. Document this in the migration guide. The 0.4.0 default `0.5` is
+a "uncalibrated" sentinel; new code should treat `None` similarly.
 
 ### Delta 3 — Reflector trigger: time-based → count-based (with time fallback)
 
@@ -643,7 +664,22 @@ await pipeline.start()   # spawns background asyncio task
 await pipeline.stop()    # graceful shutdown, awaits in-flight reflection
 ```
 
-**Cost:** ~40 lines (start/stop methods, lifecycle management, idempotency).
+**Lifecycle semantics:**
+- `start()` is idempotent — calling twice is a no-op.
+- `stop()` is idempotent — calling twice is a no-op.
+- `stop()` awaits any in-flight reflection before returning (cancels cleanly
+  if already past the 30s grace period).
+- If the worker task crashes (e.g., LLM error), it auto-restarts with
+  exponential backoff (1s, 2s, 4s, ..., max 60s). Status is logged but does
+  not raise.
+- An `asyncio.Lock` ensures only one Reflector run is in flight at a time
+  (handles the count+time tie-breaker case).
+
+**Cost:** ~50 lines (start/stop methods, lifecycle, lock, restart-on-error).
+
+**Backward compat:** existing manual `maybe_run()` callers can keep calling
+it; the count-based trigger fires when `start()` is invoked, but `maybe_run()`
+remains available for callers that prefer manual scheduling.
 
 ### Delta 5 — Add `kind`, `reflected`, `source_fact_ids` to Observation
 
@@ -675,6 +711,13 @@ promotes it to default; ChromaBackend becomes legacy.
 - `coremem/__init__.py`: default `backend=HybridBackend`; fall back to
   `ChromaBackend` with `DeprecationWarning` if `hybriddb` not importable
 - `README.md`: update install snippets, remove `coremem[hybrid]` references
+
+**Deprecation timeline:**
+- 0.5.0: `HybridBackend` is default; `ChromaBackend` works with
+  `DeprecationWarning` if explicitly used
+- 0.6.0 (next major): `ChromaBackend` is removed; `HybridBackend` is the only
+  backend. The `coremem[hybrid]` extra and the deprecation warning are
+  removed.
 
 **Cost:** ~15 lines.
 
@@ -714,6 +757,13 @@ Re-run `benchmarks/longmemeval/observer_eval.py` against the 0.5.0 Observer.
 Save results to `results/eval/observer_deepseek_10q_v0.5.0.json`. Compare
 against `observer_deepseek_10q.json` baseline.
 
+**Pre-flight check:** verify the eval script reads the new `kind` and
+`reflected` fields gracefully. The script currently uses `ObserverPipeline`
+and `ReflectorPipeline` directly; it does not introspect on observation
+schema, so the new fields should be transparent. If the eval script DOES
+break (e.g., it tries to sum `importance` and crashes on `None`), update it
+to treat `None` as 0.5 (uncalibrated).
+
 **Pass criteria (all four must hold):**
 - obs/q ≥ 5.0 (was 2.0)
 - dead output < 10% (was 40%)
@@ -734,7 +784,7 @@ All 0.4.0 tests must still pass with the new schema. Existing rows treated as
 pipeline = ReflectorPipeline(store, interval_hours=24, min_observations=10)
 # manually call maybe_run() from a cron or background loop
 
-# Now (0.5.0):
+# Now (0.5.0) — recommended: use the explicit lifecycle
 pipeline = ReflectorPipeline(
     store,
     interval_hours=24,                          # still works
@@ -744,12 +794,33 @@ await pipeline.start()                         # NEW: explicit lifecycle
 # ... work happens ...
 await pipeline.stop()                          # NEW: graceful shutdown
 
+# Now (0.5.0) — alternative: keep manual scheduling (backward compatible)
+pipeline = ReflectorPipeline(
+    store,
+    interval_hours=24,
+    trigger_every_n_observations=50,            # fires when you call maybe_run()
+)
+# existing code that calls await pipeline.maybe_run() still works
+# the count-based trigger is unused in this path
+
 # Observation schema:
-#   importance: Optional[float] = None         # CHANGED: was required
+#   importance: Optional[float] = None         # CHANGED: was always populated
+#                                              # existing 0.4.0 rows keep their values
 #   kind: Literal["fact", "reflection"]         # NEW
 #   reflected: bool = False                     # NEW
 #   source_fact_ids: list[int] = []             # NEW
+
+# Code reading `importance` from new observations may now get None.
+# Treat None as 0.5 (uncalibrated) for ranking purposes, or filter
+# to `importance IS NOT NULL` for only Reflector-calibrated facts.
 ```
+
+**Recommended migration path:**
+1. Existing `maybe_run()` callers: no immediate change. Migrate to
+   `start()/stop()` at your convenience; the count-based trigger only
+   activates with `start()`.
+2. Existing importance readers: handle `None` defensively (`x or 0.5`).
+3. New 0.5.0 installs: use the `start()/stop()` lifecycle.
 
 ## Rollout plan
 
@@ -771,10 +842,11 @@ Per typical user/day, deepseek-v3.2:cloud rates:
 ## Open questions
 
 1. Should the Reflector worker be per-`MemoryStore` (per-user) or per-process
-   (centralized scheduler)? Per-store assumed; per-process would centralize.
-2. Should `enable_gleaning` CogCanvas pass get a stub in 0.5.0 or stay deferred?
-3. The 0.4.0 Reflector dedup uses cosine similarity — should we also add
-   string-similarity (already in Observer) for redundancy?
+   (centralized scheduler)? Per-store assumed; per-process would centralize
+   but complicate per-user trigger thresholds.
+2. The 0.4.0 Reflector dedup uses cosine similarity — should we also add
+   string-similarity (already in Observer) for redundancy? Defer to 0.5.1 if
+   eval shows redundancy issues.
 
 ## References
 
