@@ -1,5 +1,53 @@
 # Hallucination Mitigation Experiments
 
+## 0.4.0 Rewrite — Alignment-Gated Observer (2026-06-02)
+
+Following the review in `docs/observer-hallucination-review.md` (which
+diagnosed four concrete bugs in the prior Observer), CoreMem 0.4.0 adopts
+LangExtract's 3-tier alignment gate and CogCanvas's prompt pattern. The
+NLI module (`bart-large-mnli`) and `transformers` dependency are removed
+entirely — the alignment gate is deterministic and runs in microseconds.
+
+**Rewrite highlights:**
+- New module `coremem/grounding.py` — 3-tier alignment (`EXACT` /
+  `FUZZY` / `NONE`) with char-level `SequenceMatcher` (lowercased
+  strings; FUZZY threshold 0.75).
+- `coremem/observer.py` rewritten: single-pass extraction with
+  CogCanvas system prompt (2 few-shot examples), native messages array
+  (no JSON wrapping), `temperature=0.1`, structured output via
+  `tool_calls` API (no `priority` enum; `importance` is a float).
+- `ObserverPipeline` runs the alignment gate on every extracted
+  observation before storage. NONE observations are dropped.
+- `MemoryStore` migration: added `alignment_tier TEXT` and
+  `alignment_confidence REAL` columns to `observations` table
+  (idempotent migration on first open).
+- Reflector filter now checks `importance >= 0.5` (was using a broken
+  `priority` enum that never matched).
+
+**LongMemEval re-run (10 questions, single-session-user):**
+
+| Approach | Hallucination | Obs/Q | Time/obs |
+|----------|-------------|-------|----------|
+| Pre-0.4.0 baseline (DeepSeek V4 Flash) | 34-63% | 5.8-9.7 | 20-100s |
+| **0.4.0 + `ollama:deepseek-v3.2:cloud`** | **0% (0/20)** | 2.0 | 28s |
+| **0.4.0 + `ollama:gemma4:e4b`** | 0% (0/1) | 0.1 | 513s |
+
+The 0.4.0 results on `deepseek-v3.2:cloud` are 20/20 observations
+verbatim-grounded (every `source_quote` is a sub-string of the source
+conversation). Hallucination rate is below the <10% target; time/obs is
+5x under the 150s target. Obs/Q (2.0) is below the 5-9 target — the
+smaller model extracts fewer facts per conversation, and 4/10 questions
+returned zero observations (model returns `{"observations": []}` for
+~20K-char inputs in some cases). The model is the bottleneck, not the
+extraction logic.
+
+Raw results: `results/eval/observer_deepseek_10q.json`,
+`results/eval/observer_gemma4_10q.json`.
+
+---
+
+# Hallucination Mitigation Experiments
+
 2026-06-01
 
 ## Problem
