@@ -661,6 +661,20 @@ The benefits of collapsing are real:
   preserved in the model (immutable fields vs Reflector-managed fields)
   without needing separate tables
 
+### `user_id` is a top-level field
+
+`Memory` (the message type) carries `user_id` as a top-level field (not
+nested in `metadata`). The Observer propagates this directly to
+`observations.user_id` (no extraction, no LLM involvement). This is
+already the 0.4.0 behavior; we preserve it explicitly in 0.5.0.
+
+Why this matters for the per-store decision (see Delta 4): because
+`user_id` is a top-level field propagated unchanged, and `MemoryStore`
+is a per-user construct, the natural unit of work for the Reflector is
+"all observations for one user" — exactly what a per-store worker
+processes. A per-process worker would have to partition by user anyway,
+which is what the per-store model gives us for free.
+
 ### Dropped fields (with justification)
 
 - `observation_metadata.priority` — leftover from 0.3.0 (emoji-coded
@@ -778,6 +792,23 @@ await pipeline.stop()    # graceful shutdown, awaits in-flight reflection
 **Backward compat:** existing manual `maybe_run()` callers can keep calling
 it; the count-based trigger fires when `start()` is invoked, but `maybe_run()`
 remains available for callers that prefer manual scheduling.
+
+**Per-store vs per-process (resolved):** the Reflector worker in 0.5.0 is
+**per-`MemoryStore`**. Each `MemoryStore` owns its own `ReflectorPipeline`
+with its own `start()/stop()` lifecycle. This decision is reversible:
+a future version can add a `ReflectorCoordinator` that aggregates N
+`ReflectorPipeline` instances and runs them in a single task. The
+per-store API is forward-compatible with this — a coordinator would
+just call `maybe_run()` on each registered `ReflectorPipeline`. Per-store
+is the right call for 0.5.0 because: (1) it fits CoreMem's per-user data
+model — `MemoryStore` is per-user, and `user_id` is a top-level field on
+`Memory` propagated unchanged to `observations.user_id`, so partitioning
+work by `MemoryStore` IS partitioning by user; (2) per-user customization
+of `trigger_every_n_observations` is free; (3) failure isolation is
+critical for multi-tenant deployments; (4) the typical CoreMem
+embedded-process use case has 1-10 users, where N idle asyncio tasks
+are negligible. Per-process scheduling is deferred to 0.5.1+ for
+high-scale deployments (e.g., 100s of users in one process).
 
 ### Delta 5 — Schema collapse to single table (see Schema restructure section above)
 
@@ -1057,10 +1088,7 @@ Per typical user/day, deepseek-v3.2:cloud rates:
 
 ## Open questions
 
-1. Should the Reflector worker be per-`MemoryStore` (per-user) or per-process
-   (centralized scheduler)? Per-store assumed; per-process would centralize
-   but complicate per-user trigger thresholds.
-2. The 0.4.0 Reflector dedup uses cosine similarity — should we also add
+1. The 0.4.0 Reflector dedup uses cosine similarity — should we also add
    string-similarity (already in Observer) for redundancy? Defer to 0.5.1 if
    eval shows redundancy issues.
 
