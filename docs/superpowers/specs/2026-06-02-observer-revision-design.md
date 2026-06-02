@@ -533,3 +533,255 @@ result = obs.run(
 - `cog-canvas/cogcanvas/llm/openai.py:11-90` — ported prompt pattern
 - `mem0ai/mem0/configs/prompts.py:468-693` — borrowed: `Observation Date`,
   `Already extracted` in-prompt patterns
+
+---
+
+# 0.5.0 Deltas — Addendum
+
+2026-06-02
+
+## Context
+
+The 0.4.0 release successfully reduced hallucination to 0% on a 10-question
+LongMemEval sample, but introduced a structural defect: **40% of conversations
+return zero observations** because the Observer prompt tells the model to
+return `[]` when no "factual" content is found, and the model is conservative
+in judging what counts as a fact. This produced 2.0 obs/q vs a human baseline
+of ~7.0 obs/q and a 50% answer-miss rate on the 10-question suite.
+
+Independent of the dead-output issue, the 0.4.0 design conflates extraction
+with judgment — the Observer both decides "what's a fact" and "how important
+is it." The Reflector (despite the name) is just a threshold filter on the
+Observer's self-reported importance, not a real synthesis step.
+
+This addendum specifies six small, surgical changes that move CoreMem from
+"0% hallucination, 50% answer miss" toward "≤5% hallucination, ≤20% answer
+miss" while preserving the existing alignment gate, the existing pipeline
+skeletons, and the 0.4.0 public API shape.
+
+## Goals
+
+- **obs/q** on the 10-question LongMemEval sample: 2.0 → **≥ 5.0**
+- **Dead output rate** (conversations returning `[]`): 40% → **< 10%**
+- **Answer coverage** (answer retrievable from extracted obs): 5/10 → **≥ 8/10**
+- **Hallucination rate** (ungrounded obs): 0% → **< 5%** (allow some for recall)
+- **Reflector** does real pattern synthesis, not just threshold filtering
+
+## Non-goals
+
+- Re-implementing Mem0-style ADD/UPDATE/DELETE merge logic (deferred).
+- CogCanvas gleaning pass (deferred; `enable_gleaning` stays `NotImplementedError`).
+- Replacing the existing Reflector's cosine-similarity dedup algorithm.
+- Changing the 0.4.0 alignment gate algorithm.
+- Schema-breaking changes to existing `Observation` columns.
+
+## Architecture — the 6 deltas
+
+The 0.4.0 architecture (Observer + 3-tier alignment + Reflector + ReflectorPipeline + MemoryStore on HybridDB) is the baseline. The 0.5.0 deltas are six small, additive changes:
+
+### Delta 1 — Observer prompt: remove the dead-output escape hatch
+
+The current Observer system prompt contains the line:
+> "Do not invent facts. If nothing factual is present, return an empty observations array."
+
+This is the source of the 40% dead-output. The model interprets "factual"
+conservatively and returns `[]` for preference-style conversations. The 3-tier
+alignment gate is already sufficient to catch fabrications downstream.
+
+**Change:** rewrite the prompt to:
+> "Extract user-attributable facts, preferences, plans, and context. If the
+> conversation contains user statements of any kind, extract at least one
+> observation. The alignment gate will catch any fabrications downstream —
+> your job is to be liberal, not conservative."
+
+**Cost:** zero code change, one prompt edit. **Impact:** single largest recall unlock.
+
+### Delta 2 — `importance` becomes Optional
+
+The Observer currently scores `importance` per-fact, and the Reflector filters
+by threshold. The 0.4.0 Q4 finding (Observer gave 0.30/0.40 to a discrete life
+event) shows the per-fact importance signal is miscalibrated by ~0.2.
+
+**Change:**
+- Schema: `importance REAL` → `importance REAL NULL` (additive; existing rows
+  become `NULL`)
+- Observer: does NOT score importance. Returns `importance: None`.
+- Reflector: assigns `importance` to all facts and reflections with calibrated
+  anchors (0.7+ identity/life event, 0.4-0.6 preferences/plans, <0.4 throwaway).
+- Retrieval: ranks uncalibrated facts by recency+relevance until Reflector fills.
+
+**Cost:** ~30 lines (prompt, parse, store).
+
+### Delta 3 — Reflector trigger: time-based → count-based (with time fallback)
+
+`ReflectorPipeline.maybe_run()` currently runs on a 24h timer with a
+`min_observations=10` skip rule. The user wants count-based: "every X new
+unreflected facts."
+
+**Change:** add `trigger_every_n_observations: int = 50` parameter.
+`maybe_run()` fires if EITHER:
+  (a) unreflected fact count since last run ≥ N, OR
+  (b) time since last run ≥ 24h (existing behavior, fallback for low-volume users)
+
+Whichever condition is hit first triggers the run.
+
+**Cost:** ~20 lines. Default X=50, configurable per-`MemoryStore`.
+
+### Delta 4 — Explicit Reflector worker start/stop API
+
+`ReflectorPipeline.maybe_run()` is invoked manually today. 0.5.0 wraps it in
+an asyncio task the caller can start/stop:
+
+```python
+pipeline = ReflectorPipeline(
+    store,
+    interval_hours=24,
+    trigger_every_n_observations=50,
+)
+await pipeline.start()   # spawns background asyncio task
+# ... conversations happen ...
+await pipeline.stop()    # graceful shutdown, awaits in-flight reflection
+```
+
+**Cost:** ~40 lines (start/stop methods, lifecycle management, idempotency).
+
+### Delta 5 — Add `kind`, `reflected`, `source_fact_ids` to Observation
+
+```sql
+-- additive migration, no data loss
+ALTER TABLE observations ADD COLUMN kind TEXT DEFAULT 'fact';
+ALTER TABLE observations ADD COLUMN reflected INTEGER DEFAULT 0;
+ALTER TABLE observations ADD COLUMN source_fact_ids TEXT DEFAULT '[]';  -- JSON
+```
+
+- `kind`: `'fact'` (raw) or `'reflection'` (synthesized by Reflector)
+- `reflected`: 0 or 1, has Reflector seen this fact?
+- `source_fact_ids`: JSON list, for reflections: which facts synthesized this
+
+New `MemoryStore` helpers:
+- `get_pending_reflections() -> list[Observation]` — `reflected=0 AND kind='fact'`
+- `mark_reflected(fact_ids: list[str])` — sets `reflected=1`
+
+**Cost:** ~50 lines (schema migration, model fields, helpers).
+
+### Delta 6 — `HybridBackend` becomes default
+
+Currently `HybridBackend` is opt-in (`pip install coremem[hybrid]`). 0.5.0
+promotes it to default; ChromaBackend becomes legacy.
+
+**Change:**
+- `pyproject.toml`: `hybriddb` moves from optional `[hybrid]` extra to required
+  `dependencies`
+- `coremem/__init__.py`: default `backend=HybridBackend`; fall back to
+  `ChromaBackend` with `DeprecationWarning` if `hybriddb` not importable
+- `README.md`: update install snippets, remove `coremem[hybrid]` references
+
+**Cost:** ~15 lines.
+
+## Test plan
+
+### Unit tests (extend existing)
+
+```python
+# tests/test_observer.py — add:
+def test_observer_returns_minimum_one_per_substantive_turn():
+    """Preference-style conversations must produce >=1 observation."""
+
+def test_observer_importance_is_none():
+    """0.5.0 Observer does not score importance (returns None)."""
+
+# tests/test_reflector.py — add:
+def test_reflector_count_based_trigger():
+    """maybe_run() fires when unreflected count >= N, not just on timer."""
+
+def test_reflector_hybrid_trigger():
+    """Time-based fires when count < N but interval has elapsed."""
+
+def test_reflector_start_stop_lifecycle():
+    """start() spawns a task; stop() cancels it cleanly and idempotently."""
+
+# tests/test_memory_store.py — add:
+def test_observation_kind_field():
+def test_observation_reflected_field():
+def test_observation_importance_optional():
+def test_mark_reflected_helper():
+def test_get_pending_reflections_helper():
+```
+
+### Integration test
+
+Re-run `benchmarks/longmemeval/observer_eval.py` against the 0.5.0 Observer.
+Save results to `results/eval/observer_deepseek_10q_v0.5.0.json`. Compare
+against `observer_deepseek_10q.json` baseline.
+
+**Pass criteria (all four must hold):**
+- obs/q ≥ 5.0 (was 2.0)
+- dead output < 10% (was 40%)
+- answer coverage ≥ 8/10 (was 5/10)
+- hallucination rate < 5% (was 0%)
+
+If any criterion fails, the release is blocked.
+
+### Regression
+
+All 0.4.0 tests must still pass with the new schema. Existing rows treated as
+`kind="fact", reflected=False, importance=None`.
+
+## Migration guide (0.4.0 → 0.5.0)
+
+```python
+# Was (0.4.0):
+pipeline = ReflectorPipeline(store, interval_hours=24, min_observations=10)
+# manually call maybe_run() from a cron or background loop
+
+# Now (0.5.0):
+pipeline = ReflectorPipeline(
+    store,
+    interval_hours=24,                          # still works
+    trigger_every_n_observations=50,            # NEW: count-based trigger
+)
+await pipeline.start()                         # NEW: explicit lifecycle
+# ... work happens ...
+await pipeline.stop()                          # NEW: graceful shutdown
+
+# Observation schema:
+#   importance: Optional[float] = None         # CHANGED: was required
+#   kind: Literal["fact", "reflection"]         # NEW
+#   reflected: bool = False                     # NEW
+#   source_fact_ids: list[int] = []             # NEW
+```
+
+## Rollout plan
+
+1. Branch: `0.5.0-observer-revision` off `main` (15 unpushed 0.4.0 commits)
+2. Implement the 6 deltas in worktree (~1-2 days)
+3. Run the 10-question eval, verify all 4 pass criteria
+4. Bump version to 0.5.0, update CHANGELOG, push commits, tag `v0.5.0`
+5. Backwards compat: schema migration is additive; 0.4.0 code reading 0.5.0
+   data sees default `kind="fact"`, `reflected=False`, `importance=None`.
+
+## Cost analysis
+
+Per typical user/day, deepseek-v3.2:cloud rates:
+- Observer: 1-10 calls/day, ~$0.002/call → $0.002-$0.020
+- Reflector: 1-3 calls/day, ~$0.01/call → $0.010-$0.030
+- Alignment gate: deterministic, $0
+- **Total: $0.012-$0.050/user/day** — fits the EA cost envelope.
+
+## Open questions
+
+1. Should the Reflector worker be per-`MemoryStore` (per-user) or per-process
+   (centralized scheduler)? Per-store assumed; per-process would centralize.
+2. Should `enable_gleaning` CogCanvas pass get a stub in 0.5.0 or stay deferred?
+3. The 0.4.0 Reflector dedup uses cosine similarity — should we also add
+   string-similarity (already in Observer) for redundancy?
+
+## References
+
+- Generative Agents reflection (Park et al. 2023): `arxiv.org/abs/2304.03442`
+- A-Mem (NeurIPS 2025): `arxiv.org/abs/2502.12110`
+- LangExtract resolver (Google): `github.com/google/langextract`
+- LangMem hot-path + background: `github.com/langchain-ai/langmem`
+- MemReader (2025): active vs passive extraction
+- APEX-MEM (2025, SOTA on LongMemEval): property graph + retrieval agent
+- 10-question comparison: `docs/longmemeval-0.4.0-comparison.md`
