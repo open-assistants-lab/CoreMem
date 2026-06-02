@@ -22,6 +22,24 @@ class TestObserverConstants:
         # Few-shot dialogues include timestamp prefixes that get stripped
         assert "[20" in OBSERVER_SYSTEM_PROMPT
 
+    def test_system_prompt_does_not_have_dead_output_escape_hatch(self):
+        """The 0.4.0 prompt told the model to return [] if nothing factual.
+        0.5.0 removes this — extraction should be liberal."""
+        # The old wording must be gone
+        assert "If nothing factual is present" not in OBSERVER_SYSTEM_PROMPT
+        assert "return an empty observations array" not in OBSERVER_SYSTEM_PROMPT
+
+    def test_system_prompt_preserves_no_verbatim_no_observation(self):
+        """The 0.4.0 prompt had a separate line: 'If you cannot find a verbatim
+        sub-string, do not return the observation.' 0.5.0 preserves this."""
+        assert "verbatim" in OBSERVER_SYSTEM_PROMPT.lower()
+        assert "do not return the observation" in OBSERVER_SYSTEM_PROMPT
+
+    def test_system_prompt_encourages_liberal_extraction(self):
+        """The 0.5.0 prompt explicitly encourages liberal extraction."""
+        prompt_lower = OBSERVER_SYSTEM_PROMPT.lower()
+        assert "liberal" in prompt_lower or "attempt to extract" in prompt_lower
+
     def test_tool_schema_has_no_priority(self):
         params = OBSERVATION_TOOL["function"]["parameters"]
         # No `priority` field anywhere in the schema

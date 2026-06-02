@@ -28,7 +28,8 @@ OBSERVER_SYSTEM_PROMPT = """You are an observation agent. Extract key facts from
 RULES:
 - One fact per observation. Be exact with values.
 - source_quote: a VERBATIM sub-string of the conversation. Copy-paste exactly — do not rephrase, do not paraphrase, do not change a single character. If you cannot find a verbatim sub-string, do not return the observation.
-- Do not invent facts. If nothing factual is present, return an empty observations array.
+- Be liberal in what you consider worth recording. If the conversation contains user statements of any kind, attempt to extract at least one observation.
+- If you cannot find a verbatim sub-string for a fact, do not return that observation — the alignment gate handles grounding.
 
 IMPORTANCE: 0.8-1.0 identity/contact/job/salary.
             0.5-0.7 preferences/habits/projects.
