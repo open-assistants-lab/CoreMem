@@ -551,8 +551,13 @@ of ~7.0 obs/q and a 50% answer-miss rate on the 10-question suite.
 
 Independent of the dead-output issue, the 0.4.0 design conflates extraction
 with judgment — the Observer both decides "what's a fact" and "how important
-is it." The Reflector (despite the name) is just a threshold filter on the
-Observer's self-reported importance, not a real synthesis step.
+is it." The Reflector `Reflector.run()` itself does real pattern synthesis
+(generates higher-level insights via LLM call), but the surrounding
+`ReflectorPipeline` filters its input by importance (default ≥ 0.10) and
+caps the candidate set, and the 0.4.0 Observer's importance signal is
+miscalibrated (Q4 dropped a discrete life event at 0.30/0.40). The result
+is that high-quality facts sometimes get dropped before the Reflector ever
+sees them.
 
 This addendum specifies six small, surgical changes that move CoreMem from
 "0% hallucination, 50% answer miss" toward "≤5% hallucination, ≤20% answer
@@ -565,7 +570,8 @@ skeletons, and the 0.4.0 public API shape.
 - **Dead output rate** (conversations returning `[]`): 40% → **< 10%**
 - **Answer coverage** (answer retrievable from extracted obs): 5/10 → **≥ 8/10**
 - **Hallucination rate** (ungrounded obs): 0% → **< 5%** (allow some for recall)
-- **Reflector** does real pattern synthesis, not just threshold filtering
+- **Reflector pipeline preserves the existing synthesis quality** (no
+  regression to the 0.4.0 pattern-discovery behavior)
 
 ## Non-goals
 
@@ -573,7 +579,89 @@ skeletons, and the 0.4.0 public API shape.
 - CogCanvas gleaning pass (deferred; `enable_gleaning` stays `NotImplementedError`).
 - Replacing the existing Reflector's cosine-similarity dedup algorithm.
 - Changing the 0.4.0 alignment gate algorithm.
-- Schema-breaking changes to existing `Observation` columns.
+- Schema-breaking changes to user-data columns (drops allowed only for
+  fields documented as dead code in 0.4.0: `priority`, `confidence`,
+  redundant `observation_metadata.id` PK).
+
+## Schema restructure
+
+The 0.4.0 schema was designed around an outdated mental model: humans
+occasionally enriched observations, and `observations` + `observation_metadata`
+were separated for that reason. In 0.5.0, the Reflector is the sole writer
+of mutable enrichment, the workflow is well-defined, and several 0.4.0 fields
+(`priority`, `confidence`, the redundant `observation_metadata.id` PK) are
+dead code. We restructure the schema to match the 0.5.0 redesign.
+
+### Final 0.5.0 schema
+
+```sql
+-- observations: immutable core, set at extraction time
+CREATE TABLE observations (
+    -- Identity
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL DEFAULT 'fact',  -- 'fact' | 'reflection'
+    content         TEXT NOT NULL,
+    source_quote    TEXT,                            -- verbatim; NULL for reflections
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',     -- JSON; non-empty for reflections
+    referenced_date TEXT,
+    observation_ts  TEXT NOT NULL,
+
+    -- Scope
+    user_id         TEXT,
+    agent_id        TEXT,
+    session_id      TEXT,
+
+    -- Grounding (3-tier alignment, set by Observer)
+    alignment_tier        TEXT,   -- 'EXACT' | 'FUZZY' | NULL (set by alignment gate)
+    alignment_confidence  REAL
+);
+CREATE INDEX idx_observations_kind        ON observations(kind);
+CREATE INDEX idx_observations_user        ON observations(user_id);
+CREATE INDEX idx_observations_session     ON observations(session_id);
+
+-- observation_metadata: mutable enrichment, owned by Reflector
+CREATE TABLE observation_metadata (
+    observation_id  TEXT PRIMARY KEY,        -- 1:1 with observations
+    importance      REAL,                    -- 0.0-1.0, NULL until Reflector fills
+    entities        TEXT NOT NULL DEFAULT '[]',  -- JSON list
+    reflected       INTEGER NOT NULL DEFAULT 0   -- has Reflector seen this?
+);
+CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
+CREATE INDEX idx_metadata_importance ON observation_metadata(importance);
+```
+
+### What changed from 0.4.0
+
+| 0.4.0 | 0.5.0 | Reason |
+|---|---|---|
+| `observations`: 11 cols, no `kind`, no `source_fact_ids` | `observations`: 12 cols, +`kind`, +`source_fact_ids` | New fields per Delta 5 |
+| `observation_metadata`: 7 cols, has redundant `id` PK + `priority` + `confidence` | `observation_metadata`: 4 cols, `observation_id` PK, no `priority`, no `confidence`, +`reflected` | Drop dead fields; make PK the FK; add Reflector workflow state |
+| (no indexes on `kind` or `reflected`) | Indexes on `kind`, `reflected`, `importance` | Required for Delta 3 (count-based trigger) and retrieval filtering |
+
+### Why keep the split
+
+The split between `observations` and `observation_metadata` is preserved
+because it cleanly separates **immutable identity** (what the LLM said) from
+**mutable enrichment** (what the Reflector thinks about it). This makes it
+natural to:
+- Recompute enrichment without touching observations
+- Audit "what was extracted" vs "what the Reflector thinks about it"
+- Add other writers of enrichment (e.g., human verification, a future
+  cross-encoder reranker) without schema changes to observations
+
+The single-table alternative was considered and rejected: it would force
+every retrieval query to filter on a wider table, and the conceptual
+distinction is real even if not enforced at the DB level.
+
+### Dropped fields (with justification)
+
+- `observation_metadata.priority` — leftover from 0.3.0 (emoji-coded priority
+  values that never worked). The 0.4.0 Reflector reads it only to format its
+  prompt and ignores the value. No reader cares.
+- `observation_metadata.confidence` — set to 1.0 on every insert, never read.
+  Dead code.
+- `observation_metadata.id` PK — redundant with `observation_id`. In 0.5.0,
+  `observation_id` is the PK. The legacy `id` column is dropped.
 
 ## Architecture — the 6 deltas
 
@@ -681,24 +769,49 @@ await pipeline.stop()    # graceful shutdown, awaits in-flight reflection
 it; the count-based trigger fires when `start()` is invoked, but `maybe_run()`
 remains available for callers that prefer manual scheduling.
 
-### Delta 5 — Add `kind`, `reflected`, `source_fact_ids` to Observation
+### Delta 5 — Schema restructure (see Schema restructure section above)
+
+The schema restructure is the data-model half of the 0.5.0 redesign.
+See the **Schema restructure** section for the final schema, the diff
+table, and the dropped-fields justification.
+
+**Summary of the SQL migration from 0.4.0:**
 
 ```sql
--- additive migration, no data loss
-ALTER TABLE observations ADD COLUMN kind TEXT DEFAULT 'fact';
-ALTER TABLE observations ADD COLUMN reflected INTEGER DEFAULT 0;
-ALTER TABLE observations ADD COLUMN source_fact_ids TEXT DEFAULT '[]';  -- JSON
+-- observations: add 2 new columns (additive, no data loss)
+ALTER TABLE observations ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact';
+ALTER TABLE observations ADD COLUMN source_fact_ids TEXT NOT NULL DEFAULT '[]';
+CREATE INDEX idx_observations_kind ON observations(kind);
+
+-- observation_metadata: add 1 column, drop 2 dead ones, change PK
+ALTER TABLE observation_metadata ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE observation_metadata DROP COLUMN priority;    -- dead since 0.3.0
+ALTER TABLE observation_metadata DROP COLUMN confidence;  -- never read
+-- The legacy `id` PK column is removed as part of the table rebuild
+-- below (changing the PK in SQLite requires CREATE TABLE + copy + RENAME).
+-- The user-data column `observation_id` is preserved; only the redundant
+-- `id` PK is dropped.
+CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
 ```
 
-- `kind`: `'fact'` (raw) or `'reflection'` (synthesized by Reflector)
-- `reflected`: 0 or 1, has Reflector seen this fact?
-- `source_fact_ids`: JSON list, for reflections: which facts synthesized this
+**New `MemoryStore` helpers** (added in 0.5.0, not in 0.4.0):
+- `get_pending_reflections() -> list[Observation]` — returns
+  `observations.kind='fact' AND observation_metadata.reflected=0`
+- `mark_reflected(observation_ids: list[str])` — sets
+  `observation_metadata.reflected=1` for the given IDs
 
-New `MemoryStore` helpers:
-- `get_pending_reflections() -> list[Observation]` — `reflected=0 AND kind='fact'`
-- `mark_reflected(fact_ids: list[str])` — sets `reflected=1`
+**Cost:** ~80 lines total (schema migration script, model fields, helpers,
+indexes, PK rebuild). Bigger than the other deltas because it touches
+the data model.
 
-**Cost:** ~50 lines (schema migration, model fields, helpers).
+**Risk:** the PK rebuild on `observation_metadata` is the most invasive
+part. The migration script must:
+1. Create `observation_metadata_new` with the new schema
+2. Copy data with `SELECT DISTINCT ON (observation_id)` to dedup (in case
+   any observation has multiple metadata rows from 0.4.0)
+3. Drop the old table, rename the new one
+4. Recreate indexes
+This is wrapped in a transaction; on failure, the old schema is restored.
 
 ### Delta 6 — `HybridBackend` becomes default
 
@@ -708,8 +821,9 @@ promotes it to default; ChromaBackend becomes legacy.
 **Change:**
 - `pyproject.toml`: `hybriddb` moves from optional `[hybrid]` extra to required
   `dependencies`
-- `coremem/__init__.py`: default `backend=HybridBackend`; fall back to
-  `ChromaBackend` with `DeprecationWarning` if `hybriddb` not importable
+- `coremem/__init__.py`: default `backend=HybridBackend` (no fallback — if
+  `hybriddb` is somehow not importable, raise `ImportError` with a clear
+  message; in 0.5.0 this should never happen since it's a required dep)
 - `README.md`: update install snippets, remove `coremem[hybrid]` references
 
 **Deprecation timeline:**
@@ -743,12 +857,54 @@ def test_reflector_hybrid_trigger():
 def test_reflector_start_stop_lifecycle():
     """start() spawns a task; stop() cancels it cleanly and idempotently."""
 
+def test_reflector_reflected_flag_set():
+    """After reflect(), all source facts are marked reflected=1."""
+
 # tests/test_memory_store.py — add:
 def test_observation_kind_field():
-def test_observation_reflected_field():
+def test_observation_source_fact_ids_field():
 def test_observation_importance_optional():
+def test_observation_metadata_reflected_field():
+def test_observation_metadata_pk_is_observation_id():
 def test_mark_reflected_helper():
 def test_get_pending_reflections_helper():
+def test_priority_field_dropped():  # schema migration
+def test_confidence_field_dropped():  # schema migration
+```
+
+### Migration tests
+
+```python
+# tests/test_migration_0_4_to_0_5.py — new file
+def test_schema_migration_preserves_existing_observations():
+    """Run 0.4.0 schema, insert data, run 0.5.0 migration, verify all
+    rows present with correct defaults (kind='fact', reflected=0)."""
+
+def test_schema_migration_preserves_user_data():
+    """Every observation id, content, source_quote, importance value
+    from 0.4.0 is preserved in 0.5.0. Destructive changes only affect
+    priority, confidence, and the legacy id PK."""
+
+def test_schema_migration_drops_priority_column():
+    """priority column no longer exists post-migration."""
+
+def test_schema_migration_drops_confidence_column():
+    """confidence column no longer exists post-migration."""
+
+def test_schema_migration_drops_legacy_id_column():
+    """observation_metadata.legacy `id` column is gone post-migration."""
+
+def test_schema_migration_dedups_observation_metadata():
+    """If 0.4.0 had multiple metadata rows per observation, keep one."""
+
+def test_schema_migration_rebuilds_pk_on_observation_metadata():
+    """observation_id is the PK post-migration; legacy id column is gone."""
+
+def test_schema_migration_is_idempotent():
+    """Running the migration twice does not error or duplicate data."""
+
+def test_schema_migration_creates_indexes():
+    """idx_observations_kind and idx_metadata_reflected exist post-migration."""
 ```
 
 ### Integration test
@@ -803,16 +959,28 @@ pipeline = ReflectorPipeline(
 # existing code that calls await pipeline.maybe_run() still works
 # the count-based trigger is unused in this path
 
-# Observation schema:
-#   importance: Optional[float] = None         # CHANGED: was always populated
-#                                              # existing 0.4.0 rows keep their values
-#   kind: Literal["fact", "reflection"]         # NEW
-#   reflected: bool = False                     # NEW
-#   source_fact_ids: list[int] = []             # NEW
+# Observation schema (0.5.0):
+#   observations:
+#     kind            TEXT NOT NULL DEFAULT 'fact'   # NEW
+#     source_fact_ids TEXT NOT NULL DEFAULT '[]'    # NEW (JSON)
+#   observation_metadata:
+#     observation_id  TEXT PRIMARY KEY                # CHANGED: was id PK
+#     importance      REAL                            # unchanged, now nullable-from-Observer
+#     entities        TEXT NOT NULL DEFAULT '[]'      # unchanged
+#     reflected       INTEGER NOT NULL DEFAULT 0     # NEW
+#     # DROPPED: priority (dead), confidence (dead), id (redundant PK)
+```
 
-# Code reading `importance` from new observations may now get None.
-# Treat None as 0.5 (uncalibrated) for ranking purposes, or filter
-# to `importance IS NOT NULL` for only Reflector-calibrated facts.
+**SQL migration** (run on first 0.5.0 startup if migrating from 0.4.0):
+```sql
+ALTER TABLE observations ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact';
+ALTER TABLE observations ADD COLUMN source_fact_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE observation_metadata ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE observation_metadata DROP COLUMN priority;
+ALTER TABLE observation_metadata DROP COLUMN confidence;
+-- PK rebuild: see Delta 5 for the table-rebuild procedure
+CREATE INDEX idx_observations_kind ON observations(kind);
+CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
 ```
 
 **Recommended migration path:**
@@ -828,8 +996,19 @@ pipeline = ReflectorPipeline(
 2. Implement the 6 deltas in worktree (~1-2 days)
 3. Run the 10-question eval, verify all 4 pass criteria
 4. Bump version to 0.5.0, update CHANGELOG, push commits, tag `v0.5.0`
-5. Backwards compat: schema migration is additive; 0.4.0 code reading 0.5.0
-   data sees default `kind="fact"`, `reflected=False`, `importance=None`.
+5. Backwards compat for user data: schema migration is additive for all
+   user-data columns. Only documented dead fields (`priority`, `confidence`,
+   redundant `observation_metadata.id` PK) are dropped. Existing 0.4.0
+   observations retain their `id`, `content`, `source_quote`,
+   `referenced_date`, `observation_ts`, `user_id`, `agent_id`, `session_id`,
+   `alignment_tier`, `alignment_confidence`, and `importance` (if set)
+   values.
+
+**Migration auto-run:** `MemoryStore.__init__()` checks the schema version
+(stored in a new `_schema_version` table) and auto-runs the migration
+script if the version is < 0.5.0. The migration is idempotent and wrapped
+in a transaction; on failure, the old schema is restored. Manual migration
+is also possible via `await store.migrate_to_0_5_0()`.
 
 ## Cost analysis
 
