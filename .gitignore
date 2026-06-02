@@ -10,3 +10,7 @@ vectors/
 
 # Benchmark results
 results/
+
+# Git worktrees
+.worktrees/
+worktrees/
