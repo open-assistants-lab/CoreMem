@@ -579,23 +579,25 @@ skeletons, and the 0.4.0 public API shape.
 - CogCanvas gleaning pass (deferred; `enable_gleaning` stays `NotImplementedError`).
 - Replacing the existing Reflector's cosine-similarity dedup algorithm.
 - Changing the 0.4.0 alignment gate algorithm.
-- Schema-breaking changes to user-data columns (drops allowed only for
-  fields documented as dead code in 0.4.0: `priority`, `confidence`,
-  redundant `observation_metadata.id` PK).
+- Changing the user-data column semantics (existing `id`, `content`,
+  `source_quote`, `importance` (when set), etc. are preserved across
+  migration). The schema collapse drops the redundant
+  `observation_metadata` table and its dead fields, but the data is
+  copied first.
 
-## Schema restructure
+## Schema restructure — single table
 
-The 0.4.0 schema was designed around an outdated mental model: humans
-occasionally enriched observations, and `observations` + `observation_metadata`
-were separated for that reason. In 0.5.0, the Reflector is the sole writer
-of mutable enrichment, the workflow is well-defined, and several 0.4.0 fields
-(`priority`, `confidence`, the redundant `observation_metadata.id` PK) are
-dead code. We restructure the schema to match the 0.5.0 redesign.
+The 0.4.0 schema split observations into two tables (`observations` +
+`observation_metadata`), motivated by an outdated mental model where
+humans occasionally enriched observations. In 0.5.0, the Reflector is the
+sole writer of enrichment, and the 0.4.0 split causes unnecessary JOINs
+on every retrieval query. Several 0.4.0 fields (`priority`, `confidence`,
+the redundant `observation_metadata.id` PK) are also dead code. We
+collapse to a single table that captures all observation state.
 
 ### Final 0.5.0 schema
 
 ```sql
--- observations: immutable core, set at extraction time
 CREATE TABLE observations (
     -- Identity
     id              TEXT PRIMARY KEY,
@@ -611,57 +613,65 @@ CREATE TABLE observations (
     agent_id        TEXT,
     session_id      TEXT,
 
-    -- Grounding (3-tier alignment, set by Observer)
-    alignment_tier        TEXT,   -- 'EXACT' | 'FUZZY' | NULL (set by alignment gate)
-    alignment_confidence  REAL
-);
-CREATE INDEX idx_observations_kind        ON observations(kind);
-CREATE INDEX idx_observations_user        ON observations(user_id);
-CREATE INDEX idx_observations_session     ON observations(session_id);
+    -- Grounding (3-tier alignment, set by Observer at extraction)
+    alignment_tier        TEXT,   -- 'EXACT' | 'FUZZY' | NULL
+    alignment_confidence  REAL,
 
--- observation_metadata: mutable enrichment, owned by Reflector
-CREATE TABLE observation_metadata (
-    observation_id  TEXT PRIMARY KEY,        -- 1:1 with observations
+    -- Enrichment (set by Reflector; may be NULL initially)
     importance      REAL,                    -- 0.0-1.0, NULL until Reflector fills
     entities        TEXT NOT NULL DEFAULT '[]',  -- JSON list
     reflected       INTEGER NOT NULL DEFAULT 0   -- has Reflector seen this?
 );
-CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
-CREATE INDEX idx_metadata_importance ON observation_metadata(importance);
+CREATE INDEX idx_observations_kind        ON observations(kind);
+CREATE INDEX idx_observations_user        ON observations(user_id);
+CREATE INDEX idx_observations_session     ON observations(session_id);
+CREATE INDEX idx_observations_reflected   ON observations(reflected);
+CREATE INDEX idx_observations_importance   ON observations(importance);
 ```
 
 ### What changed from 0.4.0
 
 | 0.4.0 | 0.5.0 | Reason |
 |---|---|---|
-| `observations`: 11 cols, no `kind`, no `source_fact_ids` | `observations`: 12 cols, +`kind`, +`source_fact_ids` | New fields per Delta 5 |
-| `observation_metadata`: 7 cols, has redundant `id` PK + `priority` + `confidence` | `observation_metadata`: 4 cols, `observation_id` PK, no `priority`, no `confidence`, +`reflected` | Drop dead fields; make PK the FK; add Reflector workflow state |
-| (no indexes on `kind` or `reflected`) | Indexes on `kind`, `reflected`, `importance` | Required for Delta 3 (count-based trigger) and retrieval filtering |
+| `observations`: 11 cols (id, content, source_quote, referenced_date, observation_ts, user_id, agent_id, session_id, alignment_tier, alignment_confidence) | `observations`: 15 cols (+`kind`, +`source_fact_ids`, +`importance`, +`entities`, +`reflected`) | Single-table design; enrichment co-located with identity |
+| `observation_metadata`: 7 cols (id PK, observation_id, importance, entities, priority, confidence, enrichment_ts) | (table removed) | Collapsed; all columns now in `observations` |
+| (no indexes on `kind`, `reflected`, or `importance`) | Indexes on `kind`, `user_id`, `session_id`, `reflected`, `importance` | Required for Delta 3 (count-based trigger) and retrieval filtering |
 
-### Why keep the split
+### Why collapse (not keep the split)
 
-The split between `observations` and `observation_metadata` is preserved
-because it cleanly separates **immutable identity** (what the LLM said) from
-**mutable enrichment** (what the Reflector thinks about it). This makes it
-natural to:
-- Recompute enrichment without touching observations
-- Audit "what was extracted" vs "what the Reflector thinks about it"
-- Add other writers of enrichment (e.g., human verification, a future
-  cross-encoder reranker) without schema changes to observations
+The 0.4.0 split was justified by three rationales, none of which hold
+strongly enough to justify the cost in 0.5.0:
 
-The single-table alternative was considered and rejected: it would force
-every retrieval query to filter on a wider table, and the conceptual
-distinction is real even if not enforced at the DB level.
+1. **"Recompute enrichment without touching observations"** — true of any
+   split, but the Reflector now updates `importance` rarely (only when
+   `NULL` or for periodic re-calibration). The cost of updating 1-2
+   columns in a 15-column row is trivial.
+2. **"Audit 'what was extracted' vs 'what the Reflector thinks'"** —
+   the difference is auditable via `observation_ts` (when extracted) vs
+   `importance` (Reflector's score, possibly set later). No second
+   table needed.
+3. **"Add other writers of enrichment"** — speculative; no other writers
+   are planned. YAGNI.
+
+The benefits of collapsing are real:
+- Every retrieval query loses a JOIN (saves query planning + execution time)
+- Simpler model: one Observation class, one table, no FK indirection
+- Simpler migration from 0.4.0: no PK rebuild, no table copy, no dedup step
+- The conceptual distinction between "extracted" and "enriched" is
+  preserved in the model (immutable fields vs Reflector-managed fields)
+  without needing separate tables
 
 ### Dropped fields (with justification)
 
-- `observation_metadata.priority` — leftover from 0.3.0 (emoji-coded priority
-  values that never worked). The 0.4.0 Reflector reads it only to format its
-  prompt and ignores the value. No reader cares.
-- `observation_metadata.confidence` — set to 1.0 on every insert, never read.
-  Dead code.
-- `observation_metadata.id` PK — redundant with `observation_id`. In 0.5.0,
-  `observation_id` is the PK. The legacy `id` column is dropped.
+- `observation_metadata.priority` — leftover from 0.3.0 (emoji-coded
+  priority values that never worked). The 0.4.0 Reflector reads it
+  only to format its prompt and ignores the value. No reader cares.
+- `observation_metadata.confidence` — set to 1.0 on every insert, never
+  read. Dead code.
+- `observation_metadata.id` PK — redundant with `observation_id`.
+  Removed as part of the table collapse.
+- `observation_metadata.enrichment_ts` — was set on every insert, never
+  read. Dead code (timestamped via `observation_ts` on the parent row).
 
 ## Architecture — the 6 deltas
 
@@ -769,49 +779,56 @@ await pipeline.stop()    # graceful shutdown, awaits in-flight reflection
 it; the count-based trigger fires when `start()` is invoked, but `maybe_run()`
 remains available for callers that prefer manual scheduling.
 
-### Delta 5 — Schema restructure (see Schema restructure section above)
+### Delta 5 — Schema collapse to single table (see Schema restructure section above)
 
-The schema restructure is the data-model half of the 0.5.0 redesign.
-See the **Schema restructure** section for the final schema, the diff
-table, and the dropped-fields justification.
+The schema collapse is the data-model half of the 0.5.0 redesign. See the
+**Schema restructure** section for the final schema, the diff table, the
+collapse rationale, and the dropped-fields justification.
 
 **Summary of the SQL migration from 0.4.0:**
 
 ```sql
--- observations: add 2 new columns (additive, no data loss)
+-- observations: add 5 new columns (additive, default values)
 ALTER TABLE observations ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact';
 ALTER TABLE observations ADD COLUMN source_fact_ids TEXT NOT NULL DEFAULT '[]';
-CREATE INDEX idx_observations_kind ON observations(kind);
+ALTER TABLE observations ADD COLUMN importance REAL;          -- nullable, NULL until Reflector fills
+ALTER TABLE observations ADD COLUMN entities TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE observations ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
 
--- observation_metadata: add 1 column, drop 2 dead ones, change PK
-ALTER TABLE observation_metadata ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE observation_metadata DROP COLUMN priority;    -- dead since 0.3.0
-ALTER TABLE observation_metadata DROP COLUMN confidence;  -- never read
--- The legacy `id` PK column is removed as part of the table rebuild
--- below (changing the PK in SQLite requires CREATE TABLE + copy + RENAME).
--- The user-data column `observation_id` is preserved; only the redundant
--- `id` PK is dropped.
-CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
+-- Copy enrichment data from observation_metadata to observations
+UPDATE observations
+SET importance = (SELECT importance FROM observation_metadata
+                  WHERE observation_metadata.observation_id = observations.id),
+    entities = (SELECT entities FROM observation_metadata
+                WHERE observation_metadata.observation_id = observations.id);
+
+-- Drop the now-redundant observation_metadata table
+DROP TABLE observation_metadata;
+
+-- Create indexes (5 total)
+CREATE INDEX idx_observations_kind        ON observations(kind);
+CREATE INDEX idx_observations_user        ON observations(user_id);
+CREATE INDEX idx_observations_session     ON observations(session_id);
+CREATE INDEX idx_observations_reflected   ON observations(reflected);
+CREATE INDEX idx_observations_importance   ON observations(importance);
 ```
 
 **New `MemoryStore` helpers** (added in 0.5.0, not in 0.4.0):
 - `get_pending_reflections() -> list[Observation]` — returns
-  `observations.kind='fact' AND observation_metadata.reflected=0`
-- `mark_reflected(observation_ids: list[str])` — sets
-  `observation_metadata.reflected=1` for the given IDs
+  `kind='fact' AND reflected=0`
+- `mark_reflected(observation_ids: list[str])` — sets `reflected=1` for
+  the given IDs
 
-**Cost:** ~80 lines total (schema migration script, model fields, helpers,
-indexes, PK rebuild). Bigger than the other deltas because it touches
-the data model.
+**Cost:** ~60 lines total (schema migration script, model fields, helpers,
+indexes, UPDATE statement for data copy). Smaller than the split version
+because there's no PK rebuild and no table rename.
 
-**Risk:** the PK rebuild on `observation_metadata` is the most invasive
-part. The migration script must:
-1. Create `observation_metadata_new` with the new schema
-2. Copy data with `SELECT DISTINCT ON (observation_id)` to dedup (in case
-   any observation has multiple metadata rows from 0.4.0)
-3. Drop the old table, rename the new one
-4. Recreate indexes
-This is wrapped in a transaction; on failure, the old schema is restored.
+**Risk:** the `UPDATE ... SET ... FROM observation_metadata` statement
+must be wrapped in a transaction. If it fails partway, the old schema
+is restored. The order of operations is:
+1. ADD COLUMN (additive, safe to fail)
+2. UPDATE (atomic with the surrounding transaction)
+3. DROP TABLE (destructive, but only after data is copied)
 
 ### Delta 6 — `HybridBackend` becomes default
 
@@ -863,9 +880,11 @@ def test_reflector_reflected_flag_set():
 # tests/test_memory_store.py — add:
 def test_observation_kind_field():
 def test_observation_source_fact_ids_field():
-def test_observation_importance_optional():
-def test_observation_metadata_reflected_field():
-def test_observation_metadata_pk_is_observation_id():
+def test_observation_importance_field():
+def test_observation_entities_field():
+def test_observation_reflected_field():
+def test_observation_metadata_table_removed():
+    """observation_metadata table no longer exists in 0.5.0."""
 def test_mark_reflected_helper():
 def test_get_pending_reflections_helper():
 def test_priority_field_dropped():  # schema migration
@@ -883,28 +902,30 @@ def test_schema_migration_preserves_existing_observations():
 def test_schema_migration_preserves_user_data():
     """Every observation id, content, source_quote, importance value
     from 0.4.0 is preserved in 0.5.0. Destructive changes only affect
-    priority, confidence, and the legacy id PK."""
+    priority, confidence, enrichment_ts, and the observation_metadata table."""
+
+def test_schema_migration_copies_importance_to_observations():
+    """observation_metadata.importance values are copied to
+    observations.importance during migration."""
+
+def test_schema_migration_copies_entities_to_observations():
+    """observation_metadata.entities values are copied to
+    observations.entities during migration."""
+
+def test_schema_migration_drops_observation_metadata_table():
+    """observation_metadata table no longer exists post-migration."""
 
 def test_schema_migration_drops_priority_column():
-    """priority column no longer exists post-migration."""
+    """priority column no longer exists post-migration (in dropped table)."""
 
 def test_schema_migration_drops_confidence_column():
-    """confidence column no longer exists post-migration."""
-
-def test_schema_migration_drops_legacy_id_column():
-    """observation_metadata.legacy `id` column is gone post-migration."""
-
-def test_schema_migration_dedups_observation_metadata():
-    """If 0.4.0 had multiple metadata rows per observation, keep one."""
-
-def test_schema_migration_rebuilds_pk_on_observation_metadata():
-    """observation_id is the PK post-migration; legacy id column is gone."""
+    """confidence column no longer exists post-migration (in dropped table)."""
 
 def test_schema_migration_is_idempotent():
     """Running the migration twice does not error or duplicate data."""
 
 def test_schema_migration_creates_indexes():
-    """idx_observations_kind and idx_metadata_reflected exist post-migration."""
+    """All 5 indexes exist post-migration (kind, user, session, reflected, importance)."""
 ```
 
 ### Integration test
@@ -960,27 +981,41 @@ pipeline = ReflectorPipeline(
 # the count-based trigger is unused in this path
 
 # Observation schema (0.5.0):
-#   observations:
-#     kind            TEXT NOT NULL DEFAULT 'fact'   # NEW
-#     source_fact_ids TEXT NOT NULL DEFAULT '[]'    # NEW (JSON)
-#   observation_metadata:
-#     observation_id  TEXT PRIMARY KEY                # CHANGED: was id PK
-#     importance      REAL                            # unchanged, now nullable-from-Observer
-#     entities        TEXT NOT NULL DEFAULT '[]'      # unchanged
-#     reflected       INTEGER NOT NULL DEFAULT 0     # NEW
-#     # DROPPED: priority (dead), confidence (dead), id (redundant PK)
+#   observations: 15 columns (single table)
+#     id              TEXT PRIMARY KEY
+#     kind            TEXT NOT NULL DEFAULT 'fact'    # NEW
+#     content         TEXT NOT NULL
+#     source_quote    TEXT                             # NULL for reflections
+#     source_fact_ids TEXT NOT NULL DEFAULT '[]'      # NEW (JSON)
+#     referenced_date TEXT
+#     observation_ts  TEXT NOT NULL
+#     user_id, agent_id, session_id TEXT
+#     alignment_tier, alignment_confidence (3-tier gate output)
+#     importance      REAL                             # NEW (copied from observation_metadata)
+#     entities        TEXT NOT NULL DEFAULT '[]'       # NEW (copied from observation_metadata)
+#     reflected       INTEGER NOT NULL DEFAULT 0      # NEW
+#   # REMOVED: observation_metadata table (collapsed into observations)
+#   # DROPPED from metadata: priority, confidence, id, enrichment_ts (all dead code)
 ```
 
 **SQL migration** (run on first 0.5.0 startup if migrating from 0.4.0):
 ```sql
 ALTER TABLE observations ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact';
 ALTER TABLE observations ADD COLUMN source_fact_ids TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE observation_metadata ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE observation_metadata DROP COLUMN priority;
-ALTER TABLE observation_metadata DROP COLUMN confidence;
--- PK rebuild: see Delta 5 for the table-rebuild procedure
-CREATE INDEX idx_observations_kind ON observations(kind);
-CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
+ALTER TABLE observations ADD COLUMN importance REAL;
+ALTER TABLE observations ADD COLUMN entities TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE observations ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0;
+UPDATE observations
+SET importance = (SELECT importance FROM observation_metadata
+                  WHERE observation_metadata.observation_id = observations.id),
+    entities = (SELECT entities FROM observation_metadata
+                WHERE observation_metadata.observation_id = observations.id);
+DROP TABLE observation_metadata;
+CREATE INDEX idx_observations_kind        ON observations(kind);
+CREATE INDEX idx_observations_user        ON observations(user_id);
+CREATE INDEX idx_observations_session     ON observations(session_id);
+CREATE INDEX idx_observations_reflected   ON observations(reflected);
+CREATE INDEX idx_observations_importance   ON observations(importance);
 ```
 
 **Recommended migration path:**
@@ -996,13 +1031,15 @@ CREATE INDEX idx_metadata_reflected ON observation_metadata(reflected);
 2. Implement the 6 deltas in worktree (~1-2 days)
 3. Run the 10-question eval, verify all 4 pass criteria
 4. Bump version to 0.5.0, update CHANGELOG, push commits, tag `v0.5.0`
-5. Backwards compat for user data: schema migration is additive for all
-   user-data columns. Only documented dead fields (`priority`, `confidence`,
-   redundant `observation_metadata.id` PK) are dropped. Existing 0.4.0
-   observations retain their `id`, `content`, `source_quote`,
-   `referenced_date`, `observation_ts`, `user_id`, `agent_id`, `session_id`,
-   `alignment_tier`, `alignment_confidence`, and `importance` (if set)
-   values.
+5. Backwards compat for user data: schema migration copies all user-data
+   values from `observation_metadata` to `observations` before dropping
+   the metadata table. Existing 0.4.0 observations retain their `id`,
+   `content`, `source_quote`, `referenced_date`, `observation_ts`,
+   `user_id`, `agent_id`, `session_id`, `alignment_tier`,
+   `alignment_confidence`, `importance`, and `entities` values. The
+   `observation_metadata` table is dropped post-copy. Destructive changes
+   only affect documented dead fields (`priority`, `confidence`,
+   `enrichment_ts`, the redundant `observation_metadata.id` PK).
 
 **Migration auto-run:** `MemoryStore.__init__()` checks the schema version
 (stored in a new `_schema_version` table) and auto-runs the migration
