@@ -91,9 +91,10 @@ def migrate(db_path: str) -> None:
                 SELECT importance FROM observation_metadata
                 WHERE observation_metadata.observation_id = observations.id
             ),
-            entities = (
-                SELECT entities FROM observation_metadata
-                WHERE observation_metadata.observation_id = observations.id
+            entities = COALESCE(
+                (SELECT entities FROM observation_metadata
+                 WHERE observation_metadata.observation_id = observations.id),
+                entities
             )
         """)
 

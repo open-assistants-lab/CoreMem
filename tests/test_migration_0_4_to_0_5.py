@@ -158,6 +158,81 @@ class TestMigration:
         assert json.loads(rows["obs_1"]) == ["Seattle"]
         assert json.loads(rows["obs_2"]) == ["Rust", "Python"]
 
+    def test_orphan_observation_does_not_break_migration(self, tmp_path):
+        """An observation with no matching observation_metadata row
+        (e.g., from a crash between the two inserts in the 0.4.0
+        Observer) should not break the migration. The entities column
+        should keep its default '[]', and importance should be NULL."""
+        from coremem.migrations.v0_4_to_v0_5 import migrate
+
+        db_path = str(tmp_path / "test.db")
+
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE observations (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source_quote TEXT,
+                referenced_date TEXT,
+                observation_ts TEXT NOT NULL,
+                user_id TEXT,
+                agent_id TEXT,
+                session_id TEXT,
+                alignment_tier TEXT,
+                alignment_confidence REAL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE observation_metadata (
+                id TEXT PRIMARY KEY,
+                observation_id TEXT NOT NULL,
+                importance REAL,
+                entities TEXT,
+                priority TEXT,
+                confidence REAL,
+                enrichment_ts TEXT
+            )
+        """)
+        cur.execute("""
+            INSERT INTO observations VALUES (
+                'obs_1', 'User lives in Seattle', 'I live in Seattle',
+                '2026-01', '2026-01-15T10:00:00', 'alice', NULL, 'sess_1',
+                'EXACT', 1.0
+            )
+        """)
+        cur.execute("""
+            INSERT INTO observations VALUES (
+                'obs_orphan', 'User is learning Rust', 'I am learning Rust',
+                '2026-02', '2026-02-10T14:00:00', 'alice', NULL, 'sess_2',
+                'EXACT', 1.0
+            )
+        """)
+        cur.execute("""
+            INSERT INTO observation_metadata VALUES (
+                'meta_1', 'obs_1', 0.85, '["Seattle"]', 'medium', 1.0, '2026-01-15T10:00:00'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        migrate(db_path)
+
+        conn = sqlite3.connect(db_path)
+        rows = {
+            r[0]: {"entities": r[1], "importance": r[2]}
+            for r in conn.execute(
+                "SELECT id, entities, importance FROM observations"
+            ).fetchall()
+        }
+        conn.close()
+
+        assert len(rows) == 2
+        assert json.loads(rows["obs_1"]["entities"]) == ["Seattle"]
+        assert rows["obs_1"]["importance"] == 0.85
+        assert json.loads(rows["obs_orphan"]["entities"]) == []
+        assert rows["obs_orphan"]["importance"] is None
+
     def test_preserves_user_data(self, tmp_path):
         """All user-data columns from 0.4.0 observations are preserved."""
         from coremem.migrations.v0_4_to_v0_5 import migrate
