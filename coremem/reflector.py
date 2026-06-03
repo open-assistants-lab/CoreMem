@@ -95,6 +95,9 @@ class ReflectorPipeline:
         embedding_fn: Embedding function for cosine similarity quality gate.
         interval_hours: How often to run (default 24).
         min_observations: Skip if fewer new observations (default 10).
+        trigger_every_n_observations: Fire when unreflected fact count reaches
+            this threshold (default 50). Hybrid trigger: fires when EITHER
+            count >= N OR interval has elapsed.
     """
 
     def __init__(
@@ -108,6 +111,7 @@ class ReflectorPipeline:
         embedding_fn: Any = None,
         interval_hours: int = 24,
         min_observations: int = 10,
+        trigger_every_n_observations: int = 50,
     ):
         self._store = store
         self._user_id = user_id
@@ -118,16 +122,25 @@ class ReflectorPipeline:
         self._embedding_fn = embedding_fn
         self._interval_hours = interval_hours
         self._min_observations = min_observations
+        self._trigger_every_n = trigger_every_n_observations
 
         self._last_run_ts: float = 0.0
         self._last_run_observation_id: str | None = None
 
     async def maybe_run(self) -> list[dict[str, Any]] | None:
-        """Run if interval has elapsed. Returns new reflections or None."""
+        """Run if EITHER the time interval has elapsed OR the unreflected
+        fact count has reached ``trigger_every_n_observations``. Returns new
+        reflections or None."""
         now = time.time()
-        if now - self._last_run_ts < self._interval_hours * 3600:
+        time_elapsed = now - self._last_run_ts >= self._interval_hours * 3600
+        count_hit = self._count_unreflected() >= self._trigger_every_n
+        if not (time_elapsed or count_hit):
             return None
         return await self.run_now()
+
+    def _count_unreflected(self) -> int:
+        """Count unreflected facts in the store."""
+        return len(self._store.get_pending_reflections())
 
     async def run_now(self) -> list[dict[str, Any]] | None:
         """Force a run regardless of timer."""
