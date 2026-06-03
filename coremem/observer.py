@@ -176,18 +176,28 @@ class Observer:
             if arguments:
                 parsed = parse_json_array(arguments)
                 if parsed and "observations" in parsed[0]:
-                    return cast(list[dict[str, Any]], parsed[0]["observations"])
-                if parsed and isinstance(parsed[0], dict) and "content" in parsed[0]:
-                    return parsed
+                    observations = cast(list[dict[str, Any]], parsed[0]["observations"])
+                elif parsed and isinstance(parsed[0], dict) and "content" in parsed[0]:
+                    observations = parsed
+                else:
+                    return []
+            else:
+                return []
+        else:
+            content = getattr(response, "content", "")
+            if not content:
+                return []
+            parsed = parse_json_array(content)
+            if parsed and "observations" in parsed[0]:
+                observations = cast(list[dict[str, Any]], parsed[0]["observations"])
+            elif parsed:
+                observations = parsed
+            else:
                 return []
 
-        content = getattr(response, "content", "")
-        if not content:
-            return []
-        parsed = parse_json_array(content)
-        if parsed and "observations" in parsed[0]:
-            return cast(list[dict[str, Any]], parsed[0]["observations"])
-        return parsed if parsed else []
+        for obs in observations:
+            obs["importance"] = None
+        return observations
 
 
 # ── ObserverPipeline ───────────────────────────────────────────────────────

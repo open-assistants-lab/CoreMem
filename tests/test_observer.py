@@ -187,3 +187,24 @@ class TestObserverRun:
             roles = [m["role"] for m in sent_messages]
             assert "user" in roles
             assert "assistant" in roles
+
+
+class TestObserverImportanceOptional:
+    def test_observer_returns_none_importance(self):
+        """0.5.0 Observer returns importance=None, regardless of LLM output.
+        The Reflector fills importance in later."""
+        obs = Observer(model="openai:gpt-4o-mini")
+        with patch.object(obs, "_provider") as mock_p:
+            mock_p.chat_with_tools = AsyncMock(
+                return_value=_mock_tool_response(
+                    '{"observations": [{"id": "obs_1", '
+                    '"content": "User lives in Seattle", '
+                    '"referenced_date": "2026-01-15", '
+                    '"source_quote": "I live in Seattle", '
+                    '"importance": 0.85, "entities": ["Seattle"]}]}'
+                )
+            )
+            messages = [_make_memory("user", "I live in Seattle")]
+            result = asyncio.run(obs.run(messages))
+
+        assert result[0]["importance"] is None
