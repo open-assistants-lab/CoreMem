@@ -59,11 +59,7 @@ CoreMem solves all three:
 pip install coremem
 ```
 
-With HybridDB backend for enhanced FTS5 + vector hybrid search:
-
-```bash
-pip install coremem[hybrid]
-```
+HybridBackend (HybridDB — SQLite + FTS5 + ChromaDB) is the default since 0.5.0:
 
 > **Note on model downloads.** ChromaDB downloads a bundled MiniLM embedding model (~80MB) on first `PersistentClient()` init. The cross-encoder downloads `cross-encoder/ms-marco-MiniLM-L-6-v2` (~500MB) on first `search_enhanced()` call. Both cache locally after download. Call `core.warmup()` at startup to pre-load models predictably.
 

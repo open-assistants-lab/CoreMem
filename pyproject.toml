@@ -22,12 +22,12 @@ dependencies = [
     "chromadb>=0.5.0,<2.0.0",
     "numpy>=1.24.0,<3.0.0",
     "sentence-transformers>=2.0.0,<6.0.0",
+    "hybriddb>=0.4.0",
 ]
 
 [project.optional-dependencies]
-hybrid = ["hybriddb>=0.4.0"]
 observer = ["httpx>=0.25.0"]
-all = ["coremem[hybrid,observer]"]
+all = ["coremem[observer]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
