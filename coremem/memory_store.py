@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from hybriddb import HybridDB
@@ -64,8 +65,60 @@ class MemoryStore:
     """
 
     def __init__(self, path: str, embedding_fn: Any = None):
+        # Detect pre-existing 0.4.0 schema before HybridDB initializes the DB.
+        # HybridDB.__init__ creates app.db immediately, so we must check first
+        # to distinguish "fresh store" from "existing 0.4.0 store".
+        existing_db = Path(path) / "app.db"
+        needs_migration = (
+            self._detect_0_4_0_schema(existing_db) if existing_db.exists() else False
+        )
+
         self._db = HybridDB(path=path, embedding_fn=embedding_fn)
-        self._ensure_tables()
+
+        if needs_migration:
+            self._migrate_to_0_5_0()
+        else:
+            self._ensure_tables()
+            self._stamp_schema_version("0.5.0")
+
+    @staticmethod
+    def _detect_0_4_0_schema(db_path: Path) -> bool:
+        """Check if the DB on disk has the 0.4.0 split schema (observation_metadata)."""
+        import sqlite3
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='observation_metadata'"
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            return False
+
+    def _migrate_to_0_5_0(self) -> None:
+        """Run the 0.4.0 -> 0.5.0 schema collapse.
+
+        Idempotent: the migration script checks ``_schema_version`` and
+        returns early if already at 0.5.0.
+        """
+        from coremem.migrations.v0_4_to_v0_5 import migrate
+        migrate(self._db._db_path)
+
+    def _stamp_schema_version(self, version: str) -> None:
+        """Insert a row into ``_schema_version`` for the given version."""
+        self._db.raw_query("""
+            CREATE TABLE IF NOT EXISTS _schema_version (
+                version TEXT PRIMARY KEY,
+                migrated_at TEXT NOT NULL
+            )
+        """)
+        self._db.raw_query(
+            "INSERT OR IGNORE INTO _schema_version (version, migrated_at) VALUES (?, ?)",
+            (version, datetime.now(UTC).isoformat()),
+        )
 
     def _ensure_tables(self) -> None:
         existing = set(self._db.list_tables())

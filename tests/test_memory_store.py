@@ -65,3 +65,81 @@ class TestMigration:
         assert obs[0]["content"] == "old fact"
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _table_exists_check(store, table: str) -> bool:
+    """Helper: check if a table exists."""
+    rows = store._db.raw_query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    )
+    return len(rows) > 0
+
+
+class TestSchemaVersion:
+    def test_new_store_has_schema_version_0_5_0(self, tmp_store):
+        """A newly-created MemoryStore is at version 0.5.0."""
+        rows = tmp_store._db.raw_query(
+            "SELECT version FROM _schema_version ORDER BY version"
+        )
+        versions = {r["version"] for r in rows}
+        assert "0.5.0" in versions
+
+    def test_existing_0_4_0_store_is_migrated_on_init(self, tmp_path):
+        """A 0.4.0 store is auto-migrated to 0.5.0 on first access."""
+        import sqlite3
+
+        d = str(tmp_path)
+        # Manually create a 0.4.0 schema (split tables)
+        conn = sqlite3.connect(f"{d}/app.db")
+        conn.execute("""
+            CREATE TABLE observations (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source_quote TEXT,
+                referenced_date TEXT,
+                observation_ts TEXT NOT NULL,
+                user_id TEXT,
+                agent_id TEXT,
+                session_id TEXT,
+                alignment_tier TEXT,
+                alignment_confidence REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE observation_metadata (
+                id TEXT PRIMARY KEY,
+                observation_id TEXT NOT NULL,
+                importance REAL,
+                entities TEXT,
+                priority TEXT,
+                confidence REAL,
+                enrichment_ts TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT INTO observations VALUES (
+                'obs_1', 'test content', 'test quote', NULL,
+                '2026-01-15T10:00:00', 'alice', NULL, 'sess_1', 'EXACT', 1.0
+            )
+        """)
+        conn.execute("""
+            INSERT INTO observation_metadata VALUES (
+                'meta_1', 'obs_1', 0.75, '[]', 'medium', 1.0, '2026-01-15T10:00:00'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # Now create the MemoryStore — should auto-migrate
+        store = MemoryStore(path=d)
+
+        # Verify migration happened
+        rows = list(store._db.raw_query(
+            "SELECT importance FROM observations WHERE id = 'obs_1'"
+        ))
+        assert len(rows) == 1
+        assert rows[0]["importance"] == 0.75
+
+        # Verify observation_metadata is gone
+        assert not _table_exists_check(store, "observation_metadata")
