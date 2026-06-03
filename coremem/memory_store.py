@@ -1,4 +1,4 @@
-"""MemoryStore — observations, metadata, and reflections backed by HybridDB."""
+"""MemoryStore — observations and reflections backed by HybridDB."""
 
 from __future__ import annotations
 
@@ -9,29 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from hybriddb import HybridDB
-
-_OBSERVATIONS_SCHEMA = {
-    "id": "TEXT PRIMARY KEY",
-    "content": "LONGTEXT",
-    "source_quote": "TEXT",
-    "referenced_date": "TEXT",
-    "observation_ts": "TEXT",
-    "user_id": "TEXT",
-    "agent_id": "TEXT",
-    "session_id": "TEXT",
-    "alignment_tier": "TEXT",         # NEW: 0.4.0
-    "alignment_confidence": "REAL",   # NEW: 0.4.0
-}
-
-_OBSERVATION_METADATA_SCHEMA = {
-    "id": "TEXT PRIMARY KEY",
-    "observation_id": "TEXT",
-    "importance": "REAL",
-    "entities": "TEXT",
-    "priority": "TEXT",
-    "confidence": "REAL",
-    "enrichment_ts": "TEXT",
-}
 
 _REFLECTIONS_SCHEMA = {
     "id": "TEXT PRIMARY KEY",
@@ -45,19 +22,13 @@ _REFLECTIONS_SCHEMA = {
 }
 
 
-def _join_meta(observations: list[dict]) -> list[dict]:
-    """Flatten observation + metadata into a single dict for backward compat."""
-    return observations
-
-
 class MemoryStore:
     """Storage for observations and reflections.
 
-    Observations are split into two tables:
-      - ``observations`` — immutable facts (content, source_quote, scope).
-      - ``observation_metadata`` — mutable enrichment (importance, entities,
-        priority, confidence). Enrichment rows can be added over time by
-        the Observer, Reflector, or human verification.
+    0.5.0 single-table schema: a single ``observations`` table holds both
+    immutable facts and Reflector-written enrichment (importance, entities)
+    plus reflection rows (kind='reflection'). The 0.4.0 split schema is
+    auto-migrated on first access.
 
     Args:
         path: Directory for the HybridDB data.
@@ -65,9 +36,6 @@ class MemoryStore:
     """
 
     def __init__(self, path: str, embedding_fn: Any = None):
-        # Detect pre-existing 0.4.0 schema before HybridDB initializes the DB.
-        # HybridDB.__init__ creates app.db immediately, so we must check first
-        # to distinguish "fresh store" from "existing 0.4.0 store".
         existing_db = Path(path) / "app.db"
         needs_migration = (
             self._detect_0_4_0_schema(existing_db) if existing_db.exists() else False
@@ -78,9 +46,6 @@ class MemoryStore:
         if needs_migration:
             self._migrate_to_0_5_0()
         else:
-            # TODO(Task 4): replace _ensure_tables() with 0.5.0 single-table schema
-            # once insert_observations is rewritten to use it. Currently still
-            # creates the 0.4.0 split schema for backward compat.
             self._ensure_tables()
             self._stamp_schema_version("0.5.0")
 
@@ -124,106 +89,89 @@ class MemoryStore:
         )
 
     def _ensure_tables(self) -> None:
+        """Create the 0.5.0 single-table schema if it doesn't exist."""
+        self._db.raw_query("""
+            CREATE TABLE IF NOT EXISTS observations (
+                id              TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL DEFAULT 'fact',
+                content         TEXT NOT NULL,
+                source_quote    TEXT,
+                source_fact_ids TEXT NOT NULL DEFAULT '[]',
+                referenced_date TEXT,
+                observation_ts  TEXT NOT NULL,
+                user_id         TEXT,
+                agent_id        TEXT,
+                session_id      TEXT,
+                alignment_tier        TEXT,
+                alignment_confidence  REAL,
+                importance      REAL,
+                entities        TEXT NOT NULL DEFAULT '[]',
+                reflected       INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_kind ON observations(kind)")
+        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_user ON observations(user_id)")
+        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id)")
+        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_reflected ON observations(reflected)")
+        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance)")
+
         existing = set(self._db.list_tables())
-        if "observations" not in existing:
-            self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
-        else:
-            self._migrate_observations_v2()
-        if "observation_metadata" not in existing:
-            self._db.create_table("observation_metadata", _OBSERVATION_METADATA_SCHEMA)
         if "reflections" not in existing:
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
 
-    def _list_observation_columns(self) -> set[str]:
-        """Return column names in the observations table via PRAGMA."""
-        rows = self._db.raw_query("PRAGMA table_info(observations)")
-        return {r["name"] for r in rows}
-
-    def _migrate_observations_v2(self) -> None:
-        """0.4.0 migration: add alignment_tier and alignment_confidence columns.
-
-        Idempotent: skip if columns already exist.
-        """
-        existing_cols = self._list_observation_columns()
-        if "alignment_tier" in existing_cols and "alignment_confidence" in existing_cols:
-            return
-        if hasattr(self._db, "add_column"):
-            if "alignment_tier" not in existing_cols:
-                self._db.add_column("observations", "alignment_tier", "TEXT")
-            if "alignment_confidence" not in existing_cols:
-                self._db.add_column("observations", "alignment_confidence", "REAL")
-        else:
-            self._migrate_via_recreate()
-
-    def _migrate_via_recreate(self) -> None:
-        """Fallback migration: rename old table, create new, copy data."""
-        import uuid as _uuid
-        old_name = f"observations_old_{_uuid.uuid4().hex[:8]}"
-        self._db.raw_query(f"ALTER TABLE observations RENAME TO {old_name}")
-        self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
-        copy_cols = {"id", "content", "source_quote", "referenced_date", "observation_ts",
-                     "user_id", "agent_id", "session_id"}
-        select_list = ", ".join(sorted(copy_cols))
-        self._db.raw_query(
-            f"INSERT INTO observations ({select_list}) "
-            f"SELECT {select_list} FROM {old_name}"
-        )
-        self._db.raw_query(f"DROP TABLE {old_name}")
-
-    # ── Observations (fact layer — immutable) ───────────────────────────
+    # ── Observations (single-table 0.5.0) ───────────────────────────────
 
     def insert_observations(self, items: list[dict[str, Any]]) -> list[str]:
-        """Insert observations + metadata. Returns observation IDs."""
-        ids = []
+        """Insert observations into the single observations table.
+
+        Returns the list of observation IDs (auto-generated if not provided).
+        Each item dict may include any of the 0.5.0 fields:
+        id, kind, content, source_quote, source_fact_ids, referenced_date,
+        observation_ts, user_id, agent_id, session_id, alignment_tier,
+        alignment_confidence, importance, entities, reflected.
+        """
         now = datetime.now(UTC).isoformat()
+        ids: list[str] = []
         for item in items:
-            oid = str(uuid.uuid4())[:12]
-
-            # Fact row — immutable
-            self._db.insert("observations", {
-                "id": oid,
-                "content": item.get("content", ""),
-                "source_quote": item.get("source_quote", ""),
-                "referenced_date": item.get("referenced_date", ""),
-                "observation_ts": item.get("observation_ts", now),
-                "user_id": item.get("user_id", ""),
-                "agent_id": item.get("agent_id", ""),
-                "session_id": item.get("session_id", ""),
-                "alignment_tier": item.get("alignment_tier", ""),
-                "alignment_confidence": item.get("alignment_confidence", 0.0),
-            })
-
-            # Metadata row — initial enrichment from Observer
-            mid = str(uuid.uuid4())[:12]
-            self._db.insert("observation_metadata", {
-                "id": mid,
-                "observation_id": oid,
-                "importance": item.get("importance", 0.5),
-                "entities": json.dumps(item.get("entities", [])),
-                "priority": item.get("priority", "medium"),
-                "confidence": 1.0,
-                "enrichment_ts": now,
-            })
-
+            oid = item.get("id") or str(uuid.uuid4())[:12]
             ids.append(oid)
-        return ids
 
-    def _query_joined(
-        self, table: str = "observations", where: str = "",
-        params: tuple = (), order_by: str = "observation_ts DESC",
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Query observations LEFT JOIN metadata, returning flattened rows."""
-        rows = self._db.raw_query(
-            "SELECT o.*, m.importance, m.entities, m.priority, m.confidence "
-            "FROM observations o "
-            "LEFT JOIN observation_metadata m ON m.observation_id = o.id "
-            + (f"WHERE {where} " if where else "")
-            + f"ORDER BY o.{order_by} "
-            + (f"LIMIT {limit}" if limit else ""),
-            params,
-        )
-        return [dict(r) for r in rows]
+            entities = item.get("entities", [])
+            if not isinstance(entities, str):
+                entities = json.dumps(entities)
+            source_fact_ids = item.get("source_fact_ids", [])
+            if not isinstance(source_fact_ids, str):
+                source_fact_ids = json.dumps(source_fact_ids)
+
+            self._db.raw_query(
+                """
+                INSERT INTO observations (
+                    id, kind, content, source_quote, source_fact_ids,
+                    referenced_date, observation_ts,
+                    user_id, agent_id, session_id,
+                    alignment_tier, alignment_confidence,
+                    importance, entities, reflected
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    oid,
+                    item.get("kind", "fact"),
+                    item.get("content", ""),
+                    item.get("source_quote"),
+                    source_fact_ids,
+                    item.get("referenced_date"),
+                    item.get("observation_ts", now),
+                    item.get("user_id"),
+                    item.get("agent_id"),
+                    item.get("session_id"),
+                    item.get("alignment_tier"),
+                    item.get("alignment_confidence"),
+                    item.get("importance"),
+                    entities,
+                    item.get("reflected", 0),
+                ),
+            )
+        return ids
 
     def get_observations(
         self, ts_after: str | None = None, limit: int = 50,
@@ -235,23 +183,28 @@ class MemoryStore:
         where_parts: list[str] = []
         params: list[Any] = []
         if ts_after:
-            where_parts.append("o.observation_ts > ?")
+            where_parts.append("observation_ts > ?")
             params.append(ts_after)
         if user_id:
-            where_parts.append("o.user_id = ?")
+            where_parts.append("user_id = ?")
             params.append(user_id)
         if session_id:
-            where_parts.append("o.session_id = ?")
+            where_parts.append("session_id = ?")
             params.append(session_id)
         if agent_id:
-            where_parts.append("o.agent_id = ?")
+            where_parts.append("agent_id = ?")
             params.append(agent_id)
         if metadata:
             for k, v in metadata.items():
-                where_parts.append(f"json_extract(o.source_quote, '$.{k}') = ?")
+                where_parts.append(f"json_extract(source_quote, '$.{k}') = ?")
                 params.append(str(v))
-        where = " AND ".join(where_parts) if where_parts else ""
-        return self._query_joined(where=where, params=tuple(params), limit=limit)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        sql = (
+            f"SELECT * FROM observations WHERE {where} "
+            f"ORDER BY observation_ts DESC LIMIT {int(limit)}"
+        )
+        rows = self._db.raw_query(sql, tuple(params))
+        return [dict(r) for r in rows]
 
     def get_observations_since(
         self, last_id: str | None = None, limit: int = 500,
@@ -265,17 +218,17 @@ class MemoryStore:
         params: list[Any] = []
 
         if user_id:
-            where_parts.append("o.user_id = ?")
+            where_parts.append("user_id = ?")
             params.append(user_id)
         if session_id:
-            where_parts.append("o.session_id = ?")
+            where_parts.append("session_id = ?")
             params.append(session_id)
         if agent_id:
-            where_parts.append("o.agent_id = ?")
+            where_parts.append("agent_id = ?")
             params.append(agent_id)
         if metadata:
             for k, v in metadata.items():
-                where_parts.append(f"json_extract(o.source_quote, '$.{k}') = ?")
+                where_parts.append(f"json_extract(source_quote, '$.{k}') = ?")
                 params.append(str(v))
 
         if last_id:
@@ -285,11 +238,16 @@ class MemoryStore:
             if not rows:
                 return []
             last_ts = rows[0]["observation_ts"]
-            where_parts.append("o.observation_ts > ?")
+            where_parts.append("observation_ts > ?")
             params.append(last_ts)
 
-        where = " AND ".join(where_parts) if where_parts else ""
-        return self._query_joined(where=where, params=tuple(params), limit=limit)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        sql = (
+            f"SELECT * FROM observations WHERE {where} "
+            f"ORDER BY observation_ts DESC LIMIT {int(limit)}"
+        )
+        rows = self._db.raw_query(sql, tuple(params))
+        return [dict(r) for r in rows]
 
     def get_recent_observations(self, days: int = 30, limit: int = 50,
                                  user_id: str | None = None,
@@ -304,6 +262,36 @@ class MemoryStore:
     def search_observations(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         results = self._db.search("observations", "content", query, limit=limit)
         return [dict(r) for r in results]
+
+    # ── Reflector helpers (0.5.0) ─────────────────────────────────────
+
+    def get_pending_reflections(self) -> list[dict[str, Any]]:
+        """Return observations that are facts (not reflections) and have
+        not yet been processed by the Reflector.
+
+        Sorted by observation_ts DESC (newest first) so the Reflector sees
+        recent facts first.
+        """
+        rows = self._db.raw_query(
+            "SELECT * FROM observations "
+            "WHERE kind = 'fact' AND reflected = 0 "
+            "ORDER BY observation_ts DESC"
+        )
+        return [dict(r) for r in rows]
+
+    def mark_reflected(self, observation_ids: list[str]) -> None:
+        """Mark observations as processed by the Reflector.
+
+        Sets reflected=1 for the given IDs. The Reflector calls this
+        after running pattern synthesis on the source facts.
+        """
+        if not observation_ids:
+            return
+        placeholders = ",".join("?" * len(observation_ids))
+        self._db.raw_query(
+            f"UPDATE observations SET reflected = 1 WHERE id IN ({placeholders})",
+            tuple(observation_ids),
+        )
 
     # ── Reflections ──────────────────────────────────────────────────
 

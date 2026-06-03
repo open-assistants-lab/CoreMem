@@ -143,3 +143,34 @@ class TestSchemaVersion:
 
         # Verify observation_metadata is gone
         assert not _table_exists_check(store, "observation_metadata")
+
+
+class TestReflectionHelpers:
+    def test_get_pending_reflections_returns_unreflected_facts(self, tmp_store):
+        """get_pending_reflections() returns observations with
+        kind='fact' AND reflected=0, sorted by observation_ts DESC."""
+        tmp_store.insert_observations([
+            {"id": "obs_1", "content": "fact 1", "source_quote": "q1",
+             "kind": "fact", "reflected": 0, "observation_ts": "2026-01-01T00:00:00"},
+            {"id": "obs_2", "content": "fact 2", "source_quote": "q2",
+             "kind": "fact", "reflected": 1, "observation_ts": "2026-01-02T00:00:00"},
+            {"id": "obs_3", "content": "reflection 1", "source_quote": None,
+             "kind": "reflection", "reflected": 0, "observation_ts": "2026-01-03T00:00:00"},
+        ])
+        pending = tmp_store.get_pending_reflections()
+        assert len(pending) == 1
+        assert pending[0]["id"] == "obs_1"
+
+    def test_mark_reflected_sets_flag(self, tmp_store):
+        """mark_reflected(['obs_1']) sets reflected=1 for those IDs."""
+        tmp_store.insert_observations([
+            {"id": "obs_1", "content": "a", "source_quote": "a",
+             "kind": "fact", "reflected": 0, "observation_ts": "2026-01-01T00:00:00"},
+            {"id": "obs_2", "content": "b", "source_quote": "b",
+             "kind": "fact", "reflected": 0, "observation_ts": "2026-01-02T00:00:00"},
+        ])
+        tmp_store.mark_reflected(["obs_1"])
+        all_obs = tmp_store.get_observations(limit=10)
+        flags = {o["id"]: o["reflected"] for o in all_obs}
+        assert flags["obs_1"] == 1
+        assert flags["obs_2"] == 0
