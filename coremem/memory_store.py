@@ -22,6 +22,25 @@ _REFLECTIONS_SCHEMA = {
 }
 
 
+_OBSERVATIONS_SCHEMA = {
+    "id":              "TEXT PRIMARY KEY",
+    "kind":            "TEXT NOT NULL DEFAULT 'fact'",
+    "content":         "LONGTEXT",
+    "source_quote":    "TEXT",
+    "source_fact_ids": "TEXT NOT NULL DEFAULT '[]'",
+    "referenced_date": "TEXT",
+    "observation_ts":  "TEXT NOT NULL",
+    "user_id":         "TEXT",
+    "agent_id":        "TEXT",
+    "session_id":      "TEXT",
+    "alignment_tier":        "TEXT",
+    "alignment_confidence":  "REAL",
+    "importance":      "REAL",
+    "entities":        "TEXT NOT NULL DEFAULT '[]'",
+    "reflected":       "INTEGER NOT NULL DEFAULT 0",
+}
+
+
 class MemoryStore:
     """Storage for observations and reflections.
 
@@ -90,33 +109,15 @@ class MemoryStore:
 
     def _ensure_tables(self) -> None:
         """Create the 0.5.0 single-table schema if it doesn't exist."""
-        self._db.raw_query("""
-            CREATE TABLE IF NOT EXISTS observations (
-                id              TEXT PRIMARY KEY,
-                kind            TEXT NOT NULL DEFAULT 'fact',
-                content         TEXT NOT NULL,
-                source_quote    TEXT,
-                source_fact_ids TEXT NOT NULL DEFAULT '[]',
-                referenced_date TEXT,
-                observation_ts  TEXT NOT NULL,
-                user_id         TEXT,
-                agent_id        TEXT,
-                session_id      TEXT,
-                alignment_tier        TEXT,
-                alignment_confidence  REAL,
-                importance      REAL,
-                entities        TEXT NOT NULL DEFAULT '[]',
-                reflected       INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_kind ON observations(kind)")
-        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_user ON observations(user_id)")
-        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id)")
-        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_reflected ON observations(reflected)")
-        self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance)")
+        if "observations" not in self._db.list_tables():
+            self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
+            self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_kind ON observations(kind)")
+            self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_user ON observations(user_id)")
+            self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id)")
+            self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_reflected ON observations(reflected)")
+            self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance)")
 
-        existing = set(self._db.list_tables())
-        if "reflections" not in existing:
+        if "reflections" not in self._db.list_tables():
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
 
     # ── Observations (single-table 0.5.0) ───────────────────────────────
@@ -143,34 +144,23 @@ class MemoryStore:
             if not isinstance(source_fact_ids, str):
                 source_fact_ids = json.dumps(source_fact_ids)
 
-            self._db.raw_query(
-                """
-                INSERT INTO observations (
-                    id, kind, content, source_quote, source_fact_ids,
-                    referenced_date, observation_ts,
-                    user_id, agent_id, session_id,
-                    alignment_tier, alignment_confidence,
-                    importance, entities, reflected
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    oid,
-                    item.get("kind", "fact"),
-                    item.get("content", ""),
-                    item.get("source_quote"),
-                    source_fact_ids,
-                    item.get("referenced_date"),
-                    item.get("observation_ts", now),
-                    item.get("user_id"),
-                    item.get("agent_id"),
-                    item.get("session_id"),
-                    item.get("alignment_tier"),
-                    item.get("alignment_confidence"),
-                    item.get("importance"),
-                    entities,
-                    item.get("reflected", 0),
-                ),
-            )
+            self._db.insert("observations", {
+                "id": oid,
+                "kind": item.get("kind", "fact"),
+                "content": item.get("content", ""),
+                "source_quote": item.get("source_quote"),
+                "source_fact_ids": source_fact_ids,
+                "referenced_date": item.get("referenced_date"),
+                "observation_ts": item.get("observation_ts", now),
+                "user_id": item.get("user_id"),
+                "agent_id": item.get("agent_id"),
+                "session_id": item.get("session_id"),
+                "alignment_tier": item.get("alignment_tier"),
+                "alignment_confidence": item.get("alignment_confidence"),
+                "importance": item.get("importance"),
+                "entities": entities,
+                "reflected": item.get("reflected", 0),
+            })
         return ids
 
     def get_observations(

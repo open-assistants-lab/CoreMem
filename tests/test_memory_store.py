@@ -174,3 +174,24 @@ class TestReflectionHelpers:
         flags = {o["id"]: o["reflected"] for o in all_obs}
         assert flags["obs_1"] == 1
         assert flags["obs_2"] == 0
+
+
+class TestSearchObservations:
+    def test_search_observations_finds_inserted_content(self, tmp_store):
+        """search_observations() should find observations inserted via
+        insert_observations() (FTS5/Chroma sync should fire).
+
+        Regression test for the bug where _ensure_tables used raw SQL,
+        bypassing HybridDB's _schema registration, which made
+        self._db.search() return [] because the table wasn't in _schema.
+        """
+        tmp_store.insert_observations([{
+            "id": "obs_1",
+            "content": "The user enjoys hiking on Saturdays",
+            "source_quote": "I love hiking on Saturdays",
+            "kind": "fact",
+            "observation_ts": "2026-01-15T10:00:00",
+        }])
+        results = tmp_store.search_observations("hiking")
+        assert len(results) >= 1
+        assert any(r["id"] == "obs_1" for r in results)
