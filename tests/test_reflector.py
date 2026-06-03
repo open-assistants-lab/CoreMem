@@ -175,6 +175,7 @@ class TestCountBasedTrigger:
                     "source_quote": f"q{i}",
                     "kind": "fact",
                     "reflected": 0,
+                    "importance": 0.5,
                     "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
                 }])
 
@@ -208,6 +209,7 @@ class TestCountBasedTrigger:
                     "source_quote": f"q{i}",
                     "kind": "fact",
                     "reflected": 0,
+                    "importance": 0.5,
                     "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
                 }])
 
@@ -226,6 +228,176 @@ class TestCountBasedTrigger:
             assert result is not None
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    async def test_maybe_run_marks_reflected_on_success(self):
+        """After a successful run_now(), source facts should be marked
+        reflected=1 via mark_reflected()."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=5, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            assert result is not None
+            # After reflection, facts should be marked reflected
+            pending = store.get_pending_reflections()
+            assert len(pending) == 0
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestStartStopLifecycle:
+    async def test_start_creates_background_task(self):
+        """start() spawns an asyncio task."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=50,
+                interval_hours=24,
+            )
+            await pipeline.start()
+            assert pipeline._task is not None
+            assert not pipeline._task.done()
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_start_is_idempotent(self):
+        """Calling start() twice is a no-op (doesn't spawn two tasks)."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            await pipeline.start()
+            task_1 = pipeline._task
+            await pipeline.start()
+            task_2 = pipeline._task
+            assert task_1 is task_2
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_stop_is_idempotent(self):
+        """Calling stop() twice doesn't raise."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            await pipeline.start()
+            await pipeline.stop()
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestImportanceAssignment:
+    async def test_assigns_importance_to_null_facts(self):
+        """Facts with NULL importance get importance assigned before
+        the main reflection call."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            # Insert facts with NULL importance (as 0.5.0 Observer does)
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"User fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": None,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=1, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            # The importance prompt response assigns scores, then the
+            # reflection prompt returns reflections
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                # First call: importance assignment
+                # Second call: reflection
+                mock_p.chat = AsyncMock(side_effect=[
+                    ChatResponse(content=(
+                        '[{"id": "obs_0", "importance": 0.8}, '
+                        '{"id": "obs_1", "importance": 0.6}, '
+                        '{"id": "obs_2", "importance": 0.3}, '
+                        '{"id": "obs_3", "importance": 0.9}, '
+                        '{"id": "obs_4", "importance": 0.4}]'
+                    )),
+                    _mock_reflector_response(),
+                ])
+                result = await pipeline.maybe_run()
+
+            assert result is not None
+            # Verify importance was written to the store
+            stored = store.get_observations()
+            scores = {o["id"]: o["importance"] for o in stored}
+            assert scores["obs_0"] == 0.8
+            assert scores["obs_1"] == 0.6
+            assert scores["obs_2"] == 0.3
+            assert scores["obs_3"] == 0.9
+            assert scores["obs_4"] == 0.4
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_skips_when_no_null_importance(self):
+        """If all facts already have importance, no importance prompt call."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=1, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            mock_p.chat.assert_called_once()  # only once = reflection, no importance
+            assert result is not None
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
     async def test_unreflected_count_excludes_already_reflected(self):
         """Facts that have already been reflected (reflected=1) must not
