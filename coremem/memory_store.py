@@ -78,6 +78,9 @@ class MemoryStore:
         if needs_migration:
             self._migrate_to_0_5_0()
         else:
+            # TODO(Task 4): replace _ensure_tables() with 0.5.0 single-table schema
+            # once insert_observations is rewritten to use it. Currently still
+            # creates the 0.4.0 split schema for backward compat.
             self._ensure_tables()
             self._stamp_schema_version("0.5.0")
 
