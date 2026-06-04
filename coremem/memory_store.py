@@ -28,6 +28,7 @@ _OBSERVATIONS_SCHEMA = {
     "content":         "LONGTEXT",
     "source_quote":    "TEXT",
     "source_fact_ids": "TEXT NOT NULL DEFAULT '[]'",
+    "source_message_ids": "TEXT DEFAULT '[]'",
     "referenced_date": "TEXT",
     "observation_ts":  "TEXT NOT NULL",
     "user_id":         "TEXT",
@@ -36,8 +37,37 @@ _OBSERVATIONS_SCHEMA = {
     "alignment_tier":        "TEXT",
     "alignment_confidence":  "REAL",
     "importance":      "REAL",
+    "confidence":      "REAL DEFAULT 0.800",
+    "memory_type":     "TEXT",
+    "durability":      "TEXT DEFAULT 'durable'",
+    "sensitivity":     "TEXT DEFAULT 'normal'",
+    "status":          "TEXT DEFAULT 'candidate'",
+    "valid_from":      "TEXT",
+    "valid_to":        "TEXT",
+    "superseded_by":   "TEXT",
     "entities":        "TEXT NOT NULL DEFAULT '[]'",
     "reflected":       "INTEGER NOT NULL DEFAULT 0",
+    "embedding":       "TEXT",
+}
+
+_MEMORY_EVENTS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "memory_id": "TEXT NOT NULL",
+    "event_type": "TEXT NOT NULL",
+    "old_value": "TEXT",
+    "new_value": "TEXT",
+    "source_message_id": "TEXT",
+    "created_at": "TEXT NOT NULL",
+}
+
+_MEMORY_CONFLICTS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "memory_id_a": "TEXT NOT NULL",
+    "memory_id_b": "TEXT NOT NULL",
+    "conflict_type": "TEXT NOT NULL",
+    "resolution_status": "TEXT DEFAULT 'unresolved'",
+    "created_at": "TEXT NOT NULL",
+    "resolved_at": "TEXT",
 }
 
 
@@ -67,6 +97,13 @@ class MemoryStore:
         else:
             self._ensure_tables()
             self._stamp_schema_version("0.5.0")
+
+        # v0.5 → v0.6 migration detection
+        columns = self._db.raw_query("PRAGMA table_info(observations)")
+        col_names = {c["name"] for c in columns}
+        if "memory_type" not in col_names:
+            from coremem.migrations.v0_5_to_v0_6 import migrate
+            migrate(self._db, str(path))
 
     @staticmethod
     def _detect_0_4_0_schema(db_path: Path) -> bool:
@@ -120,6 +157,12 @@ class MemoryStore:
         if "reflections" not in self._db.list_tables():
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
 
+        if "memory_events" not in self._db.list_tables():
+            self._db.create_table("memory_events", _MEMORY_EVENTS_SCHEMA)
+
+        if "memory_conflicts" not in self._db.list_tables():
+            self._db.create_table("memory_conflicts", _MEMORY_CONFLICTS_SCHEMA)
+
     # ── Observations (single-table 0.5.0) ───────────────────────────────
 
     def insert_observations(self, items: list[dict[str, Any]]) -> list[str]:
@@ -150,6 +193,7 @@ class MemoryStore:
                 "content": item.get("content", ""),
                 "source_quote": item.get("source_quote"),
                 "source_fact_ids": source_fact_ids,
+                "source_message_ids": item.get("source_message_ids", "[]"),
                 "referenced_date": item.get("referenced_date"),
                 "observation_ts": item.get("observation_ts", now),
                 "user_id": item.get("user_id"),
@@ -158,6 +202,14 @@ class MemoryStore:
                 "alignment_tier": item.get("alignment_tier"),
                 "alignment_confidence": item.get("alignment_confidence"),
                 "importance": item.get("importance"),
+                "confidence": item.get("confidence", 0.800),
+                "memory_type": item.get("memory_type", ""),
+                "durability": item.get("durability", "durable"),
+                "sensitivity": item.get("sensitivity", "normal"),
+                "status": item.get("status", "candidate"),
+                "valid_from": item.get("valid_from", ""),
+                "valid_to": item.get("valid_to", ""),
+                "superseded_by": item.get("superseded_by", ""),
                 "entities": entities,
                 "reflected": item.get("reflected", 0),
             })
@@ -334,3 +386,77 @@ class MemoryStore:
             self._db.update("reflections", row["id"], {"score": new_score})
             count += 1
         return count
+
+    # ── Memory lifecycle (v0.6) ──────────────────────────────────────────
+
+    def get_candidates(
+        self, content: str, user_id: str | None = None, limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Find potential duplicate/related memories by keyword overlap."""
+        words = set(content.lower().split())
+        if not words:
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        recent = self.get_recent_observations(days=30, limit=200)
+        for obs in recent:
+            if user_id and obs.get("user_id") != user_id:
+                continue
+            obs_words = set(obs.get("content", "").lower().split())
+            overlap = words & obs_words
+            min_len = min(len(words), len(obs_words))
+            if min_len > 0 and len(overlap) >= 3 and len(overlap) / min_len > 0.5:
+                candidates.append(obs)
+
+        candidates.sort(key=lambda o: o.get("observation_ts", ""), reverse=True)
+        return candidates[:limit]
+
+    def update_observation(self, obs_id: str, updates: dict[str, Any]) -> None:
+        """Update specific fields on an existing observation."""
+        if not updates:
+            return
+        set_parts = [f"{k} = ?" for k in updates]
+        values = list(updates.values()) + [obs_id]
+        self._db.raw_query(
+            f"UPDATE observations SET {', '.join(set_parts)} WHERE id = ?",
+            tuple(values),
+        )
+
+    def insert_event(
+        self,
+        memory_id: str,
+        event_type: str,
+        old_value: str | None = None,
+        new_value: str | None = None,
+        source_message_id: str | None = None,
+    ) -> str:
+        """Log a memory lifecycle event."""
+        eid = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self._db.insert("memory_events", {
+            "id": eid,
+            "memory_id": memory_id,
+            "event_type": event_type,
+            "old_value": old_value or "",
+            "new_value": new_value or "",
+            "source_message_id": source_message_id or "",
+            "created_at": now,
+        })
+        return eid
+
+    def create_conflict(
+        self, memory_id_a: str, memory_id_b: str, conflict_type: str,
+    ) -> str:
+        """Create a conflict record between two observations."""
+        cid = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self._db.insert("memory_conflicts", {
+            "id": cid,
+            "memory_id_a": memory_id_a,
+            "memory_id_b": memory_id_b,
+            "conflict_type": conflict_type,
+            "resolution_status": "unresolved",
+            "created_at": now,
+            "resolved_at": "",
+        })
+        return cid

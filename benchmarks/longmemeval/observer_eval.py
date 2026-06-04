@@ -160,6 +160,8 @@ async def run_observer_eval(
                     model=provider, token_threshold=1, min_turns=1,
                     tool_temp=0.1,
                     enable_gleaning=True,
+                    enable_classification=True,
+                    enable_dedup=True,
                 )
                 try:
                     obs = await pipeline.after_turn()
@@ -181,11 +183,17 @@ async def run_observer_eval(
                     "session_id": sid,
                     "observations": [
                         {
-                            "priority": o.get("priority", "?"),
                             "content": o.get("content", ""),
                             "source_quote": o.get("source_quote", ""),
-                            "importance": o.get("importance", 0.5),
+                            "importance": o.get("importance"),
                             "entities": o.get("entities", []),
+                            "alignment_tier": o.get("alignment_tier", ""),
+                            "memory_type": o.get("memory_type", ""),
+                            "durability": o.get("durability", ""),
+                            "sensitivity": o.get("sensitivity", ""),
+                            "status": o.get("status", ""),
+                            "confidence": o.get("confidence", ""),
+                            "source_message_ids": o.get("source_message_ids", "[]"),
                         }
                         for o in session_obs
                     ],

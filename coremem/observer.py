@@ -9,6 +9,7 @@ that demonstrate the verbatim-quote contract.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -203,6 +204,7 @@ RULES:
 - source_quote must be copy-pasted exactly — do not rephrase.
 - If you cannot find a verbatim sub-string, skip that item.
 - Some items are attribute-value pairs (e.g. "commute: 45 minutes"). Extract the relationship as a fact about the user and the value.
+- IMPORTANT: The content field MUST include the entity/item name verbatim. For entity "The Glass Menagerie", write "User attended The Glass Menagerie", not "User attended a play". For entity "sports store downtown", write "bought racket from sports store downtown", not "bought a new racket".
 
 Examples:
 
@@ -571,9 +573,13 @@ class ObserverPipeline:
         min_turns: int = 3,
         max_messages: int = 500,
         enable_gleaning: bool = False,
+        enable_classification: bool = False,
+        enable_dedup: bool = False,
         tool_temp: float = 0.1,
     ):
         self._enable_gleaning = enable_gleaning
+        self._enable_classification = enable_classification
+        self._enable_dedup = enable_dedup
         self._core = core
         self._store = store
         self._session_id = session_id
@@ -701,12 +707,17 @@ class ObserverPipeline:
                         obs["alignment_tier"] = result.tier.value
                         obs["alignment_confidence"] = result.confidence
                         dedup_targets = prior + new_obs
+                        if any(content == p.get("content", "") for p in dedup_targets):
+                            continue
                         if any(_string_similarity(content, p.get("content", "")) > 0.75 for p in dedup_targets):
                             continue
                         obs["session_id"] = self._session_id
                         obs["user_id"] = self._user_id or ""
                         obs["agent_id"] = self._agent_id or ""
                         obs.pop("id", None)
+                        obs["source_message_ids"] = json.dumps(
+                            [m.id for m in new_messages if m.id]
+                        )
                         new_obs.append(obs)
 
         # Phase 3: Per-message gleaning — review each user message for missed facts
@@ -745,15 +756,40 @@ class ObserverPipeline:
                         obs["alignment_tier"] = result.tier.value
                         obs["alignment_confidence"] = result.confidence
                         dedup_targets = prior + new_obs
+                        if any(content == p.get("content", "") for p in dedup_targets):
+                            continue
                         if any(_string_similarity(content, p.get("content", "")) > 0.75 for p in dedup_targets):
                             continue
                         obs["session_id"] = self._session_id
                         obs["user_id"] = self._user_id or ""
                         obs["agent_id"] = self._agent_id or ""
                         obs.pop("id", None)
+                        obs["source_message_ids"] = json.dumps(
+                            [m.id for m in pair if m.id]
+                        )
                         new_obs.append(obs)
                 except Exception as e:
                     logger.warning("gleaning_error", {"error": str(e)})
+
+        # Phase 4: Classification + Durability Filter
+        if self._enable_classification and new_obs:
+            try:
+                from coremem.classifier import classify_observations
+                new_obs = await classify_observations(
+                    self._observer._provider, new_obs,
+                )
+            except Exception as e:
+                logger.warning("classification_error", {"error": str(e)})
+
+        # Phase 5: Dedup + Merge
+        if self._enable_dedup and new_obs:
+            try:
+                from coremem.dedup import dedup_and_merge
+                new_obs = await dedup_and_merge(
+                    self._observer._provider, self._store, new_obs,
+                )
+            except Exception as e:
+                logger.warning("dedup_error", {"error": str(e)})
 
         if new_obs:
             self._store.insert_observations(new_obs)
