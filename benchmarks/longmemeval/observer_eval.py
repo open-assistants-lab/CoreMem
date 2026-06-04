@@ -158,6 +158,8 @@ async def run_observer_eval(
                 pipeline = ObserverPipeline(
                     core=core, store=store, session_id=sid,
                     model=provider, token_threshold=1, min_turns=1,
+                    tool_temp=0.1,
+                    enable_gleaning=True,
                 )
                 try:
                     obs = await pipeline.after_turn()

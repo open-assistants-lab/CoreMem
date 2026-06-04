@@ -30,15 +30,15 @@ class TestObserverConstants:
         assert "return an empty observations array" not in OBSERVER_SYSTEM_PROMPT
 
     def test_system_prompt_preserves_no_verbatim_no_observation(self):
-        """The 0.4.0 prompt had a separate line: 'If you cannot find a verbatim
-        sub-string, do not return the observation.' 0.5.0 preserves this."""
+        """The prompt requires: 'If you cannot find a verbatim
+        sub-string, you must not return the observation.'"""
         assert "verbatim" in OBSERVER_SYSTEM_PROMPT.lower()
-        assert "do not return the observation" in OBSERVER_SYSTEM_PROMPT
+        assert "must not return the observation" in OBSERVER_SYSTEM_PROMPT
 
     def test_system_prompt_encourages_liberal_extraction(self):
         """The 0.5.0 prompt explicitly encourages liberal extraction."""
         prompt_lower = OBSERVER_SYSTEM_PROMPT.lower()
-        assert "liberal" in prompt_lower or "attempt to extract" in prompt_lower
+        assert "liberal" in prompt_lower or "all user messages" in prompt_lower
 
     def test_tool_schema_has_no_priority(self):
         params = OBSERVATION_TOOL["function"]["parameters"]
@@ -71,9 +71,12 @@ class TestObserverConstructor:
         obs = Observer(model="openai:gpt-4o-mini")
         assert obs is not None
 
-    def test_enable_gleaning_raises(self):
-        with pytest.raises(NotImplementedError, match="gleaning"):
-            Observer(enable_gleaning=True)
+    def test_enable_gleaning_no_longer_raises(self):
+        """enable_gleaning was implemented in v0.5.x — no longer raises."""
+        try:
+            Observer()
+        except NotImplementedError:
+            pytest.fail("enable_gleaning should not raise NotImplementedError anymore")
 
 
 def _mock_tool_response(arguments: str) -> ChatResponse:
