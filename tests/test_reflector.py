@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -123,5 +124,314 @@ class TestReflectorImportanceFilter:
             assert low_count == 100, f"expected 100 low-importance (capped), got {low_count}"
             assert "low fact 0" not in user_content, "oldest obs should be capped out"
             assert "low fact 249" in user_content, "newest obs should be in the cap"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestCountBasedTrigger:
+    async def test_maybe_run_skips_when_count_below_threshold(self):
+        """With 5 unreflected facts and N=50 plus a recent last_run_ts,
+        neither trigger fires — maybe_run() must return None without
+        calling the LLM."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=50, interval_hours=9999,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock()
+                result = await pipeline.maybe_run()
+
+            assert result is None
+            mock_p.chat.assert_not_called()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_maybe_run_fires_on_count_threshold(self):
+        """With 50 unreflected facts and N=50 plus a recent last_run_ts
+        (so the time-based trigger would NOT fire), the count trigger
+        must fire and invoke the LLM."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(50):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=50, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            mock_p.chat.assert_called_once()
+            assert result is not None
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_maybe_run_fires_on_time_even_when_count_below(self):
+        """With only 5 unreflected facts and N=999 (count never hits),
+        but interval_hours=1 and last_run_ts=0 (long ago), the time
+        trigger fires."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=999, interval_hours=1,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = 0.0
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            mock_p.chat.assert_called_once()
+            assert result is not None
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_maybe_run_marks_reflected_on_success(self):
+        """After a successful run_now(), source facts should be marked
+        reflected=1 via mark_reflected()."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=5, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            assert result is not None
+            # After reflection, facts should be marked reflected
+            pending = store.get_pending_reflections()
+            assert len(pending) == 0
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestStartStopLifecycle:
+    async def test_start_creates_background_task(self):
+        """start() spawns an asyncio task."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=50,
+                interval_hours=24,
+            )
+            await pipeline.start()
+            assert pipeline._task is not None
+            assert not pipeline._task.done()
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_start_is_idempotent(self):
+        """Calling start() twice is a no-op (doesn't spawn two tasks)."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            await pipeline.start()
+            task_1 = pipeline._task
+            await pipeline.start()
+            task_2 = pipeline._task
+            assert task_1 is task_2
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_stop_is_idempotent(self):
+        """Calling stop() twice doesn't raise."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            await pipeline.start()
+            await pipeline.stop()
+            await pipeline.stop()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestImportanceAssignment:
+    async def test_assigns_importance_to_null_facts(self):
+        """Facts with NULL importance get importance assigned before
+        the main reflection call."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            # Insert facts with NULL importance (as 0.5.0 Observer does)
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"User fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": None,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=1, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            # The importance prompt response assigns scores, then the
+            # reflection prompt returns reflections
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                # First call: importance assignment
+                # Second call: reflection
+                mock_p.chat = AsyncMock(side_effect=[
+                    ChatResponse(content=(
+                        '[{"id": "obs_0", "importance": 0.8}, '
+                        '{"id": "obs_1", "importance": 0.6}, '
+                        '{"id": "obs_2", "importance": 0.3}, '
+                        '{"id": "obs_3", "importance": 0.9}, '
+                        '{"id": "obs_4", "importance": 0.4}]'
+                    )),
+                    _mock_reflector_response(),
+                ])
+                result = await pipeline.maybe_run()
+
+            assert result is not None
+            # Verify importance was written to the store
+            stored = store.get_observations()
+            scores = {o["id"]: o["importance"] for o in stored}
+            assert scores["obs_0"] == 0.8
+            assert scores["obs_1"] == 0.6
+            assert scores["obs_2"] == 0.3
+            assert scores["obs_3"] == 0.9
+            assert scores["obs_4"] == 0.4
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    async def test_skips_when_no_null_importance(self):
+        """If all facts already have importance, no importance prompt call."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            for i in range(5):
+                store.insert_observations([{
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "importance": 0.5,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=1, interval_hours=9999,
+                min_observations=1,
+            )
+            pipeline._last_run_ts = time.time()
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
+                result = await pipeline.maybe_run()
+
+            mock_p.chat.assert_called_once()  # only once = reflection, no importance
+            assert result is not None
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+    async def test_unreflected_count_excludes_already_reflected(self):
+        """Facts that have already been reflected (reflected=1) must not
+        count toward the trigger threshold."""
+        d = tempfile.mkdtemp()
+        store = MemoryStore(path=d)
+        try:
+            ids = []
+            for i in range(50):
+                obs = {
+                    "id": f"obs_{i}",
+                    "content": f"fact {i}",
+                    "source_quote": f"q{i}",
+                    "kind": "fact",
+                    "reflected": 0,
+                    "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
+                }
+                store.insert_observations([obs])
+                ids.append(obs["id"])
+            store.mark_reflected(ids[:40])
+
+            pipeline = ReflectorPipeline(
+                store, model="ollama:llama3.2",
+                trigger_every_n_observations=50, interval_hours=9999,
+            )
+            pipeline._last_run_ts = time.time()
+
+            assert len(store.get_pending_reflections()) == 10
+
+            with patch.object(pipeline._reflector, "_provider") as mock_p:
+                mock_p.chat = AsyncMock()
+                result = await pipeline.maybe_run()
+
+            assert result is None
+            mock_p.chat.assert_not_called()
         finally:
             shutil.rmtree(d, ignore_errors=True)

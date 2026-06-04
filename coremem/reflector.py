@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -36,6 +37,16 @@ CRITICAL RULES:
 {previous_reflections}
 
 Return ONLY the JSON array, no markdown wrapping, no explanation."""
+
+IMPORTANCE_PROMPT = """Assign importance scores to the following facts about a user. Use these anchors:
+- 0.7-1.0: Identity, jobs, major life events, contact info
+- 0.4-0.6: Preferences, habits, projects, plans
+- 0.0-0.3: Context, trivia, throwaway
+
+Return a JSON array of objects with "id" (the fact id) and "importance" (0.0-1.0).
+
+Facts:
+{facts}"""
 
 
 class Reflector:
@@ -95,6 +106,9 @@ class ReflectorPipeline:
         embedding_fn: Embedding function for cosine similarity quality gate.
         interval_hours: How often to run (default 24).
         min_observations: Skip if fewer new observations (default 10).
+        trigger_every_n_observations: Fire when unreflected fact count reaches
+            this threshold (default 50). Hybrid trigger: fires when EITHER
+            count >= N OR interval has elapsed.
     """
 
     def __init__(
@@ -108,6 +122,7 @@ class ReflectorPipeline:
         embedding_fn: Any = None,
         interval_hours: int = 24,
         min_observations: int = 10,
+        trigger_every_n_observations: int = 50,
     ):
         self._store = store
         self._user_id = user_id
@@ -118,16 +133,27 @@ class ReflectorPipeline:
         self._embedding_fn = embedding_fn
         self._interval_hours = interval_hours
         self._min_observations = min_observations
+        self._trigger_every_n = trigger_every_n_observations
 
         self._last_run_ts: float = 0.0
         self._last_run_observation_id: str | None = None
+        self._task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
 
     async def maybe_run(self) -> list[dict[str, Any]] | None:
-        """Run if interval has elapsed. Returns new reflections or None."""
+        """Run if EITHER the time interval has elapsed OR the unreflected
+        fact count has reached ``trigger_every_n_observations``. Returns new
+        reflections or None."""
         now = time.time()
-        if now - self._last_run_ts < self._interval_hours * 3600:
+        time_elapsed = now - self._last_run_ts >= self._interval_hours * 3600
+        count_hit = self._count_unreflected() >= self._trigger_every_n
+        if not (time_elapsed or count_hit):
             return None
         return await self.run_now()
+
+    def _count_unreflected(self) -> int:
+        """Count unreflected facts in the store."""
+        return len(self._store.get_pending_reflections())
 
     async def run_now(self) -> list[dict[str, Any]] | None:
         """Force a run regardless of timer."""
@@ -141,6 +167,9 @@ class ReflectorPipeline:
 
         if len(observations) < self._min_observations:
             return None
+
+        # 0.5.0: Fill importance for any observations with NULL importance
+        await self._assign_importance_to_pending()
 
         # Priority sampling for large observation sets (0.4.0: use importance)
         if len(observations) > 200:
@@ -174,11 +203,91 @@ class ReflectorPipeline:
 
         if good:
             new_ids = self._store.insert_reflections(good)  # noqa: F841
+            # Mark source facts as reflected
+            obs_ids = [o.get("id") for o in observations if o.get("id")]
+            if obs_ids:
+                self._store.mark_reflected(obs_ids)
             if observations:
                 self._last_run_observation_id = observations[-1].get("id")
             self._last_run_ts = time.time()
 
         return good
+
+    async def start(self) -> None:
+        """Start the background Reflector worker.
+        Idempotent: calling twice is a no-op.
+        """
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run_loop())
+
+    async def stop(self) -> None:
+        """Stop the background Reflector worker.
+        Idempotent: calling twice is a no-op. Awaits any in-flight
+        reflection before returning (up to 30s grace period).
+        """
+        if self._task is None:
+            return
+        if self._task.done():
+            self._task = None
+            return
+        self._task.cancel()
+        try:
+            await asyncio.wait_for(self._task, timeout=30.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        self._task = None
+
+    async def _run_loop(self) -> None:
+        """Background loop: poll and reflect as needed.
+        Auto-restarts on crash with exponential backoff.
+        """
+        backoff = 1.0
+        max_backoff = 60.0
+        while True:
+            try:
+                await asyncio.sleep(60.0)
+                async with self._lock:
+                    await self.maybe_run()
+                backoff = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Reflector worker error, restarting in %ss: %s", backoff, e
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    async def _assign_importance_to_pending(self) -> None:
+        """Assign importance to unreflected facts with NULL importance.
+        Uses the Reflector's LLM to calibrate scores. Skips if no pending
+        facts have NULL importance.
+        """
+        pending = self._store.get_pending_reflections()
+        null_importance = [o for o in pending if o.get("importance") is None]
+        if not null_importance:
+            return
+
+        facts_text = "\n".join(
+            f"- {o.get('id', '?')}: {o.get('content', '')}"
+            for o in null_importance[:200]
+        )
+        prompt = IMPORTANCE_PROMPT.format(facts=facts_text)
+        response = await self._reflector._provider.chat(
+            chat_messages("", prompt)
+        )
+        scores = parse_json_array(response.content)
+
+        for score in scores:
+            oid = score.get("id")
+            val = score.get("importance")
+            if oid is not None and val is not None:
+                self._store._db.update("observations", oid, {"importance": val})
+                for obs in null_importance:
+                    if obs.get("id") == oid:
+                        obs["importance"] = val
+                        break
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:

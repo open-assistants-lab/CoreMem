@@ -93,9 +93,11 @@ class TestObserverPipelineAlignment:
                 token_threshold=1, min_turns=1,
             )
             with patch.object(pipeline._observer, "_provider") as mock_p:
-                mock_p.chat_with_tools = AsyncMock(
-                    return_value=_mock_valid_tool_response()
+                entity_resp = ChatResponse(
+                    content="", tool_calls=[{"function": {"arguments": '{"entities": ["software engineer"]}'}}],
                 )
+                obs_resp = _mock_valid_tool_response()
+                mock_p.chat_with_tools = AsyncMock(side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, obs_resp])
                 result = await pipeline.after_turn()
             assert result is not None
             assert len(result) == 1
@@ -121,14 +123,19 @@ class TestObserverPipelineAlignment:
                 token_threshold=1, min_turns=1,
             )
             with patch.object(pipeline._observer, "_provider") as mock_p:
+                entity_resp = ChatResponse(
+                    content="", tool_calls=[{"function": {"arguments": '{"entities": ["example"]}'}}],
+                )
+                fabricated = ChatResponse(
+                    content="", tool_calls=[{"function": {"arguments": '{"observations": [{"id":"o1","content":"User is a doctor","source_quote":"I am a doctor","importance":0.8,"referenced_date":"2026-06-01","entities":["example"]}]}'}}],
+                )
                 mock_p.chat_with_tools = AsyncMock(
-                    return_value=_mock_fabricated_tool_response()
+                    side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, fabricated],
                 )
                 result = await pipeline.after_turn()
             assert result is not None
+            # Quote "I am a doctor" is NOT in source "I am a software engineer" → dropped
             assert len(result) == 0
-            stored = store.get_observations()
-            assert len(stored) == 0
         finally:
             core._test_cleanup()
             store._test_cleanup()

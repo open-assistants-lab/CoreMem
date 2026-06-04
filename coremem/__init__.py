@@ -1,14 +1,13 @@
 """coremem — Zero-LLM memory for AI agents.
 
-Dual-backend architecture:
-  - ChromaBackend: Pure ChromaDB (baseline, 95%+ LongMemEval target)
-  - HybridBackend: HybridDB (SQLite+FTS5+ChromaDB, >95% target)
+Default backend (0.5.0+): HybridBackend (HybridDB — SQLite+FTS5+ChromaDB)
+Legacy: ChromaBackend (pure ChromaDB, emits DeprecationWarning)
 
 Usage:
     from coremem import MemoryCore
-    from coremem.backends.chroma import ChromaBackend
+    from coremem.backends.hybrid import HybridBackend
 
-    core = MemoryCore(backend=ChromaBackend(path="./memory"))
+    core = MemoryCore(backend=HybridBackend(path="./memory"))
     results = core.search("How many model kits?")
     context = core.wakeup(user_id="alice")
     core.ingest("user", "I built a Spitfire model kit")

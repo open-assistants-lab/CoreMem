@@ -42,11 +42,12 @@ class ChatResponse:
 class _OpenAIAdapter:
     """OpenAI-compatible chat completions adapter."""
 
-    def __init__(self, model: str, api_key: str, base_url: str, json_mode: bool = False):
+    def __init__(self, model: str, api_key: str, base_url: str, json_mode: bool = False, tool_temp: float = 0.1):
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._json_mode = json_mode
+        self._tool_temp = tool_temp
 
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
         headers = {"Content-Type": "application/json"}
@@ -86,7 +87,7 @@ class _OpenAIAdapter:
             "messages": messages,
             "tools": tools,
             "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
-            "temperature": 0.1,
+            "temperature": self._tool_temp,
             "thinking": {"type": "disabled"},
         }
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
@@ -262,12 +263,13 @@ _PROVIDER_CLASSES: dict[str, type] = {
 # ── Factory ────────────────────────────────────────────────────────────────
 
 
-def create_provider(model_string: str) -> LLMProvider:
+def create_provider(model_string: str, **kwargs: Any) -> LLMProvider:
     """Create an LLM provider from a ``provider_prefix:model_name`` string.
 
     Args:
         model_string: e.g. ``"openai:gpt-4o-mini"``, ``"ollama:llama3.2"``,
             ``"anthropic:claude-sonnet-4-20250514"``.
+        **kwargs: passed to the provider adapter constructor (e.g. ``tool_temp=0.1``).
 
     Returns:
         An object with ``async def chat(messages) -> ChatResponse``.
@@ -289,4 +291,4 @@ def create_provider(model_string: str) -> LLMProvider:
         base_url = meta["base_url"]
 
     cls = _PROVIDER_CLASSES.get(prefix, _OpenAIAdapter)
-    return cls(model=model, api_key=api_key, base_url=base_url)
+    return cls(model=model, api_key=api_key, base_url=base_url, **kwargs)
