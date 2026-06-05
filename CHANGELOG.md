@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.5.1] — 2026-06-05 — Documentation & stability
+
+### Added
+- README section documenting ObserverPipeline, the 7-LF architecture, and the tradeoff between LLM-based LFs (universal language support, 0% hallucination) and non-LLM alternatives (English-only, unverified).
+
+### Changed
+- `pyproject.toml` version bumped to 0.5.1 (matching `__init__.py`).
+
+## [0.5.0] — 2026-06-05 — Stance extraction, classifier debias, dedup fixes
+
+### Added
+- 7th labeling function `_LF_STANCE_PROMPT` for opinion/position/belief extraction — detects hard positions ("should", "must", "ban"), values, tradeoffs, and adequacy judgments.
+- `stance` as 13th memory type in classifier (alongside profile, preference, project, decision, technical_stack, business_context, people, constraint, workflow, episodic, procedural, sentiment).
+
+### Changed
+- Classifier prompt: removed "99% durable / when in doubt durable" bias. Replaced with decision rules distinguishing durable (reveals user identity/preferences) from temporary (one-off requests, session context).
+- Classifier examples updated: 15 durable examples + 4 temporary examples (was 0 temporary examples).
+- `_LF_ACTIONS_PROMPT` added to `_LABELING_FUNCTIONS` (was temporarily excluded).
+
+### Bug fixes
+- **Intra-turn dedup:** Step 0 added to `dedup_and_merge()` catches cross-phase near-duplicates using SequenceMatcher > 0.70 before the LLM dedup stage. Prevents duplicate observations from Phase 2 and Phase 3 producing the same fact.
+- **Double-append bug:** Redundant `final.append(archived_obs)` in dedup Step 1 removed — archived observations were duplicated in the final list.
+- **Test mock fix:** `test_valid_quote_is_inserted_with_alignment_tier` and `test_fabricated_quote_is_dropped` updated to expect 7 LFs (was 6).
+
+### Performance
+- 20-question LongMemEval: 417 observations, 0% hallucination, 0 duplicates, 34% temporary rate.
+- Per-question average: ~35s on DeepSeek V4 Flash (7 parallel LFs + 1 batch relation extraction).
+
+### Verification
+- Human-vs-pipeline manual comparison across all 20 questions: 75% PASS, 15% MINOR, 10% FAIL.
+- 2 FAIL cases (third-party events, contextual asides) are the measured cost of the hallucination gate.
+
 ## [0.4.0] — 2026-06-02 — Observer rewrite
 
 ### Breaking changes

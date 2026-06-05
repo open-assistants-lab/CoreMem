@@ -97,7 +97,7 @@ class TestObserverPipelineAlignment:
                     content="", tool_calls=[{"function": {"arguments": '{"entities": ["software engineer"]}'}}],
                 )
                 obs_resp = _mock_valid_tool_response()
-                mock_p.chat_with_tools = AsyncMock(side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, obs_resp])
+                mock_p.chat_with_tools = AsyncMock(side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, obs_resp])
                 result = await pipeline.after_turn()
             assert result is not None
             assert len(result) == 1
@@ -130,7 +130,7 @@ class TestObserverPipelineAlignment:
                     content="", tool_calls=[{"function": {"arguments": '{"observations": [{"id":"o1","content":"User is a doctor","source_quote":"I am a doctor","importance":0.8,"referenced_date":"2026-06-01","entities":["example"]}]}'}}],
                 )
                 mock_p.chat_with_tools = AsyncMock(
-                    side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, fabricated],
+                    side_effect=[entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, entity_resp, fabricated],
                 )
                 result = await pipeline.after_turn()
             assert result is not None
