@@ -31,8 +31,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from coremem import MemoryCore, MemoryStore
-from coremem.backends.hybrid import HybridBackend
+from coremem import MemoryCore
 from coremem.observer import ObserverPipeline
 from coremem.reflector import ReflectorPipeline
 
@@ -144,11 +143,9 @@ async def run_observer_eval(
         session_details: list[dict] = []
 
         d1 = tempfile.mkdtemp()
-        d2 = tempfile.mkdtemp()
 
         try:
-            core = MemoryCore(backend=HybridBackend(path=d1))
-            store = MemoryStore(path=d2)
+            core = MemoryCore(path=d1, enable_observations=True)
 
             for si, (sess_idx, sess_messages) in enumerate(answer_sessions):
                 sid = f"answer_session_{si}"
@@ -156,7 +153,7 @@ async def run_observer_eval(
                     core.ingest(msg["role"], msg["content"], session_id=sid)
 
                 pipeline = ObserverPipeline(
-                    core=core, store=store, session_id=sid,
+                    memory=core, session_id=sid,
                     model=provider, token_threshold=1, min_turns=1,
                     tool_temp=0.1,
                     enable_gleaning=True,
@@ -164,7 +161,7 @@ async def run_observer_eval(
                     enable_dedup=True,
                 )
                 try:
-                    obs = await pipeline.after_turn()
+                    obs = await pipeline.extract()
                 except Exception as e:
                     session_details.append({
                         "session_index": sess_idx,
@@ -209,7 +206,7 @@ async def run_observer_eval(
             if mode == "both":
                 try:
                     reflector = ReflectorPipeline(
-                        store=store, model=provider, min_observations=3,
+                        memory=core, model=provider, min_observations=3,
                     )
                     refl = await reflector.run_now()
                     if refl:
@@ -225,7 +222,6 @@ async def run_observer_eval(
 
         finally:
             shutil.rmtree(d1, ignore_errors=True)
-            shutil.rmtree(d2, ignore_errors=True)
 
         result = {
             "question_id": q_id,
