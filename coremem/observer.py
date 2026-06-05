@@ -143,6 +143,17 @@ _LF_SENTIMENT_PROMPT = """List every emotional reaction, affective state, or eva
 
 _LF_POSSESSIONS_PROMPT = """List every item, product, tool, or object the user owns, bought, purchased, uses, or possesses. Include apps, devices, books, equipment, clothing, subscriptions. Examples: "bought new tennis racket from sports store downtown", "uses Audible app", "reads Gone Girl on Kindle", "has a Spotify account". Use the list_entities tool."""
 
+_LF_STANCE_PROMPT = """List every stated position, opinion, stance, belief, value, or judgment expressed by the user. Include:
+- Hard positions: anything with "should", "must", "need to", "ban", "oppose", "support", "is not enough", "completely"
+- What the user supports or opposes: "fracking should be completely banned", "supports renewable energy", "opposes single-use plastics"
+- What the user believes should happen: "companies must be held accountable", "regulation alone is not sufficient", "we should do more"
+- The user's values and principles: "long-term consequences outweigh short-term gain", "protecting water is worth the cost"
+- Judgments about adequacy: "monitoring measures are insufficient", "current regulations are inadequate", "X is simply not enough"
+- Stated motivations and tradeoffs: "X is not worth Y", "we need to do Z to protect A"
+- Declarative positions: "clean energy is the only way forward", "fracking has unacceptable risks"
+Look for strong language: "completely", "simply not", "must", "should", "never", "always", "need", "worth", "enough", "insufficient", "unacceptable".
+Use the list_entities tool."""
+
 _LABELING_FUNCTIONS: list[tuple[str, str]] = [
     ("entities", _LF_ENTITIES_PROMPT),
     ("actions", _LF_ACTIONS_PROMPT),
@@ -150,6 +161,7 @@ _LABELING_FUNCTIONS: list[tuple[str, str]] = [
     ("temporal", _LF_TEMPORAL_PROMPT),
     ("sentiment", _LF_SENTIMENT_PROMPT),
     ("possessions", _LF_POSSESSIONS_PROMPT),
+    ("stance", _LF_STANCE_PROMPT),
 ]
 
 # ── Legacy extraction prompts (unused in LF pipeline) ────────────

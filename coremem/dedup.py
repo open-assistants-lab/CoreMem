@@ -68,6 +68,12 @@ def build_dedup_prompt(
     return "\n".join(lines)
 
 
+def _obs_similarity(a: str, b: str) -> float:
+    """String similarity using difflib."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
 async def dedup_and_merge(
     provider: Any,
     store: Any,
@@ -78,10 +84,26 @@ async def dedup_and_merge(
     final: list[dict[str, Any]] = []
     pairs: list[dict[str, Any]] = []
 
+    # Step 0: Intra-turn fuzzy dedup — catch cross-phase near-duplicates
+    # Phase 2 and Phase 3 can produce observations about the same fact with
+    # different wording. Archive later duplicates before they reach the LLM.
+    archived_indices: set[int] = set()
+    for i in range(len(new_obs)):
+        if i in archived_indices:
+            continue
+        content_i = new_obs[i].get("content", "")
+        for j in range(i + 1, len(new_obs)):
+            if j in archived_indices:
+                continue
+            content_j = new_obs[j].get("content", "")
+            if content_i == content_j or _obs_similarity(content_i, content_j) > 0.70:
+                archived_indices.add(j)
+    for idx in archived_indices:
+        new_obs[idx]["status"] = "archived"
+
     # Step 1: Find candidates for each observation
     for i, obs in enumerate(new_obs):
         if obs.get("status") == "archived":
-            final.append(obs)
             continue
         user_id = obs.get("user_id")
         candidates = store.get_candidates(obs.get("content", ""), user_id=user_id)

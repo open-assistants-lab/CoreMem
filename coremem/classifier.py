@@ -6,50 +6,54 @@ from typing import Any
 
 _CLASSIFICATION_PROMPT = """You are a memory classifier. For each observation below, classify:
 
-1. memory_type: profile | preference | project | decision | technical_stack | business_context | people | constraint | workflow | episodic | procedural | sentiment
+1. memory_type: profile | preference | project | decision | technical_stack | business_context | people | constraint | workflow | episodic | procedural | sentiment | stance
 2. durability: durable | temporary
 3. sensitivity: normal | personal | sensitive
 
-CORE RULE: Almost EVERY observation is DURABLE. Only mark as temporary if the fact is truly useless beyond this specific conversation.
-
-DURABLE (99% of observations — these are ALL durable):
+DURABLE — reveals something about the user that would be useful in FUTURE conversations:
 - Identity facts: job, degree, name, location, contact info
-- Preferences/interests: any like, dislike, or request for recommendations.
-  "User asked for meal prep containers" IS durable — reveals interest in meal prep.
-  "User asked about warm-up exercises" IS durable — reveals interest in fitness.
-  "User is looking for charity events" IS durable — reveals charitable interests.
+- Preferences/interests: likes, dislikes, values, causes they care about
 - Habits/routines: daily activities, recurring patterns
 - Past events: festivals, plays, trips, experiences (even one-time events)
 - Plans/goals: upcoming travel, purchases, intentions
-- Administrative/life-event tasks: name changes, account updates, moving — durable
-- Tools/apps: any software, device, service the user uses or considers using
+- Administrative/life-event tasks: name changes, account updates, moving
+- Tools/apps: any software, device, service the user uses or considers
 - People/relationships: any named person connected to the user
+- Stances/positions: what the user supports, opposes, believes should happen
 - Sentiments/opinions: how the user feels about things
 - Self-descriptions: struggles, strengths, abilities
 
-TEMPORARY (only these — use sparingly):
-- Weather queries: "User asked about the weather forecast for this weekend"
+TEMPORARY — only useful in THIS conversation, not beyond:
+- One-off recommendation requests: "User asked for restaurant recommendations in Hilo"
+- Session-specific Q&A: "User wanted to know about fracking regulations in Pennsylvania"
+- Task-specific help: "User needed help formatting a spreadsheet"
+- Weather/time queries: "User asked about the weather forecast for this weekend"
 - Hypotheticals with no commitment: "User wondered what if..."
+- When the observation describes what the user asked the assistant, not what the user IS
 
-When in doubt, choose DURABLE. Temporary should be the exception, not the rule.
+Decision rule:
+- Does this fact help understand the user's identity, preferences, or situation? → DURABLE
+- Is this just describing what the user needed help with right now? → TEMPORARY
+- Would knowing this next session improve the assistant's responses? → DURABLE
+- Is this only relevant to the specific task in this conversation? → TEMPORARY
 
-Examples (ALL durable):
+Examples:
 - "User works at Anthropic" -> profile, durable, normal, 0.95
-- "User asked about meal prep containers" -> preference, durable, normal, 0.85
-- "User asked about warm-up exercises" -> preference, durable, normal, 0.85
-- "User recently changed their last name from Johnson" -> profile, durable, normal, 0.95
-- "User needs to update DMV for name change" -> profile, durable, normal, 0.90
+- "User prefers audiobooks over e-books" -> preference, durable, normal, 0.85
+- "User recently changed their last name from Johnson to Winters" -> profile, durable, normal, 0.95
+- "User attended a play at community theater" -> episodic, durable, normal, 0.90
+- "User is concerned about environmental impact of fracking" -> sentiment, durable, normal, 0.85
+- "User believes fracking should be completely banned" -> stance, durable, normal, 0.95
+- "User thinks long-term consequences of fracking outweigh short-term gains" -> stance, durable, normal, 0.90
+- "User does not trust fracking companies to self-monitor" -> stance, durable, normal, 0.85
+- "User supports transitioning to renewable energy" -> stance, durable, normal, 0.90
+- "User uses Audible for audiobooks" -> technical_stack, durable, normal, 0.90
 - "User is looking for charity events in LA" -> preference, durable, normal, 0.85
 - "User is getting used to a 9-to-5 schedule" -> profile, durable, normal, 0.90
-- "User attended a play at community theater" -> episodic, durable, normal, 0.90
-- "User is interested in taking acting classes" -> preference, durable, normal, 0.85
-- "User struggles with getting into character" -> profile, durable, normal, 0.85
-- "User uses Audible for audiobooks" -> technical_stack, durable, normal, 0.90
-- "User prefers audiobooks over e-books" -> preference, durable, normal, 0.85
-- "User is considering getting a tennis ball machine" -> decision, durable, normal, 0.85
-
-Example of TEMPORARY (the only kind):
-- "User asked about the weather forecast for this weekend" -> preference, temporary, normal, 0.90
+- "User asked for lunch recommendations in Hilo" -> preference, temporary, normal, 0.80
+- "User wanted to know about fracking monitoring requirements" -> preference, temporary, normal, 0.80
+- "User needed warm-up exercise recommendations" -> preference, temporary, normal, 0.80
+- "User asked for TV recommendations in $800-$1,200 range" -> preference, temporary, normal, 0.80
 
 Return ONLY valid JSON via the observations tool.
 """
