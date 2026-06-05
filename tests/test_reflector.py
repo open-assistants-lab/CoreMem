@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coremem.memory_store import MemoryStore
+from coremem import MemoryCore
 from coremem.providers import ChatResponse
 from coremem.reflector import ReflectorPipeline
 
@@ -56,21 +56,21 @@ class TestReflectorImportanceFilter:
           - total sent to LLM = 250 (150 + 100), not 350 (broken no-op)
         """
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(150):
-                store.insert_observations([_make_obs(
+                memory.insert_observations([_make_obs(
                     f"high fact {i}",
                     importance=0.9,
                     observation_ts=f"2026-01-01T{i:03d}:00:00",
                 )])
             for i in range(200):
-                store.insert_observations([_make_obs(
+                memory.insert_observations([_make_obs(
                     f"low fact {i}",
                     importance=0.1,
                     observation_ts=f"2026-02-01T{i:03d}:00:00",
                 )])
-            assert len(store.get_observations(limit=1000)) == 350
+            assert len(memory.get_observations(limit=1000)) == 350
 
             reflector = ReflectorPipeline(
                 store=store, model="ollama:llama3.2", min_observations=5,
@@ -97,15 +97,15 @@ class TestReflectorImportanceFilter:
         """With 250 low-importance observations, only the 100 most recent
         (by observation_ts DESC) should be sent to the LLM."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(250):
-                store.insert_observations([_make_obs(
+                memory.insert_observations([_make_obs(
                     f"low fact {i}",
                     importance=0.1,
                     observation_ts=f"2026-02-01T{i:03d}:00:00",
                 )])
-            assert len(store.get_observations(limit=1000)) == 250
+            assert len(memory.get_observations(limit=1000)) == 250
 
             reflector = ReflectorPipeline(
                 store=store, model="ollama:llama3.2", min_observations=5,
@@ -134,10 +134,10 @@ class TestCountBasedTrigger:
         neither trigger fires — maybe_run() must return None without
         calling the LLM."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(5):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"fact {i}",
                     "source_quote": f"q{i}",
@@ -166,10 +166,10 @@ class TestCountBasedTrigger:
         (so the time-based trigger would NOT fire), the count trigger
         must fire and invoke the LLM."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(50):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"fact {i}",
                     "source_quote": f"q{i}",
@@ -200,10 +200,10 @@ class TestCountBasedTrigger:
         but interval_hours=1 and last_run_ts=0 (long ago), the time
         trigger fires."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(5):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"fact {i}",
                     "source_quote": f"q{i}",
@@ -233,10 +233,10 @@ class TestCountBasedTrigger:
         """After a successful run_now(), source facts should be marked
         reflected=1 via mark_reflected()."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(5):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"fact {i}",
                     "source_quote": f"q{i}",
@@ -259,7 +259,7 @@ class TestCountBasedTrigger:
 
             assert result is not None
             # After reflection, facts should be marked reflected
-            pending = store.get_pending_reflections()
+            pending = memory.get_pending_reflections()
             assert len(pending) == 0
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -269,7 +269,7 @@ class TestStartStopLifecycle:
     async def test_start_creates_background_task(self):
         """start() spawns an asyncio task."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             pipeline = ReflectorPipeline(
                 store, model="ollama:llama3.2",
@@ -286,7 +286,7 @@ class TestStartStopLifecycle:
     async def test_start_is_idempotent(self):
         """Calling start() twice is a no-op (doesn't spawn two tasks)."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
             await pipeline.start()
@@ -301,7 +301,7 @@ class TestStartStopLifecycle:
     async def test_stop_is_idempotent(self):
         """Calling stop() twice doesn't raise."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
             await pipeline.start()
@@ -316,11 +316,11 @@ class TestImportanceAssignment:
         """Facts with NULL importance get importance assigned before
         the main reflection call."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             # Insert facts with NULL importance (as 0.5.0 Observer does)
             for i in range(5):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"User fact {i}",
                     "source_quote": f"q{i}",
@@ -356,7 +356,7 @@ class TestImportanceAssignment:
 
             assert result is not None
             # Verify importance was written to the store
-            stored = store.get_observations()
+            stored = memory.get_observations()
             scores = {o["id"]: o["importance"] for o in stored}
             assert scores["obs_0"] == 0.8
             assert scores["obs_1"] == 0.6
@@ -369,10 +369,10 @@ class TestImportanceAssignment:
     async def test_skips_when_no_null_importance(self):
         """If all facts already have importance, no importance prompt call."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             for i in range(5):
-                store.insert_observations([{
+                memory.insert_observations([{
                     "id": f"obs_{i}",
                     "content": f"fact {i}",
                     "source_quote": f"q{i}",
@@ -403,7 +403,7 @@ class TestImportanceAssignment:
         """Facts that have already been reflected (reflected=1) must not
         count toward the trigger threshold."""
         d = tempfile.mkdtemp()
-        store = MemoryStore(path=d)
+        memory = MemoryCore(path=d, enable_observations=True)
         try:
             ids = []
             for i in range(50):
@@ -415,9 +415,9 @@ class TestImportanceAssignment:
                     "reflected": 0,
                     "observation_ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00",
                 }
-                store.insert_observations([obs])
+                memory.insert_observations([obs])
                 ids.append(obs["id"])
-            store.mark_reflected(ids[:40])
+            memory.mark_reflected(ids[:40])
 
             pipeline = ReflectorPipeline(
                 store, model="ollama:llama3.2",
@@ -425,7 +425,7 @@ class TestImportanceAssignment:
             )
             pipeline._last_run_ts = time.time()
 
-            assert len(store.get_pending_reflections()) == 10
+            assert len(memory.get_pending_reflections()) == 10
 
             with patch.object(pipeline._reflector, "_provider") as mock_p:
                 mock_p.chat = AsyncMock()

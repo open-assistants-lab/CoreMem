@@ -76,7 +76,7 @@ def _obs_similarity(a: str, b: str) -> float:
 
 async def dedup_and_merge(
     provider: Any,
-    store: Any,
+    memory: Any,
     new_obs: list[dict[str, Any]],
     batch_size: int = 5,
 ) -> list[dict[str, Any]]:
@@ -106,14 +106,14 @@ async def dedup_and_merge(
         if obs.get("status") == "archived":
             continue
         user_id = obs.get("user_id")
-        candidates = store.get_candidates(obs.get("content", ""), user_id=user_id)
+        candidates = memory.get_candidates(obs.get("content", ""), user_id=user_id)
         for candidate in candidates:
             pairs.append({"new_index": i, "candidate": candidate})
 
     if not pairs:
         for obs in new_obs:
             if obs.get("status") != "archived":
-                store.insert_event(obs.get("id", ""), "created")
+                memory.insert_event(obs.get("id", ""), "created")
             final.append(obs)
         return final
 
@@ -151,44 +151,44 @@ async def dedup_and_merge(
 
             elif rel == "refine":
                 merged = classification.get("merged_content", obs.get("content", ""))
-                store.update_observation(old_id, {"content": merged})
-                old_rows = store._db.query(
+                memory.update_observation(old_id, {"content": merged})
+                old_rows = memory.db.query(
                     "observations", where="id = ?", params=(old_id,), limit=1,
                 )
                 if old_rows:
                     old = old_rows[0]
                     old_src = json.loads(old.get("source_message_ids", "[]"))
                     new_src = json.loads(obs.get("source_message_ids", "[]"))
-                    store.update_observation(old_id, {
+                    memory.update_observation(old_id, {
                         "source_message_ids": json.dumps(old_src + new_src),
                     })
                     old_content = old.get("content", "")
                 else:
                     old_content = ""
-                store.insert_event(old_id, "merged",
+                memory.insert_event(old_id, "merged",
                                    old_value=old_content, new_value=merged)
                 obs["status"] = "archived"
                 obs["superseded_by"] = old_id
 
             elif rel == "supersede":
                 valid_to = obs.get("observation_ts") or datetime.now(UTC).isoformat()
-                store.update_observation(old_id, {
+                memory.update_observation(old_id, {
                     "status": "superseded",
                     "valid_to": valid_to,
                 })
-                store.insert_event(old_id, "superseded",
+                memory.insert_event(old_id, "superseded",
                                    old_value=old_id, new_value=obs.get("id", ""))
                 obs["status"] = "candidate"
-                store.insert_event(obs.get("id", ""), "created")
+                memory.insert_event(obs.get("id", ""), "created")
 
             elif rel == "contradict":
-                store.create_conflict(old_id, obs.get("id", ""), "contradiction")
+                memory.create_conflict(old_id, obs.get("id", ""), "contradiction")
                 obs["status"] = "candidate"
-                store.insert_event(obs.get("id", ""), "contradicted",
+                memory.insert_event(obs.get("id", ""), "contradicted",
                                    old_value=old_id)
 
             else:  # new
-                store.insert_event(obs.get("id", ""), "created")
+                memory.insert_event(obs.get("id", ""), "created")
 
     # Collect: archived first, then unprocessed
     for obs in new_obs:
@@ -196,7 +196,7 @@ async def dedup_and_merge(
             final.append(obs)
     for obs in new_obs:
         if obs.get("status") != "archived":
-            store.insert_event(obs.get("id", ""), "created")
+            memory.insert_event(obs.get("id", ""), "created")
             final.append(obs)
 
     return final

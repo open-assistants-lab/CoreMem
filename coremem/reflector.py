@@ -113,7 +113,7 @@ class ReflectorPipeline:
 
     def __init__(
         self,
-        store: Any,
+        memory: Any,
         user_id: str | None = None,
         session_id: str | None = None,
         agent_id: str | None = None,
@@ -124,7 +124,7 @@ class ReflectorPipeline:
         min_observations: int = 10,
         trigger_every_n_observations: int = 50,
     ):
-        self._store = store
+        self._memory = memory
         self._user_id = user_id
         self._session_id = session_id
         self._agent_id = agent_id
@@ -153,11 +153,11 @@ class ReflectorPipeline:
 
     def _count_unreflected(self) -> int:
         """Count unreflected facts in the store."""
-        return len(self._store.get_pending_reflections())
+        return len(self._memory.get_pending_reflections())
 
     async def run_now(self) -> list[dict[str, Any]] | None:
         """Force a run regardless of timer."""
-        observations = self._store.get_observations_since(
+        observations = self._memory.get_observations_since(
             last_id=self._last_run_observation_id, limit=500,
             user_id=self._user_id,
             session_id=self._session_id,
@@ -178,7 +178,7 @@ class ReflectorPipeline:
             green = sorted(green, key=lambda o: o.get("observation_ts", ""), reverse=True)[:100]
             observations = high_med + green
 
-        prior = self._store.get_reflections(limit=10)
+        prior = self._memory.get_reflections(limit=10)
 
         reflections = await self._reflector.run(observations, prior)
 
@@ -202,11 +202,11 @@ class ReflectorPipeline:
             good.append(r)
 
         if good:
-            new_ids = self._store.insert_reflections(good)  # noqa: F841
+            new_ids = self._memory.insert_reflections(good)  # noqa: F841
             # Mark source facts as reflected
             obs_ids = [o.get("id") for o in observations if o.get("id")]
             if obs_ids:
-                self._store.mark_reflected(obs_ids)
+                self._memory.mark_reflected(obs_ids)
             if observations:
                 self._last_run_observation_id = observations[-1].get("id")
             self._last_run_ts = time.time()
@@ -264,7 +264,7 @@ class ReflectorPipeline:
         Uses the Reflector's LLM to calibrate scores. Skips if no pending
         facts have NULL importance.
         """
-        pending = self._store.get_pending_reflections()
+        pending = self._memory.get_pending_reflections()
         null_importance = [o for o in pending if o.get("importance") is None]
         if not null_importance:
             return
@@ -283,7 +283,7 @@ class ReflectorPipeline:
             oid = score.get("id")
             val = score.get("importance")
             if oid is not None and val is not None:
-                self._store._db.update("observations", oid, {"importance": val})
+                self._memory.db.update("observations", oid, {"importance": val})
                 for obs in null_importance:
                     if obs.get("id") == oid:
                         obs["importance"] = val

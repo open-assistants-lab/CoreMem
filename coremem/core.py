@@ -1,14 +1,19 @@
-"""MemoryCore — the main entry point for coremem.
+"""MemoryCore — unified memory for AI agents.
 
-Wraps any StoreBackend with heuristics, wake-up context, and ingestion.
+Single HybridDB instance. Messages, observations, reflections all in one DB.
 """
 
-from datetime import datetime
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from coremem.backends.base import StoreBackend
+from hybriddb import HybridDB
+
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
-from coremem.ingest import ingest_batch, ingest_message
 from coremem.layers import WakeUpContext
 from coremem.query import LLMProvider, expand_queries
 from coremem.rerank import get_cross_encoder, rerank
@@ -16,44 +21,206 @@ from coremem.types import Memory, SearchQuery, SearchResult
 
 _DEFAULT_SEARCH_DEPTH = 5
 
+# ── Observation schemas (moved from memory_store.py) ──────────
+
+_OBSERVATIONS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "kind": "TEXT NOT NULL DEFAULT 'fact'",
+    "content": "LONGTEXT",
+    "source_quote": "TEXT",
+    "source_fact_ids": "TEXT NOT NULL DEFAULT '[]'",
+    "source_message_ids": "TEXT DEFAULT '[]'",
+    "referenced_date": "TEXT",
+    "observation_ts": "TEXT NOT NULL",
+    "user_id": "TEXT",
+    "agent_id": "TEXT",
+    "session_id": "TEXT",
+    "alignment_tier": "TEXT",
+    "alignment_confidence": "REAL",
+    "importance": "REAL",
+    "confidence": "REAL DEFAULT 0.800",
+    "memory_type": "TEXT",
+    "durability": "TEXT DEFAULT 'durable'",
+    "sensitivity": "TEXT DEFAULT 'normal'",
+    "status": "TEXT DEFAULT 'candidate'",
+    "valid_from": "TEXT",
+    "valid_to": "TEXT",
+    "superseded_by": "TEXT",
+    "entities": "TEXT NOT NULL DEFAULT '[]'",
+    "reflected": "INTEGER NOT NULL DEFAULT 0",
+    "embedding": "TEXT",
+}
+
+_REFLECTIONS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "content": "LONGTEXT",
+    "domain": "TEXT",
+    "linked_observation_ids": "TEXT",
+    "score": "REAL",
+    "embedding": "TEXT",
+    "user_id": "TEXT",
+    "session_id": "TEXT",
+}
+
+_OBSERVATION_EVENTS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "observation_id": "TEXT NOT NULL",
+    "event_type": "TEXT NOT NULL",
+    "old_value": "TEXT",
+    "new_value": "TEXT",
+    "source_message_id": "TEXT",
+    "created_at": "TEXT NOT NULL",
+}
+
+_OBSERVATION_CONFLICTS_SCHEMA = {
+    "id": "TEXT PRIMARY KEY",
+    "observation_id_a": "TEXT NOT NULL",
+    "observation_id_b": "TEXT NOT NULL",
+    "conflict_type": "TEXT NOT NULL",
+    "resolution_status": "TEXT DEFAULT 'unresolved'",
+    "created_at": "TEXT NOT NULL",
+    "resolved_at": "TEXT",
+}
+
+# ── Ingest helpers (moved from ingest.py) ─────────────────────
+
+
+def _ingest_message(
+    db: HybridDB, role: str, content: str,
+    session_id: str | None = None,
+    user_id: str = "",
+    agent_id: str = "",
+    ts: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+    embedding: list[float] | None = None,
+) -> str:
+    if not content.strip():
+        return ""
+    mid = str(uuid.uuid4())[:12]
+    row = {
+        "id": mid,
+        "role": role,
+        "content": content,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "session_id": session_id or "",
+        "metadata": json.dumps(metadata or {}),
+        "ts": (ts or datetime.now(UTC)).isoformat(),
+    }
+    if embedding:
+        row["embedding"] = json.dumps(embedding)
+    db.insert("messages", row)
+    return mid
+
+
+def _ingest_batch(
+    db: HybridDB,
+    messages: list[dict],
+    session_id: str | None = None,
+) -> list[str]:
+    ids = []
+    for msg in messages:
+        mid = _ingest_message(
+            db=db,
+            role=msg.get("role", "user"),
+            content=msg.get("content", ""),
+            session_id=session_id,
+            metadata=msg.get("metadata"),
+        )
+        if mid:
+            ids.append(mid)
+    return ids
+
+
+def _row_to_memory(row: dict[str, Any]) -> Memory:
+    ts = None
+    if row.get("ts"):
+        try:
+            ts = datetime.fromisoformat(row["ts"])
+        except (ValueError, TypeError):
+            pass
+    metadata = {}
+    if row.get("metadata"):
+        try:
+            metadata = json.loads(row["metadata"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return Memory(
+        id=row.get("id", ""),
+        content=row.get("content", ""),
+        role=row.get("role", "user"),
+        ts=ts,
+        session_id=row.get("session_id"),
+        user_id=row.get("user_id"),
+        agent_id=row.get("agent_id"),
+        metadata=metadata,
+    )
+
+
+def _row_to_search_result(row: dict[str, Any], score: float) -> SearchResult:
+    return SearchResult(memory=_row_to_memory(row), score=score)
+
+
+# ── MemoryCore ──────────────────────────────────────────────
+
 
 class MemoryCore:
-    """Zero-LLM memory core for AI agents.
-
-    Dual-backend architecture:
-      - ChromaBackend: Pure ChromaDB (baseline)
-      - HybridBackend: HybridDB SQLite+FTS5+ChromaDB (enhanced)
-
-    Same API regardless of backend.
+    """Unified memory for AI agents. One HybridDB, all tables.
 
     Usage:
-        core = MemoryCore(backend=ChromaBackend(path="./memory"))
-        core.ingest("user", "I built a Spitfire model kit")
-        results = core.search("How many model kits?")
-        context = core.wake_up(user_id="alice")
-
-    For enhanced search with multi-query expansion and cross-encoder
-    reranking, pass an optional llm_provider (disabled by default):
-        core = MemoryCore(backend=..., llm_provider=my_model)
-        results = core.search_enhanced("How many model kits?")
+        core = MemoryCore(path="./memory", enable_observations=True)
+        core.ingest("user", "I like coffee")
+        results = core.search("coffee")
     """
 
-    def __init__(self, backend: StoreBackend, llm_provider: LLMProvider | None = None):
-        self._backend = backend
-        self._wakeup = WakeUpContext(backend)
+    def __init__(
+        self,
+        path: str,
+        llm_provider: LLMProvider | None = None,
+        enable_observations: bool = False,
+    ):
+        self._db = HybridDB(path=path)
         self._heuristics = SearchHeuristics()
+        self._wakeup = WakeUpContext(self._db)
         self._llm_provider = llm_provider
+        self._enable_observations = enable_observations
+        self._ensure_tables()
+        if enable_observations:
+            self._ensure_observation_tables()
+
+    def _ensure_tables(self) -> None:
+        if "messages" not in self._db.list_tables():
+            self._db.create_table("messages", {
+                "id": "TEXT PRIMARY KEY",
+                "role": "TEXT NOT NULL",
+                "content": "LONGTEXT",
+                "user_id": "TEXT DEFAULT ''",
+                "agent_id": "TEXT DEFAULT ''",
+                "session_id": "TEXT DEFAULT ''",
+                "metadata": "TEXT DEFAULT '{}'",
+                "ts": "TEXT",
+                "embedding": "TEXT",
+            })
+
+    def _ensure_observation_tables(self) -> None:
+        if "observations" not in self._db.list_tables():
+            self._db.create_table("observations", _OBSERVATIONS_SCHEMA)
+            for idx, col in [("kind", "kind"), ("user_id", "user_id"), ("session_id", "session_id"), ("reflected", "reflected"), ("importance", "importance")]:
+                self._db.raw_query(
+                    f"CREATE INDEX IF NOT EXISTS idx_observations_{idx} ON observations({col})"
+                )
+        if "observation_events" not in self._db.list_tables():
+            self._db.create_table("observation_events", _OBSERVATION_EVENTS_SCHEMA)
+        if "observation_conflicts" not in self._db.list_tables():
+            self._db.create_table("observation_conflicts", _OBSERVATION_CONFLICTS_SCHEMA)
+        if "reflections" not in self._db.list_tables():
+            self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
 
     @property
-    def backend(self) -> StoreBackend:
-        return self._backend
+    def db(self) -> HybridDB:
+        return self._db
 
     def warmup(self) -> None:
-        """Pre-download models to avoid delay on first search.
-
-        Loads the cross-encoder model (~500MB download on first call).
-        Safe to call multiple times — models are cached after load.
-        """
         get_cross_encoder()
 
     def ingest(
@@ -65,29 +232,14 @@ class MemoryCore:
         metadata: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
     ) -> str:
-        """Store a message verbatim.
-
-        No LLM extraction. No summarization. Just store the raw text.
-
-        Args:
-            role: Message role (user, assistant, tool, system).
-            content: Raw message text — stored as-is.
-            session_id: Optional session/thread identifier.
-            user_id: Optional user identifier.
-            agent_id: Optional agent identifier.
-            ts: Optional timestamp. Defaults to now if not provided.
-            metadata: Optional arbitrary key-value pairs for filtering.
-            embedding: Optional pre-computed embedding vector.
-        """
-        return ingest_message(
-            backend=self._backend, role=role, content=content,
+        return _ingest_message(
+            db=self._db, role=role, content=content,
             session_id=session_id, user_id=user_id, agent_id=agent_id,
             ts=ts, metadata=metadata, embedding=embedding,
         )
 
     def ingest_many(self, messages: list[dict[str, Any]], session_id: str | None = None) -> list[str]:
-        """Store a batch of messages verbatim."""
-        return ingest_batch(backend=self._backend, messages=messages, session_id=session_id)
+        return _ingest_batch(db=self._db, messages=messages, session_id=session_id)
 
     def search(
         self, query: str, limit: int = 10,
@@ -99,36 +251,19 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
-        """Search memories and apply deterministic heuristics.
-
-        Pipeline:
-          1. Backend raw search (embedding ± keyword)
-          2. Apply heuristics (keyword overlap, temporal, person name, quoted)
-          3. Session-level dedup (if backend supports it)
-          4. Return ranked results
-
-        All steps are deterministic — zero LLM calls.
-        """
-        sq = SearchQuery(
-            text=query, limit=limit * 3,
-            role=role,
-            session_id=session_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            ts_after=ts_after,
-            ts_before=ts_before,
-            metadata=metadata or {},
-        )
-        results = self._backend.search(sq)
-
-        for r in results:
-            r.score = SearchHeuristics.apply_all(
+        hybrid_limit = limit * 3
+        rows = self._db.search("messages", "content", query, limit=hybrid_limit)
+        results: list[SearchResult] = []
+        for row in rows:
+            mem = _row_to_memory(row)
+            score = row.get("score", 0.0)
+            score = SearchHeuristics.apply_all(
                 query=query,
-                content=r.memory.content,
-                score=r.score,
-                ts=r.memory.ts.isoformat() if r.memory.ts else None,
+                content=mem.content,
+                score=score,
+                ts=mem.ts.isoformat() if mem.ts else None,
             )
-
+            results.append(SearchResult(memory=mem, score=score))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
@@ -143,120 +278,52 @@ class MemoryCore:
         metadata: dict[str, Any] | None = None,
         depth: int = _DEFAULT_SEARCH_DEPTH,
     ) -> list[SearchResult]:
-        """Search with multi-query expansion and cross-encoder reranking.
-
-        Pipeline:
-          1. Multi-query expansion (regex + optional LLM)
-          2. Run raw search for each query variant
-          3. Merge results deduplicated by memory ID
-          4. Apply deterministic heuristics
-          5. Cross-encoder reranking for better relevance
-
-        LLM expansion is disabled by default — enable by passing an
-        llm_provider to MemoryCore().
-
-        Args:
-            query: The search query.
-            limit: Max results to return.
-            role: Optional role filter.
-            session_id: Optional session/thread filter.
-            user_id: Optional user filter.
-            agent_id: Optional agent filter.
-            ts_after: Optional ISO timestamp lower bound.
-            ts_before: Optional ISO timestamp upper bound.
-            metadata: Optional metadata key=value equality filters.
-            depth: Candidate multiplier for search depth (default 5).
-                   Higher depth means more candidates for the reranker.
-
-        Returns:
-            Reranked SearchResult list.
-        """
         queries = expand_queries(query, llm_provider=self._llm_provider)
-
-        # Query-type-aware depth: counting/temporal need broader candidate pools.
         if SearchHeuristics.is_counting_question(query):
             depth = max(depth, 10)
         elif any(cue in query.lower() for cue in ("before", "after", "since", "when did", "what year")):
             depth = max(depth, 7)
-
         effective_limit = limit * depth
         all_results: list[SearchResult] = []
         seen_ids: set[str] = set()
         seen_content: set[int] = set()
-
         for q in queries:
-            sq = SearchQuery(
-                text=q, limit=effective_limit,
-                role=role,
-                session_id=session_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                ts_after=ts_after,
-                ts_before=ts_before,
-                metadata=metadata or {},
-            )
-            results = self._backend.search(sq)
-
-            # Normalize scores per sub-query to [0, 1] so no single
-            # sub-query dominates the merged candidate pool.
-            if results:
-                max_score = max(r.score for r in results)
-                min_score = min(r.score for r in results)
+            rows = self._db.search("messages", "content", q, limit=effective_limit)
+            if rows:
+                max_score = max(r.get("score", 0) for r in rows)
+                min_score = min(r.get("score", 0) for r in rows)
                 score_range = max_score - min_score
-                if score_range > 0:
-                    for r in results:
-                        r.score = (r.score - min_score) / score_range
-
-            for r in results:
-                rid = r.memory.id
-                if rid and rid not in seen_ids:
-                    seen_ids.add(rid)
-                    # Content dedup: skip near-duplicate messages across sub-queries
-                    ch = hash(r.memory.content[:200])
-                    if ch not in seen_content:
-                        seen_content.add(ch)
-                        all_results.append(r)
-                elif not rid:
-                    all_results.append(r)
-
+                for row in rows:
+                    mem = _row_to_memory(row)
+                    rid = mem.id
+                    if rid and rid not in seen_ids:
+                        seen_ids.add(rid)
+                        ch = hash(mem.content[:200])
+                        if ch not in seen_content:
+                            seen_content.add(ch)
+                            score = row.get("score", 0.0)
+                            if score_range > 0:
+                                score = (score - min_score) / score_range
+                            all_results.append(SearchResult(memory=mem, score=score))
         for r in all_results:
             r.score = SearchHeuristics.apply_all(
-                query=query,
-                content=r.memory.content,
-                score=r.score,
+                query=query, content=r.memory.content, score=r.score,
                 ts=r.memory.ts.isoformat() if r.memory.ts else None,
             )
-
         all_results.sort(key=lambda r: r.score, reverse=True)
-
-        # Session-diverse MMR before cross-encoder to prevent overfit
         all_results = _mmr_diversify(all_results, effective_limit)
-
         all_results = rerank(query, all_results)
-
         return all_results[:limit]
 
     def wake_up(self, user_id: str = "default", session_id: str | None = None) -> str:
-        """Build the L0+L1 (+ optional L2) wake-up context.
-
-        Returns ~170 tokens of always-on context that the agent can
-        inject into its system prompt without waiting for a tool call.
-        """
         context = self._wakeup.essential(user_id=user_id)
-
         if session_id:
             l2 = self._wakeup.session(session_id=session_id)
             if l2:
                 context += "\n\n" + l2
-
         return context
 
     def deep_search_context(self, query: str, limit: int = 10) -> str | None:
-        """Perform an L3 deep search and return formatted context.
-
-        This is the equivalent of calling the memory_search tool.
-        Returns None if no results found.
-        """
         return self._wakeup.deep_search(query=query, limit=limit)
 
     def fetch(
@@ -271,15 +338,32 @@ class MemoryCore:
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Memory]:
-        """Fetch memories matching exact-match column filters.
-
-        Returns one page of results. Use :meth:`fetch_all` for unlimited retrieval.
-        """
-        return self._backend.list(
-            role=role, session_id=session_id, user_id=user_id, agent_id=agent_id,
-            ts_after=ts_after, ts_before=ts_before,
-            metadata=metadata, limit=limit, offset=offset,
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if role:
+            where_parts.append("role = ?")
+            params.append(role)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if ts_after:
+            where_parts.append("ts > ?")
+            params.append(ts_after)
+        if ts_before:
+            where_parts.append("ts < ?")
+            params.append(ts_before)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        rows = self._db.raw_query(
+            f"SELECT * FROM messages WHERE {where} ORDER BY ts DESC LIMIT ? OFFSET ?",
+            tuple(params) + (limit, offset),
         )
+        return [_row_to_memory(r) for r in rows]
 
     def fetch_all(
         self,
@@ -291,29 +375,32 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[Memory]:
-        """Fetch all matching memories. Convenience wrapper around :meth:`fetch` with automatic pagination."""
-        all_memories: list[Memory] = []
-        offset = 0
-        page_size = 1000
-        while True:
-            page = self._backend.list(
-                role=role, session_id=session_id, user_id=user_id, agent_id=agent_id,
-                ts_after=ts_after, ts_before=ts_before,
-                metadata=metadata, limit=page_size, offset=offset,
-            )
-            if not page:
-                break
-            all_memories.extend(page)
-            offset += len(page)
-        return all_memories
+        return self.fetch(
+            role=role, session_id=session_id, user_id=user_id, agent_id=agent_id,
+            ts_after=ts_after, ts_before=ts_before,
+            metadata=metadata, limit=10_000, offset=0,
+        )
 
     def store(self, memories: list[Memory]) -> list[str]:
-        """Store memories in bulk. Returns storage IDs. Delegates to :meth:`StoreBackend.ingest_batch`."""
-        return self._backend.ingest_batch(memories)
+        ids = []
+        for mem in memories:
+            row = {
+                "id": mem.id or str(uuid.uuid4())[:12],
+                "role": mem.role,
+                "content": mem.content,
+                "user_id": mem.user_id or "",
+                "agent_id": mem.agent_id or "",
+                "session_id": mem.session_id or "",
+                "metadata": json.dumps(mem.metadata or {}),
+                "ts": mem.ts.isoformat() if mem.ts else datetime.now(UTC).isoformat(),
+            }
+            self._db.insert("messages", row)
+            ids.append(row["id"])
+        return ids
 
     def count(self) -> int:
-        """Return total number of stored memories."""
-        return self._backend.count()
+        rows = self._db.raw_query("SELECT COUNT(*) as c FROM messages")
+        return rows[0]["c"] if rows else 0
 
     def delete(
         self,
@@ -325,13 +412,304 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> int:
-        """Delete memories matching filters. Returns count deleted."""
-        return self._backend.delete(
-            role=role, session_id=session_id, user_id=user_id, agent_id=agent_id,
-            ts_after=ts_after, ts_before=ts_before,
-            metadata=metadata,
-        )
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if role:
+            where_parts.append("role = ?")
+            params.append(role)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if ts_after:
+            where_parts.append("ts > ?")
+            params.append(ts_after)
+        if ts_before:
+            where_parts.append("ts < ?")
+            params.append(ts_before)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        before = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
+        self._db.raw_query(f"DELETE FROM messages WHERE {where}", tuple(params))
+        after = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
+        return (before[0]["c"] - after[0]["c"]) if before and after else 0
 
     def clear(self) -> None:
-        """Delete all memories."""
-        self._backend.clear()
+        self._db.raw_query("DELETE FROM messages")
+
+    # ── Observation methods (moved from MemoryStore) ───────────
+
+    def _check_observations_enabled(self) -> None:
+        if not self._enable_observations:
+            raise RuntimeError(
+                "Observation methods require enable_observations=True on MemoryCore"
+            )
+
+    def insert_observations(self, items: list[dict[str, Any]]) -> list[str]:
+        self._check_observations_enabled()
+        now = datetime.now(UTC).isoformat()
+        ids: list[str] = []
+        for item in items:
+            oid = item.get("id") or str(uuid.uuid4())[:12]
+            ids.append(oid)
+            entities = item.get("entities", [])
+            if not isinstance(entities, str):
+                entities = json.dumps(entities)
+            source_fact_ids = item.get("source_fact_ids", [])
+            if not isinstance(source_fact_ids, str):
+                source_fact_ids = json.dumps(source_fact_ids)
+            self._db.insert("observations", {
+                "id": oid,
+                "kind": item.get("kind", "fact"),
+                "content": item.get("content", ""),
+                "source_quote": item.get("source_quote"),
+                "source_fact_ids": source_fact_ids,
+                "source_message_ids": item.get("source_message_ids", "[]"),
+                "referenced_date": item.get("referenced_date"),
+                "observation_ts": item.get("observation_ts", now),
+                "user_id": item.get("user_id"),
+                "agent_id": item.get("agent_id"),
+                "session_id": item.get("session_id"),
+                "alignment_tier": item.get("alignment_tier"),
+                "alignment_confidence": item.get("alignment_confidence"),
+                "importance": item.get("importance"),
+                "confidence": item.get("confidence", 0.800),
+                "memory_type": item.get("memory_type", ""),
+                "durability": item.get("durability", "durable"),
+                "sensitivity": item.get("sensitivity", "normal"),
+                "status": item.get("status", "candidate"),
+                "valid_from": item.get("valid_from", ""),
+                "valid_to": item.get("valid_to", ""),
+                "superseded_by": item.get("superseded_by", ""),
+                "entities": entities,
+                "reflected": item.get("reflected", 0),
+            })
+        return ids
+
+    def get_observations(
+        self, ts_after: str | None = None, limit: int = 50,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if ts_after:
+            where_parts.append("observation_ts > ?")
+            params.append(ts_after)
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        sql = (
+            f"SELECT * FROM observations WHERE {where} "
+            f"ORDER BY observation_ts DESC LIMIT {int(limit)}"
+        )
+        rows = self._db.raw_query(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def get_observations_since(
+        self, last_id: str | None = None, limit: int = 500,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if last_id:
+            rows = self._db.raw_query(
+                "SELECT observation_ts FROM observations WHERE id = ?", (last_id,),
+            )
+            if not rows:
+                return []
+            last_ts = rows[0]["observation_ts"]
+            where_parts.append("observation_ts > ?")
+            params.append(last_ts)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        sql = (
+            f"SELECT * FROM observations WHERE {where} "
+            f"ORDER BY observation_ts DESC LIMIT {int(limit)}"
+        )
+        rows = self._db.raw_query(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    def get_recent_observations(self, days: int = 30, limit: int = 50,
+                                 user_id: str | None = None,
+                                 session_id: str | None = None,
+                                 agent_id: str | None = None) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        return self.get_observations(
+            ts_after=cutoff, limit=limit,
+            user_id=user_id, session_id=session_id, agent_id=agent_id,
+        )
+
+    def search_observations(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        results = self._db.search("observations", "content", query, limit=limit)
+        return [dict(r) for r in results]
+
+    def get_pending_reflections(self) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        rows = self._db.raw_query(
+            "SELECT * FROM observations "
+            "WHERE kind = 'fact' AND reflected = 0 "
+            "ORDER BY observation_ts DESC"
+        )
+        return [dict(r) for r in rows]
+
+    def mark_reflected(self, observation_ids: list[str]) -> None:
+        self._check_observations_enabled()
+        if not observation_ids:
+            return
+        placeholders = ",".join("?" * len(observation_ids))
+        self._db.raw_query(
+            f"UPDATE observations SET reflected = 1 WHERE id IN ({placeholders})",
+            tuple(observation_ids),
+        )
+
+    def insert_reflections(self, items: list[dict[str, Any]]) -> list[str]:
+        self._check_observations_enabled()
+        ids = []
+        for item in items:
+            rid = str(uuid.uuid4())[:12]
+            linked = item.get("linked_observation_ids", [])
+            emb = item.get("embedding", "")
+            self._db.insert("reflections", {
+                "id": rid,
+                "content": item.get("content", ""),
+                "domain": item.get("domain", "general"),
+                "linked_observation_ids": json.dumps(linked),
+                "score": item.get("score", 1.0),
+                "embedding": json.dumps(emb.tolist()) if hasattr(emb, "tolist") else str(emb),
+                "user_id": item.get("user_id", ""),
+                "session_id": item.get("session_id", ""),
+            })
+            ids.append(rid)
+        return ids
+
+    def get_reflections(self, limit: int = 10,
+                        user_id: str | None = None,
+                        session_id: str | None = None) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            where_parts.append("session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(where_parts) if where_parts else ""
+        return self._db.query("reflections", where=where, params=tuple(params),
+                              order_by="score DESC", limit=limit)
+
+    def search_reflections(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        results = self._db.search("reflections", "content", query, limit=limit)
+        return [dict(r) for r in results]
+
+    def apply_decay(self, half_life_days: int = 30) -> int:
+        self._check_observations_enabled()
+        cutoff = (datetime.now(UTC) - timedelta(days=half_life_days)).isoformat()
+        _ = cutoff  # noqa: F841
+        rows = self._db.query("reflections", where="score > 0.1", limit=1000)
+        count = 0
+        for row in rows:
+            new_score = float(row["score"]) * 0.9
+            self._db.update("reflections", row["id"], {"score": new_score})
+            count += 1
+        return count
+
+    def get_candidates(
+        self, content: str, user_id: str | None = None, limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        words = set(content.lower().split())
+        if not words:
+            return []
+        candidates: list[dict[str, Any]] = []
+        recent = self.get_recent_observations(days=30, limit=200)
+        for obs in recent:
+            if user_id and obs.get("user_id") != user_id:
+                continue
+            obs_words = set(obs.get("content", "").lower().split())
+            overlap = words & obs_words
+            min_len = min(len(words), len(obs_words))
+            if min_len > 0 and len(overlap) >= 3 and len(overlap) / min_len > 0.5:
+                candidates.append(obs)
+        candidates.sort(key=lambda o: o.get("observation_ts", ""), reverse=True)
+        return candidates[:limit]
+
+    def update_observation(self, obs_id: str, updates: dict[str, Any]) -> None:
+        self._check_observations_enabled()
+        if not updates:
+            return
+        set_parts = [f"{k} = ?" for k in updates]
+        values = list(updates.values()) + [obs_id]
+        self._db.raw_query(
+            f"UPDATE observations SET {', '.join(set_parts)} WHERE id = ?",
+            tuple(values),
+        )
+
+    def insert_event(
+        self,
+        observation_id: str,
+        event_type: str,
+        old_value: str | None = None,
+        new_value: str | None = None,
+        source_message_id: str | None = None,
+    ) -> str:
+        self._check_observations_enabled()
+        eid = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self._db.insert("observation_events", {
+            "id": eid,
+            "observation_id": observation_id,
+            "event_type": event_type,
+            "old_value": old_value or "",
+            "new_value": new_value or "",
+            "source_message_id": source_message_id or "",
+            "created_at": now,
+        })
+        return eid
+
+    def create_conflict(
+        self, observation_id_a: str, observation_id_b: str, conflict_type: str,
+    ) -> str:
+        self._check_observations_enabled()
+        cid = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self._db.insert("observation_conflicts", {
+            "id": cid,
+            "observation_id_a": observation_id_a,
+            "observation_id_b": observation_id_b,
+            "conflict_type": conflict_type,
+            "resolution_status": "unresolved",
+            "created_at": now,
+            "resolved_at": "",
+        })
+        return cid

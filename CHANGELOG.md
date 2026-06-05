@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] — 2026-06-05 — Observer API merge, single-backend simplification
+
+### Breaking changes
+- `MemoryCore()` takes `path: str` instead of `backend: StoreBackend`. HybridDB is the only backend. ChromaBackend removed.
+- `from coremem.backends.hybrid import HybridBackend` no longer needed — `MemoryCore` creates it internally.
+- `MemoryStore` class deleted. All methods moved to `MemoryCore`: `get_observations()`, `search_observations()`, `insert_observations()`, `get_recent_observations()`, `insert_reflections()`, `get_reflections()`, etc.
+- `ObserverPipeline(core=foo, store=bar)` → `ObserverPipeline(memory=foo)`.
+- `pipeline.after_turn()` → `pipeline.extract()`.
+
+### Added
+- `pipeline.retrieve(query=None, days=30, limit=50)` — returns recent observations or semantic search results.
+- `MemoryCore(path, enable_observations=True)` creates 5 tables in one HybridDB: messages, observations, observation_events, observation_conflicts, reflections.
+- `observation_events` table (was `memory_events`) with `observation_id` column (was `memory_id`).
+- `observation_conflicts` table (was `memory_conflicts`) with `observation_id_a`/`observation_id_b` columns (were `memory_id_a`/`memory_id_b`).
+
+### Removed
+- `coremem/backends/` directory (ChromaBackend, HybridBackend, StoreBackend ABC).
+- `coremem/memory_store.py` (absorbed into MemoryCore).
+- `coremem/ingest.py` (inlined into MemoryCore).
+- ChromaBackend dependency (`chromadb` no longer required).
+- `tests/test_memory_store.py`, `tests/test_hybrid_backend.py`, `tests/test_chroma_backend.py`, `tests/test_ingest.py`.
+
 ## [0.5.1] — 2026-06-05 — Documentation & stability
 
 ### Added

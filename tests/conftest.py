@@ -1,26 +1,21 @@
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
+
+from coremem import MemoryCore
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 
 
 @pytest.fixture
-def chroma_tmp_path(tmp_path):
-    p = str(tmp_path / "chroma_memory")
-    yield p
-    if os.path.exists(p):
-        shutil.rmtree(p, ignore_errors=True)
-
-
-@pytest.fixture
-def hybrid_tmp_path(tmp_path):
-    p = str(tmp_path / "hybrid_memory")
-    yield p
-    if os.path.exists(p):
-        shutil.rmtree(p, ignore_errors=True)
+def core_tmp_path(tmp_path):
+    p = str(tmp_path / "memory")
+    core = MemoryCore(path=p)
+    yield core
+    core.db.raw_query("DELETE FROM messages")
 
 
 @pytest.fixture

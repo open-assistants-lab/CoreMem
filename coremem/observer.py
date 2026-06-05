@@ -574,26 +574,24 @@ class ObserverPipeline:
 
     def __init__(
         self,
-        core: Any,
-        store: Any,
+        memory: Any,
         session_id: str,
         user_id: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         model: str = "ollama:llama3.2",
-        token_threshold: int = 8000,
-        min_turns: int = 3,
+        token_threshold: int = 100,
+        min_turns: int = 1,
         max_messages: int = 500,
         enable_gleaning: bool = False,
-        enable_classification: bool = False,
-        enable_dedup: bool = False,
+        enable_classification: bool = True,
+        enable_dedup: bool = True,
         tool_temp: float = 0.1,
     ):
         self._enable_gleaning = enable_gleaning
         self._enable_classification = enable_classification
         self._enable_dedup = enable_dedup
-        self._core = core
-        self._store = store
+        self._memory = memory
         self._session_id = session_id
         self._user_id = user_id
         self._agent_id = agent_id
@@ -607,8 +605,8 @@ class ObserverPipeline:
         self._turns_since_last_run: int = 0
         self._running: bool = False
 
-    async def after_turn(self) -> list[dict[str, Any]] | None:
-        """Called after each agent turn. Returns new observations or None."""
+    async def extract(self) -> list[dict[str, Any]] | None:
+        """Extract observations from new user messages. Fire-and-forget."""
         if self._running:
             return None
         self._turns_since_last_run += 1
@@ -618,8 +616,14 @@ class ObserverPipeline:
         finally:
             self._running = False
 
+    def retrieve(self, query: str | None = None, days: int = 30, limit: int = 50) -> list[dict[str, Any]]:
+        """Retrieve observations. If query: semantic search. If None: recent observations."""
+        if query:
+            return self._memory.search_observations(query, limit=limit)
+        return self._memory.get_recent_observations(days=days, limit=limit)
+
     async def _maybe_run(self) -> list[dict[str, Any]] | None:
-        messages = self._core.fetch(
+        messages = self._memory.fetch(
             session_id=self._session_id,
             user_id=self._user_id,
             agent_id=self._agent_id,
@@ -652,7 +656,7 @@ class ObserverPipeline:
         if new_tokens < self._token_threshold or self._turns_since_last_run < self._min_turns:
             return None
 
-        prior = self._store.get_recent_observations(days=30, limit=50)
+        prior = self._memory.get_recent_observations(days=30, limit=50)
         new_obs: list[dict[str, Any]] = []
 
         # Build canonical text from full conversation
@@ -798,13 +802,13 @@ class ObserverPipeline:
             try:
                 from coremem.dedup import dedup_and_merge
                 new_obs = await dedup_and_merge(
-                    self._observer._provider, self._store, new_obs,
+                    self._observer._provider, self._memory, new_obs,
                 )
             except Exception as e:
                 logger.warning("dedup_error", {"error": str(e)})
 
         if new_obs:
-            self._store.insert_observations(new_obs)
+            self._memory.insert_observations(new_obs)
         if messages:
             self._last_observed_id = messages[0].id
         self._turns_since_last_run = 0

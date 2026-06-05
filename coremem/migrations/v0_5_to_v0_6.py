@@ -2,11 +2,13 @@
 
 Adds: memory_type, durability, sensitivity, status, confidence,
       valid_from, valid_to, superseded_by, source_message_ids, embedding.
-Creates: memory_events, memory_conflicts tables.
+Creates: observation_events, observation_conflicts, reflections tables.
 """
 from __future__ import annotations
 
 from typing import Any
+
+from coremem.core import _OBSERVATION_EVENTS_SCHEMA, _OBSERVATION_CONFLICTS_SCHEMA, _REFLECTIONS_SCHEMA
 
 
 def migrate(db: Any, db_path: str) -> None:
@@ -31,19 +33,19 @@ def migrate(db: Any, db_path: str) -> None:
         except Exception:
             pass  # Column already exists
 
-    # Create new tables from memory_store schemas
-    from coremem.memory_store import _MEMORY_EVENTS_SCHEMA, _MEMORY_CONFLICTS_SCHEMA
-
-    if "memory_events" not in db.list_tables():
-        db.create_table("memory_events", _MEMORY_EVENTS_SCHEMA)
+    if "observation_events" not in db.list_tables():
+        db.create_table("observation_events", _OBSERVATION_EVENTS_SCHEMA)
         db.raw_query(
-            "CREATE INDEX IF NOT EXISTS idx_memory_events_memory "
-            "ON memory_events(memory_id)"
+            "CREATE INDEX IF NOT EXISTS idx_observation_events_obs "
+            "ON observation_events(observation_id)"
         )
 
-    if "memory_conflicts" not in db.list_tables():
-        db.create_table("memory_conflicts", _MEMORY_CONFLICTS_SCHEMA)
+    if "observation_conflicts" not in db.list_tables():
+        db.create_table("observation_conflicts", _OBSERVATION_CONFLICTS_SCHEMA)
         db.raw_query(
-            "CREATE INDEX IF NOT EXISTS idx_memory_conflicts_status "
-            "ON memory_conflicts(resolution_status)"
+            "CREATE INDEX IF NOT EXISTS idx_observation_conflicts_status "
+            "ON observation_conflicts(resolution_status)"
         )
+
+    if "reflections" not in db.list_tables():
+        db.create_table("reflections", _REFLECTIONS_SCHEMA)

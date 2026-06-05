@@ -5,8 +5,7 @@ import os
 import tempfile
 
 import pytest
-from coremem import MemoryCore, MemoryStore
-from coremem.backends.hybrid import HybridBackend
+from coremem import MemoryCore
 from coremem.observer import GLEANING_SYSTEM_PROMPT, ObserverPipeline
 
 skip_if_no_api_key = pytest.mark.skipif(
@@ -53,16 +52,14 @@ class TestGleaningIntegration:
     async def test_enable_gleaning_runs_both_stages(self):
         """With enable_gleaning=True, the pipeline runs without error.
         Observation count varies at temp 0.1 — just verify no exception."""
-        core = MemoryCore(backend=HybridBackend(path=tempfile.mkdtemp()))
-        store = MemoryStore(path=tempfile.mkdtemp())
+        core = MemoryCore(path=tempfile.mkdtemp(), enable_observations=True)
 
         core.ingest("user", "I'm a software engineer named Alice who works at Acme Corp. I love hiking in the Cascades.", session_id=self.SESSION_ID)
         core.ingest("assistant", "Nice to meet you Alice! The Cascades are beautiful.", session_id=self.SESSION_ID)
         core.ingest("user", "I also play piano, live in Portland, and have two cats named Luna and Milo.", session_id=self.SESSION_ID)
 
         pipeline = ObserverPipeline(
-            core=core,
-            store=store,
+            memory=core,
             session_id=self.SESSION_ID,
             model="deepseek:deepseek-chat",
             token_threshold=1,
@@ -70,7 +67,7 @@ class TestGleaningIntegration:
             enable_gleaning=True,
         )
 
-        observations = await pipeline.after_turn()
+        observations = await pipeline.extract()
         assert observations is not None  # Pipeline ran without error
 
         if observations:
@@ -84,16 +81,14 @@ class TestGleaningIntegration:
     @skip_if_no_api_key
     async def test_disable_gleaning_skips_second_stage(self):
         """With enable_gleaning=False, pipeline runs without gleaning."""
-        core = MemoryCore(backend=HybridBackend(path=tempfile.mkdtemp()))
-        store = MemoryStore(path=tempfile.mkdtemp())
+        core = MemoryCore(path=tempfile.mkdtemp(), enable_observations=True)
 
         core.ingest("user", "I'm a software engineer named Bob who works at Acme Corp.", session_id=self.SESSION_ID)
         core.ingest("assistant", "Hello Bob! Acme is a great company.", session_id=self.SESSION_ID)
         core.ingest("user", "I live in Chicago, enjoy photography, and drive a Tesla.", session_id=self.SESSION_ID)
 
         pipeline = ObserverPipeline(
-            core=core,
-            store=store,
+            memory=core,
             session_id=self.SESSION_ID,
             model="deepseek:deepseek-chat",
             token_threshold=1,
@@ -101,21 +96,19 @@ class TestGleaningIntegration:
             enable_gleaning=False,
         )
 
-        observations = await pipeline.after_turn()
+        observations = await pipeline.extract()
         assert observations is not None  # Pipeline ran without error
 
     @pytest.mark.asyncio
     @skip_if_no_api_key
     async def test_empty_stage1_skips_gleaning(self):
         """If extraction produces 0 observations, gleaning is skipped."""
-        core = MemoryCore(backend=HybridBackend(path=tempfile.mkdtemp()))
-        store = MemoryStore(path=tempfile.mkdtemp())
+        core = MemoryCore(path=tempfile.mkdtemp(), enable_observations=True)
 
         core.ingest("assistant", "Hello, how can I help?", session_id=self.SESSION_ID)
 
         pipeline = ObserverPipeline(
-            core=core,
-            store=store,
+            memory=core,
             session_id=self.SESSION_ID,
             model="deepseek:deepseek-chat",
             token_threshold=1,
@@ -123,5 +116,5 @@ class TestGleaningIntegration:
             enable_gleaning=True,
         )
 
-        observations = await pipeline.after_turn()
+        observations = await pipeline.extract()
         assert observations is None or len(observations) == 0
