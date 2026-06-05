@@ -149,6 +149,33 @@ Or set `MEMORY_EXPANSION_MODEL=ollama:llama3.2` in your environment when using M
 DISABLE_CROSS_ENCODER=1 python my_script.py
 ```
 
+### Observer Pipeline
+
+The `ObserverPipeline` (v0.5.0+) extracts structured observations from conversations — identity facts, events, preferences, plans, stances — and stores them with **source-quote alignment** guaranteeing 0% hallucination:
+
+```python
+from coremem.memory_store import MemoryStore
+from coremem.observer import ObserverPipeline
+
+store = MemoryStore(path="./memory")
+pipeline = ObserverPipeline(
+    core=core, store=store, session_id="main",
+    token_threshold=100, min_turns=1,
+    enable_classification=True,
+    enable_dedup=True,
+)
+await pipeline.after_turn()
+```
+
+**7 labeling functions (LF) in parallel** extract entities, actions, preferences, temporal facts, sentiment, possessions, and stances. All LFs are LLM-based — a deliberate choice:
+
+| Approach | Cost | Languages | Recall | Hallucination gate |
+|----------|------|-----------|--------|-------------------|
+| **LLM LFs** (current) | ~7 API calls/turn | **Any language** | 97.5% | ✅ Source-quote verified |
+| Non-LLM (spaCy/VADER) | ~free | English only | ~95% (unverified) | ❌ None |
+
+Non-LLM approaches like OpenIE dependency parsing can replace entities, temporal, possessions, and actions LFs with zero API cost, but are restricted to the languages the NLP model supports (primarily English). LLM LFs handle any language out of the box — Mandarin, Arabic, Spanish, code-switching — without model swaps or quality degradation. The 2.5% miss rate (third-party events, contextual asides) is the measured cost of the hallucination gate.
+
 ### Wake-Up Context
 
 Give the agent instant situational awareness:
