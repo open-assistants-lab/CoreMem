@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1] — 2026-06-07 — Ollama Cloud tool support, test fixes
+
+### Added
+- `python-dotenv` dependency; `.env` auto-loaded during tests via `conftest.py`
+- `tool_temp` parameter and `chat_with_tools()` method on `OllamaCloudAdapter`
+
+### Fixed
+- `ReflectorPipeline` tests (missing `store` → `memory=memory` rename after v0.6.0 refactor)
+- Gleaning integration tests use `ollama-cloud:deepseek-v4-flash` and `OLLAMA_API_KEY`
+
 ## [0.6.0] — 2026-06-05 — Observer API merge, single-backend simplification
 
 ### Breaking changes
