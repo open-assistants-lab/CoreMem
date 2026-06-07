@@ -8,6 +8,12 @@ Usage:
     core.ingest("user", "I built a Spitfire model kit")
 """
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
 from coremem.core import MemoryCore
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import expand_queries
