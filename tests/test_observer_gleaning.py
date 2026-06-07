@@ -61,7 +61,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="ollama-cloud:deepseek-v4-flash",
+            observation_model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=True,
@@ -90,7 +90,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="ollama-cloud:deepseek-v4-flash",
+            observation_model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=False,
@@ -110,7 +110,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="ollama-cloud:deepseek-v4-flash",
+            observation_model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=True,

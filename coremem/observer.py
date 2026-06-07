@@ -579,7 +579,7 @@ class ObserverPipeline:
         user_id: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        model: str = "ollama:llama3.2",
+        observation_model: str = "deepseek:deepseek-v4-flash",
         token_threshold: int = 100,
         min_turns: int = 1,
         max_messages: int = 500,
@@ -596,7 +596,7 @@ class ObserverPipeline:
         self._user_id = user_id
         self._agent_id = agent_id
         self._metadata = metadata
-        self._observer = Observer(model=model, tool_temp=tool_temp)
+        self._observer = Observer(model=observation_model, tool_temp=tool_temp)
         self._token_threshold = token_threshold
         self._min_turns = min_turns
         self._max_messages = max_messages

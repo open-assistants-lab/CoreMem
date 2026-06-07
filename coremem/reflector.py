@@ -118,7 +118,7 @@ class ReflectorPipeline:
         session_id: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        model: str = "openai:gpt-4o",
+        reflect_model: str = "openai:gpt-4o",
         embedding_fn: Any = None,
         interval_hours: int = 24,
         min_observations: int = 10,
@@ -129,7 +129,7 @@ class ReflectorPipeline:
         self._session_id = session_id
         self._agent_id = agent_id
         self._metadata = metadata
-        self._reflector = Reflector(model=model)
+        self._reflector = Reflector(model=reflect_model)
         self._embedding_fn = embedding_fn
         self._interval_hours = interval_hours
         self._min_observations = min_observations
