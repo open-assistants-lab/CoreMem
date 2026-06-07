@@ -73,7 +73,7 @@ class TestReflectorImportanceFilter:
             assert len(memory.get_observations(limit=1000)) == 350
 
             reflector = ReflectorPipeline(
-                store=store, model="ollama:llama3.2", min_observations=5,
+                memory=memory, model="ollama:llama3.2", min_observations=5,
             )
             with patch.object(reflector._reflector, "_provider") as mock_p:
                 mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
@@ -108,7 +108,7 @@ class TestReflectorImportanceFilter:
             assert len(memory.get_observations(limit=1000)) == 250
 
             reflector = ReflectorPipeline(
-                store=store, model="ollama:llama3.2", min_observations=5,
+                memory=memory, model="ollama:llama3.2", min_observations=5,
             )
             with patch.object(reflector._reflector, "_provider") as mock_p:
                 mock_p.chat = AsyncMock(return_value=_mock_reflector_response())
@@ -147,7 +147,7 @@ class TestCountBasedTrigger:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=50, interval_hours=9999,
             )
             pipeline._last_run_ts = time.time()
@@ -180,7 +180,7 @@ class TestCountBasedTrigger:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=50, interval_hours=9999,
                 min_observations=1,
             )
@@ -214,7 +214,7 @@ class TestCountBasedTrigger:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=999, interval_hours=1,
                 min_observations=1,
             )
@@ -247,7 +247,7 @@ class TestCountBasedTrigger:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=5, interval_hours=9999,
                 min_observations=1,
             )
@@ -272,7 +272,7 @@ class TestStartStopLifecycle:
         memory = MemoryCore(path=d, enable_observations=True)
         try:
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=50,
                 interval_hours=24,
             )
@@ -288,7 +288,7 @@ class TestStartStopLifecycle:
         d = tempfile.mkdtemp()
         memory = MemoryCore(path=d, enable_observations=True)
         try:
-            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            pipeline = ReflectorPipeline(memory=memory, model="ollama:llama3.2")
             await pipeline.start()
             task_1 = pipeline._task
             await pipeline.start()
@@ -303,7 +303,7 @@ class TestStartStopLifecycle:
         d = tempfile.mkdtemp()
         memory = MemoryCore(path=d, enable_observations=True)
         try:
-            pipeline = ReflectorPipeline(store, model="ollama:llama3.2")
+            pipeline = ReflectorPipeline(memory=memory, model="ollama:llama3.2")
             await pipeline.start()
             await pipeline.stop()
             await pipeline.stop()
@@ -331,7 +331,7 @@ class TestImportanceAssignment:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=1, interval_hours=9999,
                 min_observations=1,
             )
@@ -383,7 +383,7 @@ class TestImportanceAssignment:
                 }])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=1, interval_hours=9999,
                 min_observations=1,
             )
@@ -420,7 +420,7 @@ class TestImportanceAssignment:
             memory.mark_reflected(ids[:40])
 
             pipeline = ReflectorPipeline(
-                store, model="ollama:llama3.2",
+                memory=memory, model="ollama:llama3.2",
                 trigger_every_n_observations=50, interval_hours=9999,
             )
             pipeline._last_run_ts = time.time()
