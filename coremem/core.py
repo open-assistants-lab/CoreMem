@@ -171,6 +171,8 @@ class MemoryCore:
         core = MemoryCore(path="./memory", enable_observations=True)
         core.ingest("user", "I like coffee")
         results = core.search("coffee")
+        obs = core.observations("coffee preferences")
+        refs = core.reflections()
     """
 
     def __init__(
@@ -178,15 +180,41 @@ class MemoryCore:
         path: str,
         llm_provider: LLMProvider | None = None,
         enable_observations: bool = False,
+        enable_reflections: bool = False,
+        observation_model: str = "deepseek:deepseek-v4-flash",
+        reflect_model: str = "openai:gpt-4o",
+        observation_kwargs: dict[str, Any] | None = None,
+        reflect_kwargs: dict[str, Any] | None = None,
     ):
         self._db = HybridDB(path=path)
         self._heuristics = SearchHeuristics()
         self._wakeup = WakeUpContext(self._db)
         self._llm_provider = llm_provider
         self._enable_observations = enable_observations
+        self._enable_reflections = enable_reflections
+        self._observation_model = observation_model
+        self._reflect_model = reflect_model
+        self._observer_pipeline: Any = None
+        self._reflector_pipeline: Any = None
         self._ensure_tables()
-        if enable_observations:
+        if enable_observations or enable_reflections:
             self._ensure_observation_tables()
+        if enable_observations:
+            from coremem.observer import ObserverPipeline
+            kwargs = dict(observation_kwargs or {})
+            kwargs.setdefault("session_id", "")
+            self._observer_pipeline = ObserverPipeline(
+                memory=self,
+                observation_model=observation_model,
+                **kwargs,
+            )
+        if enable_reflections:
+            from coremem.reflector import ReflectorPipeline
+            self._reflector_pipeline = ReflectorPipeline(
+                memory=self,
+                reflect_model=reflect_model,
+                **(reflect_kwargs or {}),
+            )
 
     def _ensure_tables(self) -> None:
         if "messages" not in self._db.list_tables():
@@ -571,6 +599,34 @@ class MemoryCore:
         self._check_observations_enabled()
         results = self._db.search("observations", "content", query, limit=limit)
         return [dict(r) for r in results]
+
+    # ── Primary observation/reflection API ─────────────────────
+
+    def observations(self, query: str | None = None, limit: int = 10,
+                     **kwargs: Any) -> list[dict[str, Any]]:
+        """Search or list stored observations.
+
+        Args:
+            query: Semantic search query. If None, returns recent observations.
+            limit: Max results.
+            **kwargs: Passed to get_observations() when no query given.
+        """
+        if query:
+            return self.search_observations(query, limit=limit)
+        return self.get_observations(limit=limit, **kwargs)
+
+    def reflections(self, query: str | None = None, limit: int = 10,
+                    **kwargs: Any) -> list[dict[str, Any]]:
+        """Search or list stored reflections.
+
+        Args:
+            query: Semantic search query. If None, returns recent reflections.
+            limit: Max results.
+            **kwargs: Passed to get_reflections() when no query given.
+        """
+        if query:
+            return self.search_reflections(query, limit=limit)
+        return self.get_reflections(limit=limit, **kwargs)
 
     def get_pending_reflections(self) -> list[dict[str, Any]]:
         self._check_observations_enabled()
