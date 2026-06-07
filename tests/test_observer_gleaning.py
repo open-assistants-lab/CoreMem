@@ -9,8 +9,8 @@ from coremem import MemoryCore
 from coremem.observer import GLEANING_SYSTEM_PROMPT, ObserverPipeline
 
 skip_if_no_api_key = pytest.mark.skipif(
-    not os.environ.get("DEEPSEEK_API_KEY"),
-    reason="DEEPSEEK_API_KEY not set",
+    not os.environ.get("OLLAMA_API_KEY"),
+    reason="OLLAMA_API_KEY not set",
 )
 
 
@@ -61,7 +61,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="deepseek:deepseek-chat",
+            model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=True,
@@ -90,7 +90,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="deepseek:deepseek-chat",
+            model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=False,
@@ -110,7 +110,7 @@ class TestGleaningIntegration:
         pipeline = ObserverPipeline(
             memory=core,
             session_id=self.SESSION_ID,
-            model="deepseek:deepseek-chat",
+            model="ollama-cloud:deepseek-v4-flash",
             token_threshold=1,
             min_turns=1,
             enable_gleaning=True,

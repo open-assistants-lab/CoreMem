@@ -165,10 +165,11 @@ class _AnthropicAdapter:
 class _OllamaCloudAdapter:
     """Ollama Cloud native /api/chat adapter."""
 
-    def __init__(self, model: str, api_key: str, base_url: str):
+    def __init__(self, model: str, api_key: str, base_url: str, tool_temp: float = 0.1):
         self._model = model
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._tool_temp = tool_temp
 
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
         headers = {
@@ -196,7 +197,29 @@ class _OllamaCloudAdapter:
     async def chat_with_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
     ) -> ChatResponse:
-        return await self.chat(messages)  # fallback
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": self._model,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+            "temperature": self._tool_temp,
+        }
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self._base_url}/api/chat",
+                json=body, headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        content = data.get("message", {}).get("content", "")
+        return ChatResponse(
+            content=content,
+            model=data.get("model", self._model),
+        )
 
 
 class _GeminiAdapter:
