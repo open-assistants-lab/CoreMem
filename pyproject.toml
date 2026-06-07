@@ -1,6 +1,6 @@
 [project]
 name = "coremem"
-version = "0.7.0"
+version = "0.7.1"
 description = "Zero-LLM memory for AI agents — semantic search, cross-encoder reranking, and deterministic heuristics"
 readme = "README.md"
 requires-python = ">=3.11"

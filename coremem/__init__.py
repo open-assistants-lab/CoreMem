@@ -14,7 +14,7 @@ from coremem.query import expand_queries
 from coremem.rerank import rerank
 from coremem.types import Memory, SearchQuery, SearchResult
 
-__version__ = "0.6.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SearchQuery",

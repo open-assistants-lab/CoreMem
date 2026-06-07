@@ -118,7 +118,7 @@ class ReflectorPipeline:
         session_id: str | None = None,
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        reflect_model: str = "openai:gpt-4o",
+        reflect_model: str = "deepseek:deepseek-v4-flash",
         embedding_fn: Any = None,
         interval_hours: int = 24,
         min_observations: int = 10,
