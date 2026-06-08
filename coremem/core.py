@@ -49,6 +49,7 @@ _OBSERVATIONS_SCHEMA = {
     "entities": "TEXT NOT NULL DEFAULT '[]'",
     "reflected": "INTEGER NOT NULL DEFAULT 0",
     "embedding": "TEXT",
+    "metadata": "TEXT DEFAULT '{}'",
 }
 
 _REFLECTIONS_SCHEMA = {
@@ -59,7 +60,6 @@ _REFLECTIONS_SCHEMA = {
     "score": "REAL",
     "embedding": "TEXT",
     "user_id": "TEXT",
-    "session_id": "TEXT",
 }
 
 _OBSERVATION_EVENTS_SCHEMA = {
@@ -243,6 +243,11 @@ class MemoryCore:
             self._db.create_table("observation_conflicts", _OBSERVATION_CONFLICTS_SCHEMA)
         if "reflections" not in self._db.list_tables():
             self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
+
+        # v0.8.0 migration: add metadata to existing observations table
+        cols = {r["name"] for r in self._db.raw_query("PRAGMA table_info(observations)")}
+        if "metadata" not in cols:
+            self._db.raw_query("ALTER TABLE observations ADD COLUMN metadata TEXT DEFAULT '{}'")
 
     @property
     def db(self) -> HybridDB:
@@ -490,6 +495,9 @@ class MemoryCore:
             source_fact_ids = item.get("source_fact_ids", [])
             if not isinstance(source_fact_ids, str):
                 source_fact_ids = json.dumps(source_fact_ids)
+            obs_metadata = item.get("metadata", "{}")
+            if not isinstance(obs_metadata, str):
+                obs_metadata = json.dumps(obs_metadata)
             self._db.insert("observations", {
                 "id": oid,
                 "kind": item.get("kind", "fact"),
@@ -515,6 +523,7 @@ class MemoryCore:
                 "superseded_by": item.get("superseded_by", ""),
                 "entities": entities,
                 "reflected": item.get("reflected", 0),
+                "metadata": obs_metadata,
             })
         return ids
 
@@ -540,6 +549,10 @@ class MemoryCore:
         if agent_id:
             where_parts.append("agent_id = ?")
             params.append(agent_id)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(v)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         sql = (
             f"SELECT * FROM observations WHERE {where} "
@@ -567,6 +580,10 @@ class MemoryCore:
         if agent_id:
             where_parts.append("agent_id = ?")
             params.append(agent_id)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(v)
         if last_id:
             rows = self._db.raw_query(
                 "SELECT observation_ts FROM observations WHERE id = ?", (last_id,),
@@ -612,7 +629,11 @@ class MemoryCore:
             **kwargs: Passed to get_observations() when no query given.
         """
         if query:
-            return self.search_observations(query, limit=limit)
+            results = self.search_observations(query, limit=limit)
+            meta = kwargs.get("metadata")
+            if meta:
+                results = [r for r in results if json.loads(r.get("metadata", "{}")) == meta]
+            return results
         return self.get_observations(limit=limit, **kwargs)
 
     def reflections(self, query: str | None = None, limit: int = 10,
@@ -662,14 +683,40 @@ class MemoryCore:
                 "score": item.get("score", 1.0),
                 "embedding": json.dumps(emb.tolist()) if hasattr(emb, "tolist") else str(emb),
                 "user_id": item.get("user_id", ""),
-                "session_id": item.get("session_id", ""),
             })
             ids.append(rid)
         return ids
 
     def get_reflections(self, limit: int = 10,
-                        user_id: str | None = None,
-                        session_id: str | None = None) -> list[dict[str, Any]]:
+                        user_id: str | None = None) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        where = " AND ".join(where_parts) if where_parts else ""
+        return self._db.query("reflections", where=where, params=tuple(params),
+                              order_by="score DESC", limit=limit)
+
+    def search_reflections(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        self._check_observations_enabled()
+        results = self._db.search("reflections", "content", query, limit=limit)
+        return [dict(r) for r in results]
+
+    # ── Delete methods ───────────────────────────────────────────
+
+    def delete_observations(
+        self,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        ts_after: str | None = None,
+        ts_before: str | None = None,
+    ) -> int:
         self._check_observations_enabled()
         where_parts: list[str] = []
         params: list[Any] = []
@@ -679,14 +726,94 @@ class MemoryCore:
         if session_id:
             where_parts.append("session_id = ?")
             params.append(session_id)
-        where = " AND ".join(where_parts) if where_parts else ""
-        return self._db.query("reflections", where=where, params=tuple(params),
-                              order_by="score DESC", limit=limit)
+        if agent_id:
+            where_parts.append("agent_id = ?")
+            params.append(agent_id)
+        if kind:
+            where_parts.append("kind = ?")
+            params.append(kind)
+        if status:
+            where_parts.append("status = ?")
+            params.append(status)
+        if ts_after:
+            where_parts.append("observation_ts > ?")
+            params.append(ts_after)
+        if ts_before:
+            where_parts.append("observation_ts < ?")
+            params.append(ts_before)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(v)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        rows = self._db.raw_query(f"SELECT id FROM observations WHERE {where}", tuple(params))
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self._db.raw_query(
+            f"DELETE FROM observation_events WHERE observation_id IN ({placeholders})",
+            tuple(ids),
+        )
+        self._db.raw_query(
+            f"DELETE FROM observation_conflicts WHERE observation_id_a IN ({placeholders}) OR observation_id_b IN ({placeholders})",
+            tuple(ids) + tuple(ids),
+        )
+        self._db.raw_query(f"DELETE FROM observations WHERE id IN ({placeholders})", tuple(ids))
+        return len(ids)
 
-    def search_reflections(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    def delete_observations_by_id(self, ids: list[str]) -> int:
         self._check_observations_enabled()
-        results = self._db.search("reflections", "content", query, limit=limit)
-        return [dict(r) for r in results]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self._db.raw_query(
+            f"DELETE FROM observation_events WHERE observation_id IN ({placeholders})",
+            tuple(ids),
+        )
+        self._db.raw_query(
+            f"DELETE FROM observation_conflicts WHERE observation_id_a IN ({placeholders}) OR observation_id_b IN ({placeholders})",
+            tuple(ids) + tuple(ids),
+        )
+        self._db.raw_query(f"DELETE FROM observations WHERE id IN ({placeholders})", tuple(ids))
+        return len(ids)
+
+    def delete_reflections(
+        self,
+        user_id: str | None = None,
+        domain: str | None = None,
+    ) -> int:
+        self._check_observations_enabled()
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if domain:
+            where_parts.append("domain = ?")
+            params.append(domain)
+        where = " AND ".join(where_parts) if where_parts else "1=1"
+        self._db.raw_query(f"DELETE FROM reflections WHERE {where}", tuple(params))
+        return self._db.raw_query("SELECT changes() AS c")[0]["c"]
+
+    def delete_reflections_by_id(self, ids: list[str]) -> int:
+        self._check_observations_enabled()
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        self._db.raw_query(f"DELETE FROM reflections WHERE id IN ({placeholders})", tuple(ids))
+        return len(ids)
+
+    def update_reflections(self, ref_id: str, updates: dict[str, Any]) -> None:
+        self._check_observations_enabled()
+        if not updates:
+            return
+        set_parts = [f"{k} = ?" for k in updates]
+        values = list(updates.values()) + [ref_id]
+        self._db.raw_query(
+            f"UPDATE reflections SET {', '.join(set_parts)} WHERE id = ?",
+            tuple(values),
+        )
 
     def apply_decay(self, half_life_days: int = 30) -> int:
         self._check_observations_enabled()

@@ -808,6 +808,11 @@ class ObserverPipeline:
                 logger.warning("dedup_error", {"error": str(e)})
 
         if new_obs:
+            for obs in new_obs:
+                obs.setdefault("metadata", self._metadata or {})
+                obs.setdefault("user_id", self._user_id or "")
+                obs.setdefault("agent_id", self._agent_id or "")
+                obs.setdefault("session_id", self._session_id or "")
             self._memory.insert_observations(new_obs)
         if messages:
             self._last_observed_id = messages[0].id
