@@ -192,8 +192,10 @@ class MemoryCore:
         self._llm_provider = llm_provider
         self._enable_observations = enable_observations
         self._enable_reflections = enable_reflections
+        self._enable_tool_extractor = enable_observations  # gates by same flag
         self._observation_model = observation_model
         self._reflect_model = reflect_model
+        self._tool_min_messages: int = 5
         self._observer_pipeline: Any = None
         self._reflector_pipeline: Any = None
         self._ensure_tables()
@@ -526,6 +528,34 @@ class MemoryCore:
                 "metadata": obs_metadata,
             })
         return ids
+
+    async def session_end(
+        self, session_id: str, user_id: str,
+        active_skills: list[str] | None = None,
+        min_tool_messages: int | None = None,
+    ) -> None:
+        """Called when a session ends. Triggers ToolExtractor.
+
+        Wrap in ``asyncio.create_task()`` to fire-and-forget from the caller.
+
+        Args:
+            session_id: Session identifier.
+            user_id: User identifier.
+            active_skills: Opaque list of skill names loaded during session.
+                           CoreMem stores them but has no knowledge of them.
+        """
+        if not self._enable_tool_extractor:
+            return
+        from coremem.tool_extractor import ToolExtractor
+
+        extractor = ToolExtractor(
+            memory=self,
+            session_id=session_id,
+            user_id=user_id,
+            min_tool_messages=min_tool_messages if min_tool_messages is not None else self._tool_min_messages,
+            active_skills=active_skills,
+        )
+        await extractor.extract()
 
     def get_observations(
         self, ts_after: str | None = None, limit: int = 50,

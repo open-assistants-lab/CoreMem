@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.6.1] — 2026-06-07 — Ollama Cloud tool support, test fixes
+## [0.9.0] — 2026-06-09 — ToolExtractor: session-end tool message analysis
+
+### Added
+- `ToolExtractor` — new pipeline class for session-end tool message analysis. Reads `role='tool'` messages, pairs with assistant `tool_calls` by `tool_call_id`, produces structured `tool_summary` observations with deterministic analysis (no LLM required).
+- `_classify_error()` — heuristic error detection using keyword matching (`"Error:"`, `"failed"`, `"not found"`, `"could not"`).
+- `_build_trace()` — pairs tool calls with results, detects error→retry→success recovery patterns.
+- `_analyze_deterministic()` — counts errors per tool, builds tool coverage, sequences of length 2-3, and recovery patterns.
+- `MemoryCore.session_end()` — lifecycle hook that triggers `ToolExtractor` at session end. Accepts `session_id`, `user_id`, `active_skills`, `min_tool_messages`.
+- `metadata` TEXT column on `observations` table — stores structured JSON for `tool_summary` observations.
+- 21 unit/integration tests in `tests/test_tool_extractor.py`
+
+### Changed
+- `MemoryCore.__init__()` now takes `enable_tool_extractor` kwarg (defaults to `enable_observations` value).
+- `__init__.py` exports `ToolExtractor`.
 
 ### Added
 - `python-dotenv` dependency; `.env` auto-loaded during tests via `conftest.py`

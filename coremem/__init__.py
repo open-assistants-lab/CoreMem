@@ -14,7 +14,7 @@ from coremem.query import expand_queries
 from coremem.rerank import rerank
 from coremem.types import Memory, SearchQuery, SearchResult
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SearchQuery",
@@ -25,9 +25,10 @@ try:
     from coremem.observer import Observer, ObserverPipeline
     from coremem.providers import create_provider
     from coremem.reflector import Reflector, ReflectorPipeline
+    from coremem.tool_extractor import ToolExtractor
     __all__.extend([
         "Observer", "ObserverPipeline", "Reflector", "ReflectorPipeline",
-        "create_provider",
+        "ToolExtractor", "create_provider",
     ])
 except ImportError:
     pass
