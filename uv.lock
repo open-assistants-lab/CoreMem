@@ -418,7 +418,7 @@ wheels = [
 
 [[package]]
 name = "coremem"
-version = "0.8.0"
+version = "0.9.1"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
@@ -447,7 +447,7 @@ requires-dist = [
     { name = "coremem", extras = ["observer"], marker = "extra == 'all'" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
     { name = "httpx", marker = "extra == 'observer'", specifier = ">=0.25.0" },
-    { name = "hybriddb", specifier = ">=0.4.0" },
+    { name = "hybriddb", specifier = ">=0.4.5" },
     { name = "numpy", specifier = ">=1.24.0,<3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
@@ -861,14 +861,14 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.4.2"
+version = "0.4.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a4/d4/0b2b6d4bc1c27ee14079af8ef0014a881ee7524da73e92f43e1e478010ed/hybriddb-0.4.2.tar.gz", hash = "sha256:14840dca047d7f93ad97361d62252e75a43a522fa7ae5d03fee8a779f9d59fb7", size = 248977, upload-time = "2026-05-31T08:36:51.443Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6e/59/7822714f0749b66fa5f0d8d4b7a293093e4013b583d440dded6fa378d410/hybriddb-0.4.5.tar.gz", hash = "sha256:1dce44aeca41cb8cba37cdd0ef995555f634225d9b5240ff348a6556bc154520", size = 256207, upload-time = "2026-06-14T16:26:35.628Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/49/741987b825c5beadf1fc3fbb2988ef8326b2baa6b6e24cd6163300b31f58/hybriddb-0.4.2-py3-none-any.whl", hash = "sha256:337d111263e0f4338701c8aef6ed4a50f020d5fca1c8e43e2887f5a51269cb4e", size = 38788, upload-time = "2026-05-31T08:36:52.595Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/e7/5fdb069cb5bec0f2fe66776bd36dd4935674ad10dc30a14fabb035f8c992/hybriddb-0.4.5-py3-none-any.whl", hash = "sha256:24730c5a09c029a9c1fdfd5bff009e21c022157733a5ef4b294072fe7e038b49", size = 40000, upload-time = "2026-06-14T16:26:34.05Z" },
 ]
 
 [[package]]
