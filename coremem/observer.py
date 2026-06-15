@@ -556,8 +556,6 @@ class Observer:
             else:
                 return []
 
-        for obs in observations:
-            obs["importance"] = None
         return observations
 
 
@@ -631,18 +629,16 @@ class ObserverPipeline:
             limit=self._max_messages,
         )
 
-        new_messages: list[Memory] = []
-        seen_watermark = self._last_observed_id is None
-        for m in messages:
-            if m.role == "tool":
-                continue
-            if not seen_watermark:
-                if m.id == self._last_observed_id:
-                    seen_watermark = True
-                continue
-            new_messages.append(m)
-        if not seen_watermark:
+        if self._last_observed_id is None:
             new_messages = [m for m in messages if m.role != "tool"]
+        else:
+            new_messages = []
+            for m in messages:
+                if m.role == "tool":
+                    continue
+                if m.id == self._last_observed_id:
+                    break
+                new_messages.append(m)
         if not new_messages:
             return None
 

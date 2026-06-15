@@ -193,9 +193,8 @@ class TestObserverRun:
 
 
 class TestObserverImportanceOptional:
-    def test_observer_returns_none_importance(self):
-        """0.5.0 Observer returns importance=None, regardless of LLM output.
-        The Reflector fills importance in later."""
+    def test_observer_preserves_importance(self):
+        """Observer preserves the importance score from the LLM response."""
         obs = Observer(model="openai:gpt-4o-mini")
         with patch.object(obs, "_provider") as mock_p:
             mock_p.chat_with_tools = AsyncMock(
@@ -210,4 +209,4 @@ class TestObserverImportanceOptional:
             messages = [_make_memory("user", "I live in Seattle")]
             result = asyncio.run(obs.run(messages))
 
-        assert result[0]["importance"] is None
+        assert result[0]["importance"] == 0.85

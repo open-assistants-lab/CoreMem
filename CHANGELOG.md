@@ -1,6 +1,16 @@
 # Changelog
 
-## [0.9.0] — 2026-06-09 — ToolExtractor: session-end tool message analysis
+## [0.9.1] — 2026-06-15 — Observer bug fixes: importance, watermark, decay, metadata, timestamp
+
+### Fixed
+- **Observer discards LLM-provided importance** — `_parse_response()` was unconditionally setting `importance=None` on every observation, discarding the scores the LLM was prompted to compute. Reflector's `_assign_importance_to_pending` still catches legacy null-importance observations.
+- **Observer watermark logic inverted** — `_maybe_run()` watermark loop collected already-processed (older) messages while skipping new ones, because the loop iterates newest-first (`ORDER BY ts DESC`) but collected messages *after* finding the watermark. Rewritten to collect messages until the watermark is reached, then stop.
+- **`apply_decay()` ignores `half_life_days`** — `cutoff` was computed from the parameter but never used in the SQL query. Added `observation_ts` column to reflections schema (with migration), populated on insert, and wired `observation_ts < ?` filter into decay query.
+- **`fetch()` ignores `metadata` parameter** — `metadata` was accepted but never wired into the WHERE clause. Now uses `json_extract(metadata, '$.{k}')` matching the pattern in `get_observations()`, `get_observations_since()`, and `delete_observations()`.
+- **`get_observations_since` strict `>` on timestamps** — Changed to `>=` and excludes the reference `id` to avoid missing same-timestamp records.
+
+### Tests
+- All 125 tests pass.
 
 ### Added
 - `ToolExtractor` — new pipeline class for session-end tool message analysis. Reads `role='tool'` messages, pairs with assistant `tool_calls` by `tool_call_id`, produces structured `tool_summary` observations with deterministic analysis (no LLM required).

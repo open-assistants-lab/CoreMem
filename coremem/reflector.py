@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -194,6 +195,7 @@ class ReflectorPipeline:
                     emb = emb.tolist()
                 r["embedding"] = emb
             r["score"] = 1.0
+            r["observation_ts"] = datetime.now(UTC).isoformat()
             # Tag with scope from pipeline
             if self._user_id:
                 r["user_id"] = self._user_id

@@ -59,6 +59,7 @@ _REFLECTIONS_SCHEMA = {
     "linked_observation_ids": "TEXT",
     "score": "REAL",
     "embedding": "TEXT",
+    "observation_ts": "TEXT DEFAULT ''",
     "user_id": "TEXT",
 }
 
@@ -251,6 +252,11 @@ class MemoryCore:
         if "metadata" not in cols:
             self._db.raw_query("ALTER TABLE observations ADD COLUMN metadata TEXT DEFAULT '{}'")
 
+        # v0.9.0 migration: add observation_ts to existing reflections table
+        ref_cols = {r["name"] for r in self._db.raw_query("PRAGMA table_info(reflections)")}
+        if "observation_ts" not in ref_cols:
+            self._db.raw_query("ALTER TABLE reflections ADD COLUMN observation_ts TEXT DEFAULT ''")
+
     @property
     def db(self) -> HybridDB:
         return self._db
@@ -393,6 +399,10 @@ class MemoryCore:
         if ts_before:
             where_parts.append("ts < ?")
             params.append(ts_before)
+        if metadata:
+            for k, v in metadata.items():
+                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                params.append(v)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         rows = self._db.raw_query(
             f"SELECT * FROM messages WHERE {where} ORDER BY ts DESC LIMIT ? OFFSET ?",
@@ -621,8 +631,10 @@ class MemoryCore:
             if not rows:
                 return []
             last_ts = rows[0]["observation_ts"]
-            where_parts.append("observation_ts > ?")
+            where_parts.append("observation_ts >= ?")
             params.append(last_ts)
+            where_parts.append("id != ?")
+            params.append(last_id)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         sql = (
             f"SELECT * FROM observations WHERE {where} "
@@ -712,6 +724,7 @@ class MemoryCore:
                 "linked_observation_ids": json.dumps(linked),
                 "score": item.get("score", 1.0),
                 "embedding": json.dumps(emb.tolist()) if hasattr(emb, "tolist") else str(emb),
+                "observation_ts": item.get("observation_ts", datetime.now(UTC).isoformat()),
                 "user_id": item.get("user_id", ""),
             })
             ids.append(rid)
@@ -848,8 +861,7 @@ class MemoryCore:
     def apply_decay(self, half_life_days: int = 30) -> int:
         self._check_observations_enabled()
         cutoff = (datetime.now(UTC) - timedelta(days=half_life_days)).isoformat()
-        _ = cutoff  # noqa: F841
-        rows = self._db.query("reflections", where="score > 0.1", limit=1000)
+        rows = self._db.query("reflections", where="score > 0.1 AND (observation_ts = '' OR observation_ts < ?)", params=(cutoff,), limit=1000)
         count = 0
         for row in rows:
             new_score = float(row["score"]) * 0.9
