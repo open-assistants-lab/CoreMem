@@ -191,6 +191,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-Eddy Vinck
+Eddy Xu
 
 CoreMem is the retrieval engine behind the [Executive Assistant](https://github.com/open-assistants-lab) agent system. Pairs with [HybridDB](https://github.com/open-assistants-lab) for storage and ConnectKit for real-time sync.
