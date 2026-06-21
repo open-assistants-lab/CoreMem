@@ -113,7 +113,9 @@ async def dedup_and_merge(
     if not pairs:
         for obs in new_obs:
             if obs.get("status") != "archived":
-                memory.insert_event(obs.get("id", ""), "created")
+                obs_id = obs.get("id")
+                if obs_id:
+                    memory.insert_event(obs_id, "created")
             final.append(obs)
         return final
 
