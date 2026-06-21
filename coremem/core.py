@@ -257,6 +257,52 @@ class MemoryCore:
         if "observation_ts" not in ref_cols:
             self._db.raw_query("ALTER TABLE reflections ADD COLUMN observation_ts TEXT DEFAULT ''")
 
+        # v0.10.0 migration: run schema migrations for upgraded databases
+        self._run_schema_migrations()
+
+    def _run_schema_migrations(self) -> None:
+        """Run forward-compatible schema migrations on existing databases."""
+        # Add missing observation columns (v0.6+ schema additions)
+        obs_cols = {r["name"] for r in self._db.raw_query("PRAGMA table_info(observations)")}
+        for col_name, col_def in [
+            ("source_message_ids", "TEXT DEFAULT '[]'"),
+            ("confidence", "REAL DEFAULT 0.800"),
+            ("memory_type", "TEXT"),
+            ("durability", "TEXT DEFAULT 'durable'"),
+            ("sensitivity", "TEXT DEFAULT 'normal'"),
+            ("status", "TEXT DEFAULT 'candidate'"),
+            ("valid_from", "TEXT"),
+            ("valid_to", "TEXT"),
+            ("superseded_by", "TEXT"),
+            ("embedding", "TEXT"),
+        ]:
+            if col_name not in obs_cols:
+                try:
+                    self._db.raw_query(f"ALTER TABLE observations ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass
+
+        # Create observation_events table if missing
+        tables = self._db.list_tables()
+        if "observation_events" not in tables:
+            self._db.create_table("observation_events", _OBSERVATION_EVENTS_SCHEMA)
+            self._db.raw_query(
+                "CREATE INDEX IF NOT EXISTS idx_observation_events_obs "
+                "ON observation_events(observation_id)"
+            )
+
+        # Create observation_conflicts table if missing
+        if "observation_conflicts" not in tables:
+            self._db.create_table("observation_conflicts", _OBSERVATION_CONFLICTS_SCHEMA)
+            self._db.raw_query(
+                "CREATE INDEX IF NOT EXISTS idx_observation_conflicts_status "
+                "ON observation_conflicts(resolution_status)"
+            )
+
+        # Create reflections table if missing
+        if "reflections" not in tables:
+            self._db.create_table("reflections", _REFLECTIONS_SCHEMA)
+
     @property
     def db(self) -> HybridDB:
         return self._db

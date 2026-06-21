@@ -159,7 +159,70 @@ class _AnthropicAdapter:
     async def chat_with_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
     ) -> ChatResponse:
-        return await self.chat(messages)  # fallback
+        system = ""
+        user_messages: list[dict[str, Any]] = []
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", "")
+            else:
+                user_messages.append(m)
+
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        body: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "messages": user_messages,
+            "temperature": 0.0,
+        }
+        if system:
+            body["system"] = system
+        if tools:
+            body["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self._base_url}/v1/messages",
+                json=body, headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        # Handle both text and tool_call responses
+        content_blocks = data.get("content", [])
+        tool_calls = []
+        text_content = ""
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text_content = block.get("text", "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": block.get("input", {}),
+                    },
+                })
+        # Build tool_calls in OpenAI format for compatibility
+        formatted_tool_calls = []
+        for tc in tool_calls:
+            formatted_tool_calls.append({
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["function"]["name"],
+                    "arguments": __import__("json").dumps(tc["function"]["arguments"]),
+                },
+            })
+        return ChatResponse(
+            content=text_content or (formatted_tool_calls[0]["function"]["arguments"] if formatted_tool_calls else text_content),
+            model=data.get("model", self._model),
+            usage=data.get("usage", {}),
+            tool_calls=formatted_tool_calls or None,
+        )
 
 
 class _OllamaCloudAdapter:
@@ -216,9 +279,27 @@ class _OllamaCloudAdapter:
             resp.raise_for_status()
             data = resp.json()
         content = data.get("message", {}).get("content", "")
+        tool_calls_data = data.get("message", {}).get("tool_calls", [])
+        formatted_tool_calls = None
+        if tool_calls_data:
+            formatted_tool_calls = []
+            for tc in tool_calls_data:
+                args = tc.get("function", {}).get("arguments", "{}")
+                if isinstance(args, dict):
+                    import json as _json
+                    args = _json.dumps(args)
+                formatted_tool_calls.append({
+                    "id": tc.get("id", f"tc_{len(formatted_tool_calls)}"),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("function", {}).get("name", ""),
+                        "arguments": args,
+                    },
+                })
         return ChatResponse(
             content=content,
             model=data.get("model", self._model),
+            tool_calls=formatted_tool_calls,
         )
 
 
@@ -262,7 +343,62 @@ class _GeminiAdapter:
     async def chat_with_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
     ) -> ChatResponse:
-        return await self.chat(messages)  # fallback
+        system = ""
+        contents: list[dict[str, Any]] = []
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", "")
+            else:
+                role = "model" if m.get("role") == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
+
+        query = f"{self._base_url}/v1beta/models/{self._model}:generateContent"
+        if self._api_key:
+            query += f"?key={self._api_key}"
+
+        body: dict[str, Any] = {"contents": contents}
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        if tools:
+            # Convert OpenAI-style tools to Gemini format
+            gemini_tools = [{"functionDeclarations": [
+                {"name": t["function"]["name"], "description": t["function"].get("description", "")}
+                for t in tools
+            ]}]
+            body["tools"] = gemini_tools
+
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.post(query, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        # Parse response - Gemini returns function calls in candidates
+        candidates = data.get("candidates", [])
+        if candidates:
+            candidate = candidates[0]
+            content_block = candidate.get("content", {}).get("parts", [])
+            tool_calls = []
+            text_content = ""
+            for part in content_block:
+                if "functionCall" in part:
+                    fc = part["functionCall"]
+                    import json as _json
+                    tool_calls.append({
+                        "id": f"gc_{len(tool_calls)}",
+                        "type": "function",
+                        "function": {
+                            "name": fc.get("name", ""),
+                            "arguments": _json.dumps(fc.get("args", {})),
+                        },
+                    })
+                else:
+                    text_content = part.get("text", "")
+            return ChatResponse(
+                content=text_content or (tool_calls[0]["function"]["arguments"] if tool_calls else text_content),
+                model=self._model,
+                usage=data.get("usageMetadata", {}),
+                tool_calls=tool_calls or None,
+            )
+        return ChatResponse(content="", model=self._model, tool_calls=None)
 
 
 # ── Known provider prefixes ───────────────────────────────────────────────
