@@ -811,7 +811,7 @@ class ObserverPipeline:
                 obs.setdefault("session_id", self._session_id or "")
             self._memory.insert_observations(new_obs)
         if messages:
-            self._last_observed_id = messages[-1].id
+            self._last_observed_id = messages[0].id
         self._turns_since_last_run = 0
         return new_obs
 

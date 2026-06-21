@@ -4,12 +4,13 @@
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
-**Single-backend architecture.** HybridDB (SQLite + FTS5 + ChromaDB) is the only backend since v0.6.0. Ranking pipeline: FTS5 + vector retrieval → deterministic heuristics → MMR session diversity → recency-aware rescoring → session-deduplicated retrieval.
+**Dual-backend architecture.** Drop-in backends (ChromaDB baseline, HybridDB enhanced) with the same API. Ranking pipeline: backend retrieval → deterministic heuristics → MMR session diversity → recency-aware rescoring → session-deduplicated retrieval.
 
 ```python
 from coremem import MemoryCore
+from coremem.backends.chroma import ChromaBackend
 
-core = MemoryCore(path="./memory")
+core = MemoryCore(backend=ChromaBackend(path="./memory"))
 
 # Ingest conversation turns
 core.ingest("user", "I visited the Museum of Modern Art today")
@@ -64,12 +65,16 @@ HybridBackend (HybridDB — SQLite + FTS5 + ChromaDB) is the default since 0.5.0
 
 ## Core Concepts
 
-### Backend
-
-Since v0.6.0, CoreMem uses HybridDB internally (SQLite + FTS5 + ChromaDB). No backend selection needed:
+### Backends
 
 ```python
-core = MemoryCore(path="./data")
+# ChromaDB baseline — pure vector search
+from coremem.backends.chroma import ChromaBackend
+core = MemoryCore(backend=ChromaBackend(path="./data"))
+
+# HybridDB enhanced — FTS5 + vector hybrid search
+from coremem.backends.hybrid import HybridBackend
+core = MemoryCore(backend=HybridBackend(path="./data"))
 ```
 
 ### Ingestion
