@@ -101,7 +101,7 @@ def _write_fixture(path: Path) -> Path:
 def test_longmemeval_eval_builds_references_and_scores_metrics(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
 
-    result = run_eval(data_path, tmp_path / "memorypack", k=3)
+    result = run_eval(data_path, tmp_path / "memorypack", mode="raw_bm25", k=3)
 
     assert result["lint"] == {"passed": True, "errors": []}
     assert result["bundle"]["reference_turn_count"] == 5
@@ -127,7 +127,7 @@ def test_longmemeval_eval_strips_ground_truth_from_memorypack_files(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     root = tmp_path / "memorypack"
 
-    run_eval(data_path, root, k=3)
+    run_eval(data_path, root, mode="raw_bm25", k=3)
 
     all_text = "\n".join(
         m.content
@@ -144,7 +144,7 @@ def test_longmemeval_eval_strips_ground_truth_from_memorypack_files(tmp_path):
 def test_longmemeval_eval_returns_rows_and_breakdown(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
 
-    result = run_eval(data_path, tmp_path / "memorypack", k=3)
+    result = run_eval(data_path, tmp_path / "memorypack", mode="raw_bm25", k=3)
     rows = {row["question_id"]: row for row in result["results"]}
 
     update = rows["q_update"]
@@ -169,12 +169,54 @@ def test_longmemeval_eval_returns_rows_and_breakdown(tmp_path):
     assert breakdown["single-session-user_abs"]["empty_retrieval_rate"] == 1.0
 
 
+def test_longmemeval_eval_memorycore_uses_per_question_haystacks(tmp_path):
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+
+    result = run_eval(data_path, tmp_path / "memorycore", mode="memorycore", k=3, limit=2)
+
+    assert result["evaluation_scope"] == "per_question_haystack"
+    assert set(result["modes"]) == {"memorycore"}
+    rows = {row["question_id"]: row for row in result["modes"]["memorycore"]["results"]}
+    assert rows["q_dessert"]["retrieved_session_ids"]
+    assert all(sid.startswith("lme_0000_") for sid in rows["q_dessert"]["retrieved_session_ids"])
+    assert rows["q_update"]["retrieved_session_ids"]
+    assert all(sid.startswith("lme_0001_") for sid in rows["q_update"]["retrieved_session_ids"])
+
+
+def test_longmemeval_eval_memorycore_resume_checkpoint(tmp_path):
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    root = tmp_path / "memorycore"
+    checkpoint = tmp_path / "checkpoint.json"
+
+    first = run_eval(
+        data_path,
+        root,
+        mode="memorycore",
+        k=3,
+        limit=2,
+        resume_path=checkpoint,
+    )
+    second = run_eval(
+        data_path,
+        root,
+        mode="memorycore",
+        k=3,
+        limit=2,
+        resume=True,
+        resume_path=checkpoint,
+    )
+
+    assert checkpoint.exists()
+    assert first["completed_question_ids"] == second["completed_question_ids"]
+    assert first["modes"]["memorycore"]["metrics"] == second["modes"]["memorycore"]["metrics"]
+
+
 def test_longmemeval_eval_cli_emits_json_and_jsonl(tmp_path, capsys):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     jsonl_path = tmp_path / "rows.jsonl"
 
     exit_code = main([
-        str(data_path),
+        str(data_path), "--mode", "raw_bm25",
         "--root",
         str(tmp_path / "memorypack"),
         "--k",
@@ -189,7 +231,7 @@ def test_longmemeval_eval_cli_emits_json_and_jsonl(tmp_path, capsys):
     jsonl_rows = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
 
     assert exit_code == 0
-    assert payload["mode"] == "raw-reference-retrieval"
+    assert payload["mode"] == "raw_bm25"
     assert payload["metrics"]["session_recall@3"] == 1.0
     assert all("scoring" not in row for row in payload["results"])
     assert len(jsonl_rows) == 4
@@ -221,7 +263,7 @@ def test_longmemeval_eval_uses_fractional_recall_for_multiple_evidence_sessions(
     data_path = tmp_path / "longmemeval_fixture.json"
     data_path.write_text(json.dumps(data), encoding="utf-8")
 
-    result = run_eval(data_path, tmp_path / "memorypack", k=1)
+    result = run_eval(data_path, tmp_path / "memorypack", mode="raw_bm25", k=1)
     row = result["results"][0]
 
     assert row["scoring"]["session_recall@1"] == 0.5
@@ -253,7 +295,7 @@ def test_longmemeval_eval_detects_abs_suffix_on_question_id(tmp_path):
     data_path = tmp_path / "longmemeval_fixture.json"
     data_path.write_text(json.dumps(data), encoding="utf-8")
 
-    result = run_eval(data_path, tmp_path / "memorypack", k=3)
+    result = run_eval(data_path, tmp_path / "memorypack", mode="raw_bm25", k=3)
     row = result["results"][0]
 
     assert row["scoring"]["abstention_expected"] is True
@@ -268,4 +310,4 @@ def test_longmemeval_eval_refuses_unsafe_overwrite(tmp_path):
     (unsafe_root / "keep.txt").write_text("important", encoding="utf-8")
 
     with pytest.raises(ValueError, match="refusing to overwrite non-AgentJournal"):
-        run_eval(data_path, unsafe_root, reset=True)
+        run_eval(data_path, unsafe_root, mode="raw_bm25", reset=True)

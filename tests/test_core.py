@@ -46,6 +46,22 @@ def test_core_search_messages_deep():
         core._test_cleanup()
 
 
+def test_core_search_messages_filters_session_when_provided():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "coffee preference from session one", session_id="s1")
+        core.ingest("user", "coffee preference from session two", session_id="s2")
+
+        scoped = core.search_messages("coffee preference", session_id="s1", limit=10)
+        assert scoped
+        assert all(result.memory.session_id == "s1" for result in scoped)
+
+        global_results = core.search_messages("coffee preference", limit=10)
+        assert {result.memory.session_id for result in global_results} >= {"s1", "s2"}
+    finally:
+        core._test_cleanup()
+
+
 def test_old_search_names_are_removed():
     core = _tmp_core()
     try:
@@ -61,17 +77,6 @@ def test_core_ingest_single():
         mid = core.ingest("user", "Hello world")
         assert mid
         assert core.count() == 1
-    finally:
-        core._test_cleanup()
-
-
-def test_core_wake_up():
-    core = _tmp_core()
-    try:
-        core.ingest("user", "I like coffee", session_id="s1")
-        core.ingest("assistant", "Great!", session_id="s1")
-        ctx = core.wake_up(user_id="alice")
-        assert "[L0: Identity]" in ctx
     finally:
         core._test_cleanup()
 
@@ -142,17 +147,6 @@ def test_memorycore_store_method():
         ids = core.store(memories)
         assert len(ids) == 1
         assert core.count() == 1
-    finally:
-        core._test_cleanup()
-
-
-def test_memorycore_deep_search_context():
-    core = _tmp_core()
-    try:
-        core.ingest("user", "I built a model kit yesterday")
-        ctx = core.deep_search_context("model", limit=5)
-        assert ctx is not None
-        assert "model" in ctx.lower()
     finally:
         core._test_cleanup()
 

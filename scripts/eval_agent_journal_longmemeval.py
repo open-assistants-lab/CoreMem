@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Deterministic LongMemEval loader and raw AgentJournal baseline.
+"""Deterministic LongMemEval eval — BM25 baseline + MemoryCore search modes.
 
-This is the Stage 2 AgentJournal eval slice: adapt LongMemEval-shaped JSON to
-in-memory source messages, prove oracle fields are stripped before ingestion and
-retrieval, then score a raw lexical message/session baseline. It does not call
-an LLM and does not use embedding backends.
+Modes:
+  raw_bm25           BM25 over in-memory messages (original baseline)
+  memorycore         ingest via MemoryCore, search_messages()
+  memorycore_deep    ingest via MemoryCore, search_messages_deep()
+  memorycore_journal ingest + optional compile_uncompiled_turns, search_journal()
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import math
 import re
@@ -21,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from coremem import MemoryCore
 from coremem.agent_journal import AgentJournalBundle
 from coremem.providers import create_provider
 from coremem.types import Memory
@@ -28,7 +31,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODE = "raw-reference-retrieval"
+MODES = ("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -140,49 +143,206 @@ def build_reference_bundle(root: str | Path, instances: Sequence[PreparedInstanc
     return bundle
 
 
+def build_memorycore(
+    root: str | Path,
+    instances: Sequence[PreparedInstance],
+    *,
+    compile_journal: bool = False,
+) -> MemoryCore:
+    """Build a MemoryCore with the provided LongMemEval haystack messages."""
+    core = MemoryCore(path=str(root / "hybrid"))
+    for instance in instances:
+        for session in instance.sessions:
+            for msg in session.messages:
+                core.db.insert("messages", {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "session_id": msg.session_id or "",
+                    "user_id": msg.user_id or "",
+                    "agent_id": msg.agent_id or "",
+                    "turn_id": session.turn_id,
+                    "metadata": "{}",
+                    "ts": msg.ts.isoformat() if msg.ts else "1970-01-01T00:00:00Z",
+                })
+    if compile_journal:
+        asyncio.run(core.compile_uncompiled_turns())
+    return core
+
+
+def _search_messages_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_messages(query, limit=k)
+    return [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=r.memory.id or "",
+                session_id=r.memory.session_id or "",
+                message_id=r.memory.id or "",
+                role=r.memory.role,
+                content=r.memory.content,
+            ),
+            score=r.score,
+        )
+        for r in results
+    ]
+
+
+def _search_messages_deep_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_messages_deep(query, limit=k)
+    return [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=r.memory.id or "",
+                session_id=r.memory.session_id or "",
+                message_id=r.memory.id or "",
+                role=r.memory.role,
+                content=r.memory.content,
+            ),
+            score=r.score,
+        )
+        for r in results
+    ]
+
+
 def run_eval(
     data_path: str | Path,
     root: str | Path,
     *,
+    mode: str = "all",
     k: int = 5,
     question_types: Sequence[str] | None = None,
     limit: int | None = None,
     reset: bool = False,
     expand_model: str | None = None,
+    compile_journal: bool = False,
+    resume: bool = False,
+    resume_path: str | Path | None = None,
+    progress: bool = False,
 ) -> dict[str, Any]:
-    """Load data, write stripped references, run raw retrieval, and score rows."""
+    """Load data, run canonical per-question LongMemEval retrieval, and score modes."""
     if k <= 0:
         raise ValueError("k must be positive")
+    if mode not in MODES and mode != "all":
+        raise ValueError(f"unknown mode: {mode}; choose from {MODES} or 'all'")
 
     root = Path(root)
     if reset and root.exists():
         _safe_reset_root(root)
-    elif root.exists() and any(root.iterdir()):
+    elif root.exists() and any(root.iterdir()) and not resume:
         raise FileExistsError(f"bundle root already exists: {root}")
 
     raw_instances = load_longmemeval_instances(data_path, question_types=question_types, limit=limit)
     prepared, truth_by_question_id = prepare_instances(raw_instances)
-    bundle = build_reference_bundle(root, prepared)
-    lint_errors = bundle.lint()
-    llm_provider = create_provider(expand_model) if expand_model else None
-    rows = [
-        _score_instance(bundle, instance, truth_by_question_id[instance.question_id], k=k, llm_provider=llm_provider)
-        for instance in prepared
-    ]
 
-    return {
-        "dataset": str(data_path),
-        "mode": MODE,
-        "k": k,
-        "lint": {"passed": not lint_errors, "errors": lint_errors},
-        "bundle": {
-            "root": str(root),
-            "reference_turn_count": sum(len(instance.sessions) for instance in prepared),
-            "page_count": len(list(bundle.pages_dir.rglob("*.md"))) if bundle.pages_dir.exists() else 0,
-        },
-        "results": rows,
-        "metrics": _aggregate_metrics(rows, k=k),
-    }
+    llm_provider = create_provider(expand_model) if expand_model else None
+
+    # ── BM25 baseline (separate bundle, in-memory messages) ──
+    if mode == "raw_bm25":
+        bundle = build_reference_bundle(root, prepared)
+        lint_errors = bundle.lint()
+        rows = [
+            _score_instance_bm25(bundle, instance, truth_by_question_id[instance.question_id],
+                                 k=k, llm_provider=llm_provider)
+            for instance in prepared
+        ]
+        result = {
+            "dataset": str(data_path),
+            "evaluation_scope": "per_question_haystack",
+            "mode": "raw_bm25",
+            "k": k,
+            "lint": {"passed": not lint_errors, "errors": lint_errors},
+            "bundle": {
+                "root": str(root),
+                "reference_turn_count": sum(len(instance.sessions) for instance in prepared),
+                "page_count": len(list(bundle.pages_dir.rglob("*.md"))) if bundle.pages_dir.exists() else 0,
+            },
+            "results": rows,
+            "metrics": _aggregate_metrics(rows, k=k),
+        }
+        if resume_path is not None:
+            _write_resume_checkpoint(Path(resume_path), result, complete=True)
+        return result
+
+    # ── MemoryCore modes: canonical LongMemEval per-question haystack injection ──
+    active_modes = MODES if mode == "all" else (mode,)
+    active_modes = tuple(m for m in active_modes if m != "raw_bm25")
+    mode_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in active_modes}
+    completed_question_ids: set[str] = set()
+
+    if resume:
+        if resume_path is None:
+            raise ValueError("resume=True requires resume_path")
+        state = _load_resume_checkpoint(Path(resume_path))
+        if state is not None:
+            _validate_resume_checkpoint(
+                state,
+                data_path=str(data_path),
+                mode=mode,
+                k=k,
+                active_modes=active_modes,
+            )
+            completed_question_ids = set(str(qid) for qid in state.get("completed_question_ids", []))
+            state_modes = state.get("modes", {})
+            if isinstance(state_modes, Mapping):
+                for m in active_modes:
+                    mode_data = state_modes.get(m, {})
+                    if isinstance(mode_data, Mapping):
+                        mode_rows[m] = [
+                            dict(row)
+                            for row in mode_data.get("results", [])
+                            if isinstance(row, Mapping)
+                        ]
+
+    for index, instance in enumerate(prepared):
+        if instance.question_id in completed_question_ids:
+            if progress:
+                print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: resumed", flush=True)
+            continue
+        instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
+        if instance_root.exists():
+            _safe_reset_root(instance_root)
+        if progress:
+            print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: running", flush=True)
+        core = build_memorycore(
+            instance_root,
+            instances=(instance,),
+            compile_journal=compile_journal and "memorycore_journal" in active_modes,
+        )
+        truth = truth_by_question_id[instance.question_id]
+
+        for m in active_modes:
+            if m == "memorycore":
+                row = _score_instance_memorycore(core, instance, truth, k=k, deep=False)
+            elif m == "memorycore_deep":
+                row = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
+            elif m == "memorycore_journal":
+                row = _score_instance_journal(core, instance, truth, k=k)
+            else:
+                continue
+            mode_rows[m].append(row)
+        completed_question_ids.add(instance.question_id)
+        if resume_path is not None:
+            checkpoint = _build_mode_result(
+                data_path=str(data_path),
+                mode=mode,
+                k=k,
+                mode_rows=mode_rows,
+                completed_question_ids=completed_question_ids,
+                complete=False,
+            )
+            _write_resume_checkpoint(Path(resume_path), checkpoint, complete=False)
+
+    result = _build_mode_result(
+        data_path=str(data_path),
+        mode=mode,
+        k=k,
+        mode_rows=mode_rows,
+        completed_question_ids=completed_question_ids,
+        complete=True,
+    )
+    if resume_path is not None:
+        _write_resume_checkpoint(Path(resume_path), result, complete=True)
+    return result
 
 
 def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[PreparedInstance, QuestionTruth]:
@@ -281,7 +441,7 @@ def _empty_score(instance: PreparedInstance, truth: QuestionTruth, *, mode: str,
         "retrieved_session_ids": [],
         "retrieved_message_ids": [],
         "context_chars": 0,
-        "used_reference_search": mode == MODE,
+        "used_reference_search": mode == "raw_bm25",
         "top_score": 0.0,
         "scoring": {
             "expected_session_ids": list(truth.expected_session_ids),
@@ -303,7 +463,7 @@ def _empty_score(instance: PreparedInstance, truth: QuestionTruth, *, mode: str,
     }
 
 
-def _score_instance(
+def _score_instance_bm25(
     bundle: AgentJournalBundle,
     instance: PreparedInstance,
     truth: QuestionTruth,
@@ -313,8 +473,78 @@ def _score_instance(
 ) -> dict[str, Any]:
     turn_ids = {session.turn_id for session in instance.sessions}
     if truth.abstention_expected:
-        return _empty_score(instance, truth, mode=MODE)
+        return _empty_score(instance, truth, mode="raw_bm25")
     hits = _search_reference_messages(bundle, instance.query, allowed_turn_ids=turn_ids, limit=k, llm_provider=llm_provider)
+    return _build_scored_row(instance, truth, hits, mode="raw_bm25", k=k)
+
+
+def _score_instance_memorycore(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+    deep: bool = False,
+) -> dict[str, Any]:
+    mode = "memorycore_deep" if deep else "memorycore"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    search_fn = _search_messages_deep_mode if deep else _search_messages_mode
+    hits = search_fn(core, instance.query, k)
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_journal(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_journal"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    page_hits = core.search_journal(instance.query, limit=k)
+    messages_by_id = {
+        msg.id: (session.turn_id, msg)
+        for session in instance.sessions
+        for msg in session.messages
+    }
+    seen_message_ids: set[str] = set()
+    hits: list[RawSearchHit] = []
+    for page in page_hits:
+        page_text = _read_text(page.path)
+        for message_id, (turn_id, msg) in messages_by_id.items():
+            if message_id in seen_message_ids or message_id not in page_text:
+                continue
+            seen_message_ids.add(message_id)
+            hits.append(
+                RawSearchHit(
+                    message=ReferenceMessage(
+                        turn_id=turn_id,
+                        session_id=msg.session_id or "",
+                        message_id=message_id,
+                        role=msg.role,
+                        content=msg.content,
+                    ),
+                    score=page.score,
+                )
+            )
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    row["retrieved_page_ids"] = [p.path.name for p in page_hits]
+    row["journal_hit_count"] = len(page_hits)
+    row["journal_top_score"] = page_hits[0].score if page_hits else 0.0
+    return row
+
+
+def _build_scored_row(
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    hits: list[RawSearchHit],
+    *,
+    mode: str,
+    k: int,
+) -> dict[str, Any]:
     retrieved_message_ids = [hit.message.message_id for hit in hits]
     retrieved_turn_ids = _unique(hit.message.turn_id for hit in hits)
     retrieved_session_ids = _unique(hit.message.session_id for hit in hits)
@@ -329,12 +559,10 @@ def _score_instance(
     empty_retrieval = not hits
     abstention_false_positive = truth.abstention_expected and not empty_retrieval
 
-    # Precision@k: fraction of top-k that are relevant
     relevant = set(expected_sessions)
     top_k = retrieved_session_ids[:k]
     session_precision = sum(1 for s in top_k if s in relevant) / max(k, 1) if top_k else 0.0
 
-    # MAP: average precision at each relevant hit
     ap = 0.0
     relevant_found = 0
     for i, sid in enumerate(retrieved_session_ids):
@@ -347,14 +575,13 @@ def _score_instance(
         "question_id": instance.question_id,
         "question_type": instance.question_type,
         "query": instance.query,
-        "mode": MODE,
+        "mode": mode,
         "retrieved_page_ids": [],
         "retrieved_turn_ids": retrieved_turn_ids,
         "retrieved_session_ids": retrieved_session_ids,
         "retrieved_message_ids": retrieved_message_ids,
         "retrieved_scores": [hit.score for hit in hits],
         "context_chars": context_chars,
-        "used_reference_search": True,
         "top_score": hits[0].score if hits else 0.0,
         "scoring": {
             "expected_session_ids": expected_sessions,
@@ -528,6 +755,67 @@ def _aggregate_metrics(rows: Sequence[Mapping[str, Any]], *, k: int) -> dict[str
     }
 
 
+def _build_mode_result(
+    *,
+    data_path: str,
+    mode: str,
+    k: int,
+    mode_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    completed_question_ids: set[str],
+    complete: bool,
+) -> dict[str, Any]:
+    modes: dict[str, Any] = {}
+    for mode_name, rows in mode_rows.items():
+        row_list = [dict(row) for row in rows]
+        modes[mode_name] = {
+            "results": row_list,
+            "metrics": _aggregate_metrics(row_list, k=k),
+        }
+    return {
+        "dataset": data_path,
+        "evaluation_scope": "per_question_haystack",
+        "mode": mode,
+        "k": k,
+        "complete": complete,
+        "completed_question_ids": sorted(completed_question_ids),
+        "modes": modes,
+    }
+
+
+def _load_resume_checkpoint(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_resume_checkpoint(path: Path, result: Mapping[str, Any], *, complete: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(result)
+    payload["complete"] = complete
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _validate_resume_checkpoint(
+    state: Mapping[str, Any],
+    *,
+    data_path: str,
+    mode: str,
+    k: int,
+    active_modes: Sequence[str],
+) -> None:
+    if state.get("dataset") != data_path:
+        raise ValueError("resume checkpoint dataset does not match")
+    if state.get("mode") != mode:
+        raise ValueError("resume checkpoint mode does not match")
+    if state.get("k") != k:
+        raise ValueError("resume checkpoint k does not match")
+    state_modes = set((state.get("modes") or {}).keys())
+    if state_modes != set(active_modes):
+        raise ValueError("resume checkpoint modes do not match")
+
+
 def _breakdown_by_question_type(rows: Sequence[Mapping[str, Any]], *, k: int) -> dict[str, Any]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -615,6 +903,13 @@ def _safe_identifier(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     safe = safe.strip("._-")
     return safe or "item"
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _parse_date(value: str | None) -> datetime:
@@ -767,9 +1062,9 @@ def _safe_reset_root(root: Path) -> None:
     if resolved in {Path.cwd().resolve(), Path.home().resolve(), Path("/").resolve()}:
         raise ValueError(f"refusing to overwrite unsafe root: {root}")
     if root.exists() and any(root.iterdir()):
-        markers = [root / "SCHEMA.md", root / "references" / "manifest.json"]
-        if not all(marker.exists() for marker in markers):
-            raise ValueError(f"refusing to overwrite non-AgentJournal directory: {root}")
+        markers = [root / "SCHEMA.md", root / "references" / "manifest.json", root / "hybrid"]
+        if not any(m.exists() for m in markers):
+            raise ValueError(f"refusing to overwrite non-AgentJournal/MemoryCore directory: {root}")
     shutil.rmtree(root)
 
 
@@ -786,12 +1081,32 @@ def _mean(values: Sequence[int | float]) -> float:
     return round(sum(values) / len(values), 3)
 
 
+def _build_summary(modes_result: dict[str, Any], k: int) -> dict[str, Any]:
+    """Build a side-by-side comparison table of key metrics across modes."""
+    summary: dict[str, Any] = {}
+    for mode_name, mode_data in modes_result.items():
+        metrics = mode_data["metrics"]
+        summary[mode_name] = {
+            f"session_recall@{k}": metrics.get(f"session_recall@{k}", 0),
+            f"message_recall@{k}": metrics.get(f"message_recall@{k}", 0),
+            f"session_hit@{k}": metrics.get(f"session_hit@{k}", 0),
+            f"message_hit@{k}": metrics.get(f"message_hit@{k}", 0),
+            "session_mrr": metrics.get("session_mrr", 0),
+            "session_map": metrics.get("session_map", 0),
+            "empty_retrieval_rate": metrics.get("empty_retrieval_rate", 0),
+            "abstention_false_positive_rate": metrics.get("abstention_false_positive_rate", 0),
+        }
+    return summary
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the deterministic AgentJournal LongMemEval raw-reference baseline",
+        description="Run the deterministic AgentJournal LongMemEval — BM25 baseline + MemoryCore modes",
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal", "all"),
+                        help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
     parser.add_argument(
@@ -817,41 +1132,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--expand-model",
         help="LLM model for query expansion (e.g. ollama-cloud:deepseek-v4-flash). Default: no expansion.",
     )
+    parser.add_argument(
+        "--compile-journal",
+        action="store_true",
+        help="Compile AgentJournal pages before memorycore_journal search. Calls the configured LLM compiler.",
+    )
+    parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint file if present")
+    parser.add_argument("--resume-path", type=Path, help="Checkpoint path for resumable runs")
+    parser.add_argument("--progress", action="store_true", help="Print per-question progress")
     args = parser.parse_args(argv)
+
+    resume_path = args.resume_path
+    if resume_path is None and args.output is not None:
+        resume_path = args.output.with_suffix(args.output.suffix + ".checkpoint.json")
 
     if args.root is None:
         with tempfile.TemporaryDirectory(prefix="agent-memory-longmemeval-") as tmp:
             result = run_eval(
-                args.data,
-                Path(tmp),
-                k=args.k,
-                question_types=args.question_types,
-                limit=args.limit,
+                args.data, Path(tmp),
+                mode=args.mode, k=args.k,
+                question_types=args.question_types, limit=args.limit,
                 expand_model=args.expand_model,
+                compile_journal=args.compile_journal,
+                resume=args.resume,
+                resume_path=resume_path,
+                progress=args.progress,
             )
+            if "modes" in result:
+                result["summary"] = _build_summary(result["modes"], args.k)
             _write_outputs(
-                result,
-                output=args.output,
-                jsonl_output=args.jsonl_output,
+                result, output=args.output, jsonl_output=args.jsonl_output,
                 include_scoring=args.include_scoring,
             )
             _print_result(result, as_json=args.json, include_scoring=args.include_scoring)
     else:
-        if args.root.exists() and any(args.root.iterdir()) and not args.overwrite:
+        if args.root.exists() and any(args.root.iterdir()) and not args.overwrite and not args.resume:
             parser.error(f"--root already exists; pass --overwrite to replace it: {args.root}")
         result = run_eval(
-            args.data,
-            args.root,
-            k=args.k,
-            question_types=args.question_types,
-            limit=args.limit,
-            reset=args.overwrite,
-            expand_model=args.expand_model,
+            args.data, args.root,
+            mode=args.mode, k=args.k,
+            question_types=args.question_types, limit=args.limit,
+            reset=args.overwrite, expand_model=args.expand_model,
+            compile_journal=args.compile_journal,
+            resume=args.resume,
+            resume_path=resume_path,
+            progress=args.progress,
         )
+        if "modes" in result:
+            result["summary"] = _build_summary(result["modes"], args.k)
         _write_outputs(
-            result,
-            output=args.output,
-            jsonl_output=args.jsonl_output,
+            result, output=args.output, jsonl_output=args.jsonl_output,
             include_scoring=args.include_scoring,
         )
         _print_result(result, as_json=args.json, include_scoring=args.include_scoring)
@@ -873,12 +1203,23 @@ def _write_outputs(
         )
     if jsonl_output is not None:
         rows = result.get("results", [])
-        if not isinstance(rows, list):
-            raise ValueError("result rows must be a list")
-        jsonl_output.write_text(
-            "".join(json.dumps(_public_row(row), sort_keys=True) + "\n" for row in rows),
-            encoding="utf-8",
-        )
+        modes = result.get("modes", {})
+        if modes:
+            all_rows: list[dict[str, Any]] = []
+            for mode_name, mode_data in modes.items():
+                for row in mode_data.get("results", []):
+                    r = dict(row)
+                    r["mode"] = mode_name
+                    all_rows.append(r)
+            jsonl_output.write_text(
+                "".join(json.dumps(_public_row(r), sort_keys=True) + "\n" for r in all_rows),
+                encoding="utf-8",
+            )
+        elif isinstance(rows, list):
+            jsonl_output.write_text(
+                "".join(json.dumps(_public_row(r), sort_keys=True) + "\n" for r in rows),
+                encoding="utf-8",
+            )
 
 
 def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -894,6 +1235,17 @@ def _public_result(result: Mapping[str, Any], *, include_scoring: bool) -> dict[
     if include_scoring:
         return dict(result)
     public = dict(result)
+    modes = public.get("modes")
+    if isinstance(modes, Mapping):
+        public["modes"] = {
+            mode_name: {
+                "results": [_public_row(r) if isinstance(r, Mapping) else r for r in mode_data.get("results", [])],
+                "metrics": mode_data.get("metrics", {}),
+            }
+            for mode_name, mode_data in modes.items()
+        }
+        public.pop("results", None)
+        return public
     rows = public.get("results", [])
     if isinstance(rows, list):
         public["results"] = [_public_row(row) if isinstance(row, Mapping) else row for row in rows]
@@ -904,16 +1256,49 @@ def _print_result(result: Mapping[str, Any], *, as_json: bool, include_scoring: 
     if as_json:
         print(json.dumps(_public_result(result, include_scoring=include_scoring), indent=2, sort_keys=True))
         return
-    metrics = result["metrics"]
+
+    modes = result.get("modes", {})
     k = result["k"]
-    lint = "pass" if result["lint"]["passed"] else "fail"
-    print(f"lint: {lint}")
-    print(f"questions: {metrics['question_count']}")
-    print(f"session_recall@{k}: {metrics[f'session_recall@{k}']}")
-    print(f"message_recall@{k}: {metrics[f'message_recall@{k}']}")
-    print(f"session_mrr: {metrics['session_mrr']}")
-    print(f"empty_retrieval_rate: {metrics['empty_retrieval_rate']}")
-    print(f"abstention_false_positive_rate: {metrics['abstention_false_positive_rate']}")
+
+    if modes:
+        print(f"\n{'Metric':<30}", end="")
+        for mode_name in modes:
+            print(f"{mode_name:<22}", end="")
+        print()
+        print("-" * (30 + 22 * len(modes)))
+        metric_keys = [
+            f"session_recall@{k}", f"message_recall@{k}",
+            f"session_hit@{k}", f"message_hit@{k}",
+            "session_mrr", "session_map",
+            "empty_retrieval_rate", "abstention_false_positive_rate",
+        ]
+        for key in metric_keys:
+            print(f"{key:<30}", end="")
+            for mode_name in modes:
+                val = modes[mode_name]["metrics"].get(key, "")
+                print(f"{val:<22}", end="")
+            print()
+
+        summary = result.get("summary")
+        if summary:
+            print(f"\nBest per metric:")
+            for key in metric_keys:
+                best = max(
+                    (v for v in (summary[m].get(key, 0) for m in summary) if v is not None),
+                    default=0,
+                )
+                winners = [m for m in summary if summary[m].get(key, 0) == best]
+                print(f"  {key}: {best} ({', '.join(winners)})")
+    else:
+        metrics = result["metrics"]
+        lint = "pass" if result.get("lint", {}).get("passed", True) else "fail"
+        print(f"mode: {result.get('mode', '?')}")
+        print(f"lint: {lint}")
+        print(f"questions: {metrics['question_count']}")
+        print(f"session_recall@{k}: {metrics[f'session_recall@{k}']}")
+        print(f"message_recall@{k}: {metrics[f'message_recall@{k}']}")
+        print(f"session_mrr: {metrics['session_mrr']}")
+        print(f"empty_retrieval_rate: {metrics['empty_retrieval_rate']}")
 
 
 if __name__ == "__main__":

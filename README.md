@@ -171,15 +171,6 @@ await pipeline.after_turn()
 
 Non-LLM approaches like OpenIE dependency parsing can replace entities, temporal, possessions, and actions LFs with zero API cost, but are restricted to the languages the NLP model supports (primarily English). LLM LFs handle any language out of the box — Mandarin, Arabic, Spanish, code-switching — without model swaps or quality degradation. The 2.5% miss rate (third-party events, contextual asides) is the measured cost of the hallucination gate.
 
-### Wake-Up Context
-
-Give the agent instant situational awareness:
-
-```python
-context = core.wake_up(user_id="alice")
-# Returns a compact string with L0 identity and L1 recent context.
-```
-
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -5,20 +5,14 @@ Single HybridDB instance. Messages stored with turn_id for AgentJournal compilat
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from hybriddb import HybridDB
-
-from coremem.heuristics import SearchHeuristics, _mmr_diversify
-from coremem.layers import WakeUpContext
-from coremem.query import LLMProvider, expand_queries
-from coremem.rerank import get_cross_encoder, rerank
-from coremem.types import Memory, SearchQuery, SearchResult
 
 from coremem.agent_journal import (
     AgentJournalBundle,
@@ -31,6 +25,10 @@ from coremem.agent_journal import (
     dream,
     rebuild_index,
 )
+from coremem.heuristics import SearchHeuristics, _mmr_diversify
+from coremem.query import LLMProvider, expand_queries
+from coremem.rerank import get_cross_encoder, rerank
+from coremem.types import Memory, SearchQuery, SearchResult
 
 _DEFAULT_SEARCH_DEPTH = 5
 
@@ -91,6 +89,36 @@ def _row_to_memory(row: dict[str, Any]) -> Memory:
     )
 
 
+def _matches_filters(
+    mem: Memory,
+    *,
+    role: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    ts_after: str | None = None,
+    ts_before: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    if role and mem.role != role:
+        return False
+    if session_id and mem.session_id != session_id:
+        return False
+    if user_id and mem.user_id != user_id:
+        return False
+    if agent_id and mem.agent_id != agent_id:
+        return False
+    if ts_after and (mem.ts is None or mem.ts.isoformat() <= ts_after):
+        return False
+    if ts_before and (mem.ts is None or mem.ts.isoformat() >= ts_before):
+        return False
+    if metadata:
+        for key, value in metadata.items():
+            if (mem.metadata or {}).get(key) != value:
+                return False
+    return True
+
+
 def _row_to_search_result(row: dict[str, Any], score: float) -> SearchResult:
     return SearchResult(memory=_row_to_memory(row), score=score)
 
@@ -110,7 +138,6 @@ class MemoryCore:
     def __init__(self, path: str, llm_provider: LLMProvider | None = None):
         self._db = HybridDB(path=path)
         self._heuristics = SearchHeuristics()
-        self._wakeup = WakeUpContext(self._db)
         self._llm_provider = llm_provider
         self._ensure_tables()
         workspace_root = Path(path).resolve().parent
@@ -172,11 +199,13 @@ class MemoryCore:
         ts: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
+        turn_id: str | None = None,
     ) -> str:
-        if role == "user":
-            turn_id = str(uuid.uuid4())[:12]
-        else:
-            turn_id = self._get_last_turn_id(session_id or "")
+        if turn_id is None:
+            if role == "user":
+                turn_id = str(uuid.uuid4())[:12]
+            else:
+                turn_id = self._get_last_turn_id(session_id or "")
         _ingest_message(
             db=self._db, role=role, content=content,
             session_id=session_id, user_id=user_id, agent_id=agent_id,
@@ -208,11 +237,23 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
-        hybrid_limit = limit * 3
+        has_filters = any((role, session_id, user_id, agent_id, ts_after, ts_before, metadata))
+        hybrid_limit = max(limit * 20, 100) if has_filters else limit * 3
         rows = self._db.search("messages", "content", query, limit=hybrid_limit)
         results: list[SearchResult] = []
         for row in rows:
             mem = _row_to_memory(row)
+            if not _matches_filters(
+                mem,
+                role=role,
+                session_id=session_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                ts_after=ts_after,
+                ts_before=ts_before,
+                metadata=metadata,
+            ):
+                continue
             score = row.get("score", 0.0)
             score = SearchHeuristics.apply_all(
                 query=query,
@@ -240,7 +281,10 @@ class MemoryCore:
             depth = max(depth, 10)
         elif any(cue in query.lower() for cue in ("before", "after", "since", "when did", "what year")):
             depth = max(depth, 7)
+        has_filters = any((role, session_id, user_id, agent_id, ts_after, ts_before, metadata))
         effective_limit = limit * depth
+        if has_filters:
+            effective_limit = max(effective_limit, limit * 20, 100)
         all_results: list[SearchResult] = []
         seen_ids: set[str] = set()
         seen_content: set[int] = set()
@@ -252,6 +296,17 @@ class MemoryCore:
                 score_range = max_score - min_score
                 for row in rows:
                     mem = _row_to_memory(row)
+                    if not _matches_filters(
+                        mem,
+                        role=role,
+                        session_id=session_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        ts_after=ts_after,
+                        ts_before=ts_before,
+                        metadata=metadata,
+                    ):
+                        continue
                     rid = mem.id
                     if rid and rid not in seen_ids:
                         seen_ids.add(rid)
@@ -271,17 +326,6 @@ class MemoryCore:
         all_results = _mmr_diversify(all_results, effective_limit)
         all_results = rerank(query, all_results)
         return all_results[:limit]
-
-    def wake_up(self, user_id: str = "default", session_id: str | None = None) -> str:
-        context = self._wakeup.essential(user_id=user_id)
-        if session_id:
-            l2 = self._wakeup.session(session_id=session_id)
-            if l2:
-                context += "\n\n" + l2
-        return context
-
-    def deep_search_context(self, query: str, limit: int = 10) -> str | None:
-        return self._wakeup.deep_search(query=query, limit=limit)
 
     def fetch(
         self,
