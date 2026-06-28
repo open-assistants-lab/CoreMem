@@ -183,6 +183,21 @@ def test_longmemeval_eval_memorycore_uses_per_question_haystacks(tmp_path):
     assert all(sid.startswith("lme_0001_") for sid in rows["q_update"]["retrieved_session_ids"])
 
 
+def test_longmemeval_eval_journal_compiles_verbatim_pages(tmp_path):
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+
+    result = run_eval(data_path, tmp_path / "journal", mode="memorycore_journal", k=3, limit=1)
+
+    rows = result["modes"]["memorycore_journal"]["results"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["journal_compile"]["compiler"] == "verbatim"
+    assert row["journal_compile"]["pages"] == 1
+    assert row["retrieved_page_ids"]
+    assert row["scoring"]["session_hit@3"] is True
+    assert row["scoring"]["message_hit@3"] is True
+
+
 def test_longmemeval_eval_memorycore_resume_checkpoint(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     root = tmp_path / "memorycore"

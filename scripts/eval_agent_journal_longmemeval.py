@@ -5,7 +5,7 @@ Modes:
   raw_bm25           BM25 over in-memory messages (original baseline)
   memorycore         ingest via MemoryCore, search_messages()
   memorycore_deep    ingest via MemoryCore, search_messages_deep()
-  memorycore_journal ingest + optional compile_uncompiled_turns, search_journal()
+  memorycore_journal ingest + compile journal, search_journal()
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from coremem import MemoryCore
-from coremem.agent_journal import AgentJournalBundle
+from coremem.agent_journal import AgentJournalBundle, CrossEncoderReranker
 from coremem.providers import create_provider
 from coremem.types import Memory
 
@@ -32,6 +32,7 @@ _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
 MODES = ("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal")
+JOURNAL_COMPILERS = ("none", "verbatim", "llm")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -147,10 +148,13 @@ def build_memorycore(
     root: str | Path,
     instances: Sequence[PreparedInstance],
     *,
-    compile_journal: bool = False,
+    journal_reranker: CrossEncoderReranker | None = None,
 ) -> MemoryCore:
     """Build a MemoryCore with the provided LongMemEval haystack messages."""
     core = MemoryCore(path=str(root / "hybrid"))
+    if journal_reranker is not None:
+        core._reranker = journal_reranker  # noqa: SLF001 - eval harness reuses the loaded model across questions.
+        core._agent_journal_search._reranker = journal_reranker  # noqa: SLF001
     for instance in instances:
         for session in instance.sessions:
             for msg in session.messages:
@@ -165,9 +169,68 @@ def build_memorycore(
                     "metadata": "{}",
                     "ts": msg.ts.isoformat() if msg.ts else "1970-01-01T00:00:00Z",
                 })
-    if compile_journal:
-        asyncio.run(core.compile_uncompiled_turns())
     return core
+
+
+def compile_eval_journal(core: MemoryCore, instance: PreparedInstance, *, compiler: str = "verbatim") -> dict[str, Any]:
+    """Compile per-session journal pages for LongMemEval journal retrieval."""
+    if compiler not in JOURNAL_COMPILERS:
+        raise ValueError(f"unknown journal compiler: {compiler}; choose from {JOURNAL_COMPILERS}")
+    if compiler == "none":
+        return {"compiler": compiler, "pages": 0, "errors": []}
+    if compiler == "llm":
+        summary = asyncio.run(core.compile_uncompiled_turns(limit=max(1, len(instance.sessions))))
+        compiled = summary.get("compiled", [])
+        errors = summary.get("errors", [])
+        return {"compiler": compiler, "pages": len(compiled), "errors": errors}
+
+    journal_root = core._agent_journal_root  # noqa: SLF001 - eval harness writes fixture pages directly.
+    pages_dir = journal_root / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for session in instance.sessions:
+        page_id = _safe_identifier(session.session_id)
+        path = pages_dir / f"{page_id}.md"
+        path.write_text(_render_eval_journal_page(instance, session), encoding="utf-8")
+        written += 1
+    return {"compiler": compiler, "pages": written, "errors": []}
+
+
+def _render_eval_journal_page(instance: PreparedInstance, session: PreparedSession) -> str:
+    frontmatter = [
+        "---",
+        f"title: LongMemEval Session {session.session_id}",
+        "memory_kind: transcript",
+        "scope: user",
+        f"question_id: {instance.question_id}",
+        f"session_id: {session.session_id}",
+        f"turn_id: {session.turn_id}",
+        "agent_journal_version: eval-verbatim-v1",
+        "---",
+        "",
+    ]
+    lines = [
+        *frontmatter,
+        f"# LongMemEval Session {session.session_id}",
+        "",
+        f"Question ID: {instance.question_id}",
+        f"Session ID: {session.session_id}",
+        f"Source Turn ID: {session.turn_id}",
+        "",
+        "## Messages",
+        "",
+    ]
+    for msg in session.messages:
+        lines.extend([
+            f"### {msg.id} ({msg.role})",
+            "",
+            f"Source message ID: {msg.id}",
+            f"Role: {msg.role}",
+            "",
+            msg.content,
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _search_messages_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
@@ -215,6 +278,7 @@ def run_eval(
     reset: bool = False,
     expand_model: str | None = None,
     compile_journal: bool = False,
+    journal_compiler: str = "verbatim",
     resume: bool = False,
     resume_path: str | Path | None = None,
     progress: bool = False,
@@ -224,6 +288,10 @@ def run_eval(
         raise ValueError("k must be positive")
     if mode not in MODES and mode != "all":
         raise ValueError(f"unknown mode: {mode}; choose from {MODES} or 'all'")
+    if journal_compiler not in JOURNAL_COMPILERS:
+        raise ValueError(f"unknown journal compiler: {journal_compiler}; choose from {JOURNAL_COMPILERS}")
+    if compile_journal:
+        journal_compiler = "llm"
 
     root = Path(root)
     if reset and root.exists():
@@ -268,6 +336,7 @@ def run_eval(
     active_modes = tuple(m for m in active_modes if m != "raw_bm25")
     mode_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in active_modes}
     completed_question_ids: set[str] = set()
+    journal_reranker = CrossEncoderReranker() if "memorycore_journal" in active_modes else None
 
     if resume:
         if resume_path is None:
@@ -280,6 +349,7 @@ def run_eval(
                 mode=mode,
                 k=k,
                 active_modes=active_modes,
+                journal_compiler=journal_compiler,
             )
             completed_question_ids = set(str(qid) for qid in state.get("completed_question_ids", []))
             state_modes = state.get("modes", {})
@@ -306,8 +376,11 @@ def run_eval(
         core = build_memorycore(
             instance_root,
             instances=(instance,),
-            compile_journal=compile_journal and "memorycore_journal" in active_modes,
+            journal_reranker=journal_reranker,
         )
+        journal_summary: dict[str, Any] | None = None
+        if "memorycore_journal" in active_modes:
+            journal_summary = compile_eval_journal(core, instance, compiler=journal_compiler)
         truth = truth_by_question_id[instance.question_id]
 
         for m in active_modes:
@@ -317,6 +390,7 @@ def run_eval(
                 row = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
             elif m == "memorycore_journal":
                 row = _score_instance_journal(core, instance, truth, k=k)
+                row["journal_compile"] = journal_summary or {"compiler": journal_compiler, "pages": 0, "errors": []}
             else:
                 continue
             mode_rows[m].append(row)
@@ -329,6 +403,7 @@ def run_eval(
                 mode_rows=mode_rows,
                 completed_question_ids=completed_question_ids,
                 complete=False,
+                journal_compiler=journal_compiler,
             )
             _write_resume_checkpoint(Path(resume_path), checkpoint, complete=False)
 
@@ -339,6 +414,7 @@ def run_eval(
         mode_rows=mode_rows,
         completed_question_ids=completed_question_ids,
         complete=True,
+        journal_compiler=journal_compiler,
     )
     if resume_path is not None:
         _write_resume_checkpoint(Path(resume_path), result, complete=True)
@@ -763,6 +839,7 @@ def _build_mode_result(
     mode_rows: Mapping[str, Sequence[Mapping[str, Any]]],
     completed_question_ids: set[str],
     complete: bool,
+    journal_compiler: str,
 ) -> dict[str, Any]:
     modes: dict[str, Any] = {}
     for mode_name, rows in mode_rows.items():
@@ -775,6 +852,7 @@ def _build_mode_result(
         "dataset": data_path,
         "evaluation_scope": "per_question_haystack",
         "mode": mode,
+        "journal_compiler": journal_compiler,
         "k": k,
         "complete": complete,
         "completed_question_ids": sorted(completed_question_ids),
@@ -804,6 +882,7 @@ def _validate_resume_checkpoint(
     mode: str,
     k: int,
     active_modes: Sequence[str],
+    journal_compiler: str,
 ) -> None:
     if state.get("dataset") != data_path:
         raise ValueError("resume checkpoint dataset does not match")
@@ -811,6 +890,8 @@ def _validate_resume_checkpoint(
         raise ValueError("resume checkpoint mode does not match")
     if state.get("k") != k:
         raise ValueError("resume checkpoint k does not match")
+    if state.get("journal_compiler") != journal_compiler:
+        raise ValueError("resume checkpoint journal compiler does not match")
     state_modes = set((state.get("modes") or {}).keys())
     if state_modes != set(active_modes):
         raise ValueError("resume checkpoint modes do not match")
@@ -1135,7 +1216,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--compile-journal",
         action="store_true",
-        help="Compile AgentJournal pages before memorycore_journal search. Calls the configured LLM compiler.",
+        help="Deprecated alias for --journal-compiler llm.",
+    )
+    parser.add_argument(
+        "--journal-compiler",
+        default="verbatim",
+        choices=JOURNAL_COMPILERS,
+        help="Journal compiler for memorycore_journal: verbatim is deterministic and LLM-free (default).",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint file if present")
     parser.add_argument("--resume-path", type=Path, help="Checkpoint path for resumable runs")
@@ -1154,6 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 question_types=args.question_types, limit=args.limit,
                 expand_model=args.expand_model,
                 compile_journal=args.compile_journal,
+                journal_compiler=args.journal_compiler,
                 resume=args.resume,
                 resume_path=resume_path,
                 progress=args.progress,
@@ -1174,6 +1262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             question_types=args.question_types, limit=args.limit,
             reset=args.overwrite, expand_model=args.expand_model,
             compile_journal=args.compile_journal,
+            journal_compiler=args.journal_compiler,
             resume=args.resume,
             resume_path=resume_path,
             progress=args.progress,
