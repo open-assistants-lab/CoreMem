@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory.bundle import AgentMemoryBundle, AgentMemoryError
+from coremem.agent_journal.bundle import AgentJournalBundle, AgentJournalError
 from coremem.providers import create_provider
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ def _validate_output(text: str) -> bool:
 
 
 async def dream(
-    bundle: AgentMemoryBundle,
+    bundle: AgentJournalBundle,
     model: str = "ollama-cloud:deepseek-v4-flash",
     max_retries: int = 1,
 ) -> dict[str, Any]:

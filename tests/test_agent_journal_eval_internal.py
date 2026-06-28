@@ -1,10 +1,10 @@
-"""Tests for the deterministic internal MemoryPack eval harness."""
+"""Tests for the deterministic internal AgentJournal eval harness."""
 
 from __future__ import annotations
 
 import json
 
-from scripts.eval_memorypack_internal import eval_questions, main, run_eval
+from scripts.eval_agent_journal_internal import eval_questions, main, run_eval
 
 
 def test_internal_eval_builds_valid_fixture_and_scores_retrieval(tmp_path):

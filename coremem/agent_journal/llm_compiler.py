@@ -1,6 +1,6 @@
-"""LLM-backed MemoryPack compiler.
+"""LLM-backed AgentJournal compiler.
 
-Calls an LLM to generate structured MemoryPack plans from reference turns,
+Calls an LLM to generate structured AgentJournal plans from reference turns,
 then validates and renders them through the deterministic compiler.
 """
 
@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory.bundle import (
+from coremem.agent_journal.bundle import (
     ACTIVATIONS,
     EVIDENCE_TYPES,
     MEMORY_KINDS,
@@ -23,13 +23,13 @@ from coremem.agent_memory.bundle import (
     SOURCE_EVIDENCE_TYPES,
     STATUSES,
     TRUST_VALUES,
-    AgentMemoryBundle,
-    AgentMemoryError,
+    AgentJournalBundle,
+    AgentJournalError,
 )
-from coremem.agent_memory.compiler import AgentMemoryCompiler, AgentMemoryCompileResult
+from coremem.agent_journal.compiler import AgentJournalCompiler, AgentJournalCompileResult
 from coremem.providers import LLMProvider, create_provider
 
-SYSTEM_PROMPT = f"""You are a MemoryPack compiler. Your job is to analyze conversation turns and produce structured MemoryPack pages.
+SYSTEM_PROMPT = f"""You are a AgentJournal compiler. Your job is to analyze conversation turns and produce structured AgentJournal pages.
 
 Each page has this schema (output as JSON):
 
@@ -111,7 +111,7 @@ Rules:
 7. Write concise claims that capture the key information, not verbatim transcripts.
 8. Use derived_summary when a claim synthesizes information from multiple messages.
 9. Set boot_worthy=true only for critical startup information.
-10. The agent_memory_version is "{PROFILE_VERSION}" — do not include it in your output.
+10. The agent_journal_version is "{PROFILE_VERSION}" — do not include it in your output.
 11. Preserve key relationship details, dates, names, and events that could be queried later. These details are critical for future retrieval.
 
 Output ONLY valid JSON. No markdown fences, no explanation."""
@@ -142,18 +142,18 @@ def _extract_json(text: str) -> str:
     return text.strip()
 
 
-class AgentMemoryLLMCompiler:
-    """LLM-backed MemoryPack compiler with deterministic validation."""
+class AgentJournalLLMCompiler:
+    """LLM-backed AgentJournal compiler with deterministic validation."""
 
     def __init__(
         self,
-        bundle: AgentMemoryBundle,
+        bundle: AgentJournalBundle,
         model: str = "ollama-cloud:deepseek-v4-flash",
         max_retries: int = 3,
         cache_dir: str | Path | None = None,
     ) -> None:
         self.bundle = bundle
-        self.compiler = AgentMemoryCompiler(bundle)
+        self.compiler = AgentJournalCompiler(bundle)
         self.provider: LLMProvider = create_provider(model)
         self.max_retries = max_retries
         self._cache_root = Path(cache_dir) if cache_dir else bundle.root / ".llm_cache"
@@ -166,7 +166,7 @@ class AgentMemoryLLMCompiler:
         *,
         timestamp: str | None = None,
         title: str | None = None,
-    ) -> AgentMemoryCompileResult:
+    ) -> AgentJournalCompileResult:
         """Compile a single session into a daily journal section via LLM (with cache).
 
         Appends a ``## HH:MM - Title`` section to ``daily/YYYY-MM-DD.md``.
@@ -181,7 +181,7 @@ class AgentMemoryLLMCompiler:
 
     def _apply_section(
         self, plan: dict[str, Any], *, timestamp: str | None, title: str | None
-    ) -> AgentMemoryCompileResult:
+    ) -> AgentJournalCompileResult:
         """Validate plan and append section to daily page."""
         section = self.compiler.compile_section(plan, timestamp=timestamp or "00:00", title=title or "Conversation")
         date_str = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -193,11 +193,11 @@ class AgentMemoryLLMCompiler:
             daily_path.write_text(existing.rstrip() + "\n\n" + section, encoding="utf-8")
         else:
             daily_path.write_text(
-                f"---\ndate: {date_str}\nagent_memory_version: 1\n---\n\n"
+                f"---\ndate: {date_str}\nagent_journal_version: 1\n---\n\n"
                 f"# {date_str}\n\n{section}",
                 encoding="utf-8",
             )
-        return AgentMemoryCompileResult(written_pages=(daily_path,), boot_pages=())
+        return AgentJournalCompileResult(written_pages=(daily_path,), boot_pages=())
 
     def _check_cache(self, turn_id: str, messages: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         path = self._cache_root / f"{turn_id}.json"
@@ -229,7 +229,7 @@ class AgentMemoryLLMCompiler:
     async def compile_instance(
         self,
         sessions: Sequence[tuple[str, str, Sequence[Mapping[str, Any]]]],
-    ) -> AgentMemoryCompileResult:
+    ) -> AgentJournalCompileResult:
         """Compile all sessions in an instance into pages via a single LLM call."""
         parts: list[str] = []
         for turn_id, session_id, messages in sessions:
@@ -262,7 +262,7 @@ class AgentMemoryLLMCompiler:
         session_id: str,
         conv_messages: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        user_prompt = f"""Analyze this conversation turn and produce a MemoryPack page plan.
+        user_prompt = f"""Analyze this conversation turn and produce a AgentJournal page plan.
 
 Turn content:
 {turn_content}
@@ -285,7 +285,7 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
                 plan = json.loads(_extract_json(raw))
             except json.JSONDecodeError as exc:
                 if attempt == self.max_retries - 1:
-                    raise AgentMemoryError(
+                    raise AgentJournalError(
                         f"LLM returned invalid JSON after {self.max_retries} attempts: {exc}"
                     ) from exc
                 chat_messages.append({"role": "assistant", "content": raw})
@@ -298,9 +298,9 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
             try:
                 self.compiler._compile_plan(plan)
                 return plan
-            except AgentMemoryError as exc:
+            except AgentJournalError as exc:
                 if attempt == self.max_retries - 1:
-                    raise AgentMemoryError(
+                    raise AgentJournalError(
                         f"LLM plan rejected after {self.max_retries} attempts: {exc}"
                     ) from exc
                 chat_messages.append({"role": "assistant", "content": raw})
@@ -308,7 +308,7 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
                     "role": "user",
                     "content": _RETRY_PROMPT.format(errors=str(exc)),
                 })
-        raise AgentMemoryError("LLM compiler exhausted retries")
+        raise AgentJournalError("LLM compiler exhausted retries")
 
     def _fix_quotes(self, plan: dict[str, Any], msg_map: dict[str, str]) -> None:
         """Post-process LLM plan to fix quotes that aren't exact substrings.
@@ -443,7 +443,7 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
                 mid = m.get("message_id", "")
                 if mid:
                     msg_map[mid] = m.get("content", "")
-        user_prompt = f"""Analyze these {len(sessions)} conversation turns and produce a MemoryPack page plan with one page per turn.
+        user_prompt = f"""Analyze these {len(sessions)} conversation turns and produce a AgentJournal page plan with one page per turn.
 
 Each page must use page_id = the session_id for that turn.
 
@@ -469,7 +469,7 @@ Output a JSON plan with {len(sessions)} pages (one per turn, operation="create")
                 plan = json.loads(_extract_json(raw))
             except json.JSONDecodeError as exc:
                 if attempt == self.max_retries - 1:
-                    raise AgentMemoryError(
+                    raise AgentJournalError(
                         f"LLM returned invalid JSON after {self.max_retries} attempts: {exc}"
                     ) from exc
                 chat_messages.append({"role": "assistant", "content": raw})
@@ -482,9 +482,9 @@ Output a JSON plan with {len(sessions)} pages (one per turn, operation="create")
             try:
                 self.compiler._compile_plan(plan)
                 return plan
-            except AgentMemoryError as exc:
+            except AgentJournalError as exc:
                 if attempt == self.max_retries - 1:
-                    raise AgentMemoryError(
+                    raise AgentJournalError(
                         f"LLM plan rejected after {self.max_retries} attempts: {exc}"
                     ) from exc
                 chat_messages.append({"role": "assistant", "content": raw})
@@ -492,4 +492,4 @@ Output a JSON plan with {len(sessions)} pages (one per turn, operation="create")
                     "role": "user",
                     "content": _RETRY_PROMPT.format(errors=str(exc)),
                 })
-        raise AgentMemoryError("LLM compiler exhausted retries")
+        raise AgentJournalError("LLM compiler exhausted retries")

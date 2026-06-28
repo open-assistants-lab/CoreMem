@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic internal MemoryPack retrieval eval.
+"""Deterministic internal AgentJournal retrieval eval.
 
 This harness intentionally uses only scripted turns, handwritten pages, and
 stdlib scoring. It is a small substrate check before LongMemEval or any compiler
@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory import AgentMemoryBundle, AgentMemorySearch
+from coremem.agent_journal import AgentJournalBundle, AgentJournalSearch
 from coremem.types import Memory
 
 STOPWORDS = {
@@ -77,9 +77,9 @@ class PageSpec:
     content: str
 
 
-def build_fixture(root: str | Path) -> AgentMemoryBundle:
-    """Create the scripted reference turns and handwritten MemoryPack pages."""
-    bundle = AgentMemoryBundle(root)
+def build_fixture(root: str | Path) -> AgentJournalBundle:
+    """Create the scripted reference turns and handwritten AgentJournal pages."""
+    bundle = AgentJournalBundle(root)
     bundle.initialize()
 
     for turn in scripted_turns():
@@ -176,7 +176,7 @@ def scripted_turns() -> list[ScriptedTurn]:
                 memory(
                     "decision_user_001",
                     "user",
-                    "For the MemoryPack POC, the decision is to keep retrieval deterministic and avoid external LLM calls.",
+                    "For the AgentJournal POC, the decision is to keep retrieval deterministic and avoid external LLM calls.",
                     session_id="session_memorypack_poc",
                     minutes=10,
                 ),
@@ -196,7 +196,7 @@ def scripted_turns() -> list[ScriptedTurn]:
                 memory(
                     "tool_user_001",
                     "user",
-                    "Can you check the targeted MemoryPack test command?",
+                    "Can you check the targeted AgentJournal test command?",
                     session_id="session_memorypack_tests",
                     minutes=20,
                 ),
@@ -216,7 +216,7 @@ def scripted_turns() -> list[ScriptedTurn]:
                 memory(
                     "index_old_user_001",
                     "user",
-                    "Earlier I thought the MemoryPack index should be generated from YAML.",
+                    "Earlier I thought the AgentJournal index should be generated from YAML.",
                     session_id="session_index_format",
                     minutes=30,
                 ),
@@ -242,7 +242,7 @@ def scripted_turns() -> list[ScriptedTurn]:
                 memory(
                     "schedule_user_001",
                     "user",
-                    "On Monday I moved the MemoryPack review to Friday afternoon.",
+                    "On Monday I moved the AgentJournal review to Friday afternoon.",
                     session_id="session_schedule",
                     minutes=50,
                 ),
@@ -307,11 +307,11 @@ def handwritten_pages() -> list[PageSpec]:
             content=_page(
                 page_id="decisions.deterministic-retrieval",
                 title="Deterministic Retrieval Decision",
-                description="MemoryPack POC retrieval must be deterministic and avoid external LLM calls.",
+                description="AgentJournal POC retrieval must be deterministic and avoid external LLM calls.",
                 memory_kind="decision",
                 trust="user_authoritative",
-                read_when=["working on MemoryPack retrieval", "checking LLM-call boundaries"],
-                summary="The MemoryPack POC keeps retrieval deterministic and avoids external LLM calls.",
+                read_when=["working on AgentJournal retrieval", "checking LLM-call boundaries"],
+                summary="The AgentJournal POC keeps retrieval deterministic and avoids external LLM calls.",
                 details=["Use scripted fixtures, handwritten pages, and local scoring for this eval slice."],
                 citations=[
                     _citation(
@@ -328,12 +328,12 @@ def handwritten_pages() -> list[PageSpec]:
             page_id="workflow.memorypack-tests",
             content=_page(
                 page_id="workflow.memorypack-tests",
-                title="MemoryPack Test Command",
-                description="Targeted MemoryPack tests run through uv and pytest.",
+                title="AgentJournal Test Command",
+                description="Targeted AgentJournal tests run through uv and pytest.",
                 memory_kind="workflow",
                 trust="tool_observed",
-                read_when=["running targeted MemoryPack tests", "verifying MemoryPack changes"],
-                summary="The targeted MemoryPack test command is `uv run python -m pytest tests/test_memorypack.py -q`.",
+                read_when=["running targeted AgentJournal tests", "verifying AgentJournal changes"],
+                summary="The targeted AgentJournal test command is `uv run python -m pytest tests/test_memorypack.py -q`.",
                 details=["The internal eval test has its own targeted command."],
                 citations=[
                     _citation(
@@ -350,12 +350,12 @@ def handwritten_pages() -> list[PageSpec]:
             page_id="decisions.index-format",
             content=_page(
                 page_id="decisions.index-format",
-                title="MemoryPack Index Format",
+                title="AgentJournal Index Format",
                 description="The active index decision is markdown frontmatter plus index links, not generated YAML.",
                 memory_kind="decision",
                 trust="user_authoritative",
-                read_when=["editing MemoryPack indexes", "handling superseded index decisions"],
-                summary="The active MemoryPack index format is markdown frontmatter plus index links, not generated YAML.",
+                read_when=["editing AgentJournal indexes", "handling superseded index decisions"],
+                summary="The active AgentJournal index format is markdown frontmatter plus index links, not generated YAML.",
                 details=[
                     "The earlier generated-YAML idea is superseded and should not be treated as active.",
                 ],
@@ -380,19 +380,19 @@ def handwritten_pages() -> list[PageSpec]:
             page_id="workflow.review-schedule",
             content=_page(
                 page_id="workflow.review-schedule",
-                title="MemoryPack Review Schedule",
-                description="The MemoryPack review was moved to Friday afternoon.",
+                title="AgentJournal Review Schedule",
+                description="The AgentJournal review was moved to Friday afternoon.",
                 memory_kind="workflow",
                 trust="user_authoritative",
-                read_when=["checking the MemoryPack review time", "reasoning about schedule changes"],
-                summary="On Monday, the user moved the MemoryPack review to Friday afternoon.",
+                read_when=["checking the AgentJournal review time", "reasoning about schedule changes"],
+                summary="On Monday, the user moved the AgentJournal review to Friday afternoon.",
                 details=["Treat Friday afternoon as the current review slot."],
                 citations=[
                     _citation(
                         "turn_temporal_001",
                         "schedule_user_001",
                         "user_statement",
-                        "moved the MemoryPack review to Friday afternoon",
+                        "moved the AgentJournal review to Friday afternoon",
                     ),
                 ],
             ),
@@ -408,7 +408,7 @@ def handwritten_pages() -> list[PageSpec]:
                 status="unresolved",
                 trust="user_authoritative",
                 safe_to_act=False,
-                read_when=["designing active_context retention", "reviewing open MemoryPack questions"],
+                read_when=["designing active_context retention", "reviewing open AgentJournal questions"],
                 summary="It is unresolved whether active_context pages should expire automatically after a week.",
                 details=["Do not implement expiry policy without resolving the question."],
                 citations=[
@@ -483,7 +483,7 @@ def eval_questions() -> list[EvalQuestion]:
         EvalQuestion(
             question_id="q_temporal",
             question_type="temporal-reasoning",
-            query="Friday afternoon MemoryPack review moved",
+            query="Friday afternoon AgentJournal review moved",
             expected_page_ids=("workflow.review-schedule",),
             expected_message_ids=("schedule_user_001",),
             expected_session_ids=("session_schedule",),
@@ -542,12 +542,12 @@ def _page(
     citation_block = "\n".join(citations)
     safe_to_act_text = "true" if safe_to_act else "false"
     return f"""---
-type: AgentMemory Page
+type: AgentJournal Page
 page_id: {page_id}
 title: {title}
 description: {description}
 memory_kind: {memory_kind}
-agent_memory_version: "0.1"
+agent_journal_version: "0.1"
 scope: project
 status: {status}
 activation: query
@@ -598,25 +598,25 @@ def _claims_from_page(page: PageSpec) -> list[dict[str, str]]:
 
 
 def _write_bundle_summary(root: Path) -> None:
-    memory = """# MemoryPack
+    memory = """# AgentJournal
 
 ## Current Focus
 
-- Internal scripted eval for deterministic MemoryPack retrieval.
+- Internal scripted eval for deterministic AgentJournal retrieval.
 
 ## Read Next
 
 - [Deterministic Retrieval Decision](daily/decisions/deterministic-retrieval.md)
-- [MemoryPack Test Command](daily/workflow/memorypack-tests.md)
-- [MemoryPack Index Format](daily/decisions/index-format.md)
+- [AgentJournal Test Command](daily/workflow/memorypack-tests.md)
+- [AgentJournal Index Format](daily/decisions/index-format.md)
 """
-    index = """# MemoryPack Index
+    index = """# AgentJournal Index
 
 - [Briefing Preference](daily/preferences/briefings.md)
 - [Deterministic Retrieval Decision](daily/decisions/deterministic-retrieval.md)
-- [MemoryPack Test Command](daily/workflow/memorypack-tests.md)
-- [MemoryPack Index Format](daily/decisions/index-format.md)
-- [MemoryPack Review Schedule](daily/workflow/review-schedule.md)
+- [AgentJournal Test Command](daily/workflow/memorypack-tests.md)
+- [AgentJournal Index Format](daily/decisions/index-format.md)
+- [AgentJournal Review Schedule](daily/workflow/review-schedule.md)
 - [Active Context Expiry](daily/open-questions/active-context-expiry.md)
 - [Quoted Prompt Injection Content](daily/safety/quoted-injection.md)
 """
@@ -624,9 +624,9 @@ def _write_bundle_summary(root: Path) -> None:
     (root / "index.md").write_text(index, encoding="utf-8")
 
 
-def _score_question(bundle: AgentMemoryBundle, question: EvalQuestion) -> dict[str, Any]:
+def _score_question(bundle: AgentJournalBundle, question: EvalQuestion) -> dict[str, Any]:
     raw_hits = _search_reference_messages(bundle, question.query, limit=3)
-    page_hits = AgentMemorySearch(bundle.root).search(question.query, limit=3)
+    page_hits = AgentJournalSearch(bundle.root).search(question.query, limit=3)
 
     raw_message_ids = [hit.message.message_id for hit in raw_hits]
     raw_turn_ids = _unique(hit.message.turn_id for hit in raw_hits)
@@ -694,7 +694,7 @@ def _aggregate_question_metrics(question_results: Sequence[dict[str, Any]]) -> d
     }
 
 
-def _score_citations(bundle: AgentMemoryBundle) -> dict[str, Any]:
+def _score_citations(bundle: AgentJournalBundle) -> dict[str, Any]:
     claims = citation_claims()
     invalid = []
     for claim in claims:
@@ -716,7 +716,7 @@ def _score_citations(bundle: AgentMemoryBundle) -> dict[str, Any]:
     }
 
 
-def _bundle_metrics(bundle: AgentMemoryBundle) -> dict[str, Any]:
+def _bundle_metrics(bundle: AgentJournalBundle) -> dict[str, Any]:
     pages = sorted(p for d in (bundle.pages_dir, bundle.daily_dir) if d.exists() for p in d.rglob("*.md"))
     references = sorted(bundle.turns_dir.rglob("*.md"))
     page_text = "\n".join(path.read_text(encoding="utf-8") for path in pages)
@@ -733,7 +733,7 @@ def _bundle_metrics(bundle: AgentMemoryBundle) -> dict[str, Any]:
     }
 
 
-def _search_reference_messages(bundle: AgentMemoryBundle, query: str, *, limit: int) -> list[RawSearchHit]:
+def _search_reference_messages(bundle: AgentJournalBundle, query: str, *, limit: int) -> list[RawSearchHit]:
     terms = _terms(query)
     if not terms:
         return []
@@ -747,7 +747,7 @@ def _search_reference_messages(bundle: AgentMemoryBundle, query: str, *, limit: 
     return hits[:limit]
 
 
-def _reference_messages(bundle: AgentMemoryBundle) -> list[ReferenceMessage]:
+def _reference_messages(bundle: AgentJournalBundle) -> list[ReferenceMessage]:
     messages: list[ReferenceMessage] = []
     for path in sorted(bundle.turns_dir.rglob("*.md")):
         payload = _extract_turn_payload(path)
@@ -776,13 +776,13 @@ def _extract_turn_payload(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     parts = text.split("\n# Canonical Turn Payload\n", 1)
     if len(parts) != 2:
-        raise ValueError(f"missing canonical MemoryPack turn payload section: {path}")
-    match = re.search(r"```json agent_memory-turn\n(.*?)\n```", parts[1], re.DOTALL)
+        raise ValueError(f"missing canonical AgentJournal turn payload section: {path}")
+    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
     if not match:
-        raise ValueError(f"missing canonical MemoryPack turn payload: {path}")
+        raise ValueError(f"missing canonical AgentJournal turn payload: {path}")
     payload = json.loads(match.group(1))
     if not isinstance(payload, dict):
-        raise ValueError(f"canonical MemoryPack turn payload must be an object: {path}")
+        raise ValueError(f"canonical AgentJournal turn payload must be an object: {path}")
     return payload
 
 
@@ -842,7 +842,7 @@ def _breakdown_by_question_type(question_results: Sequence[dict[str, Any]]) -> d
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the deterministic internal MemoryPack eval")
+    parser = argparse.ArgumentParser(description="Run the deterministic internal AgentJournal eval")
     parser.add_argument("--root", type=Path, help="Bundle root to write. Defaults to a temp dir.")
     parser.add_argument("--json", action="store_true", help="Print the full structured JSON result")
     parser.add_argument(

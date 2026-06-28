@@ -1,6 +1,6 @@
 """MemoryCore — unified memory for AI agents.
 
-Single HybridDB instance. Messages stored with turn_id for AgentMemory compilation.
+Single HybridDB instance. Messages stored with turn_id for AgentJournal compilation.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from coremem.query import LLMProvider, expand_queries
 from coremem.rerank import get_cross_encoder, rerank
 from coremem.types import Memory, SearchQuery, SearchResult
 
-from coremem.agent_memory import (
-    AgentMemoryBundle,
-    AgentMemoryLLMCompiler,
-    AgentMemorySearch,
+from coremem.agent_journal import (
+    AgentJournalBundle,
+    AgentJournalLLMCompiler,
+    AgentJournalSearch,
     CrossEncoderReranker,
     SearchHit,
     dream,
@@ -93,7 +93,7 @@ def _row_to_search_result(row: dict[str, Any], score: float) -> SearchResult:
 
 
 class MemoryCore:
-    """Unified memory for AI agents. One HybridDB, AgentMemory for compilation.
+    """Unified memory for AI agents. One HybridDB, AgentJournal for compilation.
 
     Usage:
         core = MemoryCore(path="./memory")
@@ -101,7 +101,7 @@ class MemoryCore:
         core.ingest("assistant", "Great!", session_id="s1")
         await core.compile_turn(turn_id=tid, timestamp="10:30", title="Coffee Chat")
         results = core.search("coffee")
-        hits = core.search_memory("coffee")
+        hits = core.search_journal("coffee")
     """
 
     def __init__(self, path: str, llm_provider: LLMProvider | None = None):
@@ -111,12 +111,12 @@ class MemoryCore:
         self._llm_provider = llm_provider
         self._ensure_tables()
         workspace_root = Path(path).resolve().parent
-        self._agent_memory_root = workspace_root / "agent_memory"
-        self._agent_memory_bundle = AgentMemoryBundle(self._agent_memory_root)
-        self._llm_compiler = AgentMemoryLLMCompiler(self._agent_memory_bundle)
+        self._agent_journal_root = workspace_root / "agent_journal"
+        self._agent_journal_bundle = AgentJournalBundle(self._agent_journal_root)
+        self._journal_compiler = AgentJournalLLMCompiler(self._agent_journal_bundle)
         self._reranker = CrossEncoderReranker()
-        self._agent_memory_search = AgentMemorySearch(
-            self._agent_memory_root,
+        self._agent_journal_search = AgentJournalSearch(
+            self._agent_journal_root,
             reranker=self._reranker,
         )
 
@@ -389,7 +389,7 @@ class MemoryCore:
     def clear(self) -> None:
         self._db.raw_query("DELETE FROM messages")
 
-    # ── AgentMemory methods ────────────────────────────────────
+    # ── AgentJournal methods ───────────────────────────────────
 
     async def compile_turn(self, turn_id: str, timestamp: str, title: str) -> None:
         rows = self._db.query(
@@ -400,7 +400,7 @@ class MemoryCore:
             return
         session_id = rows[0]["session_id"]
         messages = [{"message_id": r["id"], "role": r["role"], "content": r["content"]} for r in rows]
-        await self._llm_compiler.compile_session(
+        await self._journal_compiler.compile_session(
             turn_id=turn_id,
             session_id=session_id,
             messages=messages,
@@ -409,10 +409,10 @@ class MemoryCore:
         )
 
     async def dream(self) -> dict:
-        return await dream(self._agent_memory_bundle)
+        return await dream(self._agent_journal_bundle)
 
     def rebuild_index(self) -> dict:
-        return rebuild_index(self._agent_memory_bundle.root)
+        return rebuild_index(self._agent_journal_bundle.root)
 
-    def search_memory(self, query: str, limit: int = 5) -> list[SearchHit]:
-        return self._agent_memory_search.search(query, limit=limit)
+    def search_journal(self, query: str, limit: int = 5) -> list[SearchHit]:
+        return self._agent_journal_search.search(query, limit=limit)

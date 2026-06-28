@@ -70,7 +70,7 @@ def rebuild_index(root: str | Path) -> dict[str, int]:
         (monthly_dir / f"{month_key}.md").write_text("\n".join(lines), encoding="utf-8")
         monthly_count += 1
 
-    index_lines = ["# MemoryPack Index", ""]
+    index_lines = ["# AgentJournal Index", ""]
     for month_key in sorted(by_month):
         index_lines.append(f"- [{month_key}](monthly/{month_key}.md)")
     index_lines.append("")

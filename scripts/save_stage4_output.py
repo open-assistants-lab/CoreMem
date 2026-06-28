@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from coremem.agent_memory import AgentMemoryBundle, AgentMemoryLLMCompiler
+from coremem.agent_journal import AgentJournalBundle, AgentJournalLLMCompiler
 from eval_memorypack_longmemeval import load_longmemeval_instances, prepare_instances, build_reference_bundle
 
 
@@ -24,12 +24,12 @@ async def main():
     tmpdir = Path(tempfile.mkdtemp())
     bundle = build_reference_bundle(tmpdir, prepared)
 
-    compiler = AgentMemoryLLMCompiler(bundle, model="ollama-cloud:deepseek-v4-flash")
+    compiler = AgentJournalLLMCompiler(bundle, model="ollama-cloud:deepseek-v4-flash")
     sem = asyncio.Semaphore(8)
 
     async def compile_one(session):
         text = (bundle.turns_dir / f"{session.turn_id}.md").read_text()
-        match = re.search(r"```json agent_memory-turn\n(.*?)\n```", text, re.DOTALL)
+        match = re.search(r"```json agent_journal-turn\n(.*?)\n```", text, re.DOTALL)
         payload = json.loads(match.group(1))
         msgs = payload["messages"]
         async with sem:

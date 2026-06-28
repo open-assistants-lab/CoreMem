@@ -1,4 +1,4 @@
-"""Embedding index for MemoryPack pages using sentence-transformers."""
+"""Embedding index for AgentJournal pages using sentence-transformers."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _BATCH_SIZE = 32
 
 
 class EmbeddingIndex:
-    """Lazy-loaded embedding index for MemoryPack pages.
+    """Lazy-loaded embedding index for AgentJournal pages.
 
     Stores embeddings as a numpy array on disk under ``.embeddings/``.
     Change detection via sha256 of page content.

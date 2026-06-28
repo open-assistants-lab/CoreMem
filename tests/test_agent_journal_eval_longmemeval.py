@@ -1,4 +1,4 @@
-"""Tests for the deterministic LongMemEval MemoryPack raw baseline."""
+"""Tests for the deterministic LongMemEval AgentJournal raw baseline."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.eval_memorypack_longmemeval import main, run_eval
+from scripts.eval_agent_journal_longmemeval import main, run_eval
 
 
 def _fixture() -> list[dict]:
@@ -262,5 +262,5 @@ def test_longmemeval_eval_refuses_unsafe_overwrite(tmp_path):
     unsafe_root.mkdir()
     (unsafe_root / "keep.txt").write_text("important", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="refusing to overwrite non-MemoryPack"):
+    with pytest.raises(ValueError, match="refusing to overwrite non-AgentJournal"):
         run_eval(data_path, unsafe_root, reset=True)

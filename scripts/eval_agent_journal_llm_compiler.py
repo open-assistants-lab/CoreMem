@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Stage 4: LLM MemoryPack compiler retrieval eval against LongMemEval.
+"""Stage 4: LLM AgentJournal compiler retrieval eval against LongMemEval.
 
 Reuses the LongMemEval loader from Stage 2, calls the LLM compiler to
-generate MemoryPack pages from reference turns, and scores retrieval.
+generate AgentJournal pages from reference turns, and scores retrieval.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory import AgentMemoryBundle, AgentMemoryCompiler, AgentMemoryLLMCompiler, AgentMemorySearch, CrossEncoderReranker
+from coremem.agent_journal import AgentJournalBundle, AgentJournalCompiler, AgentJournalLLMCompiler, AgentJournalSearch, CrossEncoderReranker
 
 _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
@@ -78,9 +78,9 @@ def _bm25(docs, terms, k1=1.5, b=0.75):
 
 
 def _search_compiled_pages(
-    bundle: AgentMemoryBundle, query: str, *, limit: int, search: AgentMemorySearch | None = None
+    bundle: AgentJournalBundle, query: str, *, limit: int, search: AgentJournalSearch | None = None
 ) -> list[dict[str, Any]]:
-    """BM25 + embedding hybrid search over compiled MemoryPack pages."""
+    """BM25 + embedding hybrid search over compiled AgentJournal pages."""
     if search is not None:
         hits = search.search(query, limit=limit)
         return [{"page_id": _page_id(h.path), "score": h.score, "context_chars": 0} for h in hits]
@@ -99,7 +99,7 @@ def _search_compiled_pages(
     return hits[:limit]
 
 
-def _session_messages(bundle: AgentMemoryBundle, turn_id: str) -> list[dict[str, Any]]:
+def _session_messages(bundle: AgentJournalBundle, turn_id: str) -> list[dict[str, Any]]:
     path = bundle.turns_dir / f"{turn_id}.md"
     if not path.exists():
         return []
@@ -107,7 +107,7 @@ def _session_messages(bundle: AgentMemoryBundle, turn_id: str) -> list[dict[str,
     parts = text.split("\n# Canonical Turn Payload\n", 1)
     if len(parts) != 2:
         return []
-    match = re.search(r"```json agent_memory-turn\n(.*?)\n```", parts[1], re.DOTALL)
+    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
     if not match:
         return []
     payload = json.loads(match.group(1))
@@ -140,12 +140,12 @@ async def run_eval(
     )
     prepared, truth_by_question_id = prepare_instances(raw_instances)
     if resume and (root / "references" / "manifest.json").exists():
-        from coremem.agent_memory import AgentMemoryBundle as _MB
+        from coremem.agent_journal import AgentJournalBundle as _MB
         bundle = _MB(root)
     else:
         bundle = build_reference_bundle(root, prepared)
 
-    llm_compiler = AgentMemoryLLMCompiler(bundle, model=model, max_retries=max_retries)
+    llm_compiler = AgentJournalLLMCompiler(bundle, model=model, max_retries=max_retries)
     compile_errors: list[dict[str, Any]] = []
     seen: set[str] = set()
     skipped = 0
@@ -196,7 +196,7 @@ async def run_eval(
     lint_errors = bundle.lint()
     bundle.rebuild_embeddings()
     reranker = CrossEncoderReranker()
-    search = AgentMemorySearch(bundle.root, embedding_index=bundle.embedding_index, reranker=reranker)
+    search = AgentJournalSearch(bundle.root, embedding_index=bundle.embedding_index, reranker=reranker)
     rows = [
         _score_instance(bundle, instance, truth_by_question_id[instance.question_id], k=k, search=search)
         for instance in prepared
@@ -225,12 +225,12 @@ async def run_eval(
 
 
 def _score_instance(
-    bundle: AgentMemoryBundle,
+    bundle: AgentJournalBundle,
     instance: PreparedInstance,
     truth: QuestionTruth,
     *,
     k: int,
-    search: AgentMemorySearch | None = None,
+    search: AgentJournalSearch | None = None,
 ) -> dict[str, Any]:
     if truth.abstention_expected:
         return _empty_score(instance, truth, mode=COMPILER_MODE)
@@ -296,7 +296,7 @@ def _safe_reset_root(root: Path) -> None:
     if root.exists() and any(root.iterdir()):
         markers = [root / "SCHEMA.md", root / "references" / "manifest.json"]
         if not all(marker.exists() for marker in markers):
-            raise ValueError(f"refusing to overwrite non-MemoryPack directory: {root}")
+            raise ValueError(f"refusing to overwrite non-AgentJournal directory: {root}")
     shutil.rmtree(root)
 
 
@@ -320,10 +320,10 @@ def _print_result(result: Mapping[str, Any], *, as_json: bool) -> None:
 
 async def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Stage 4: LLM MemoryPack compiler retrieval eval against LongMemEval",
+        description="Stage 4: LLM AgentJournal compiler retrieval eval against LongMemEval",
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
-    parser.add_argument("--root", type=Path, help="MemoryPack bundle root to write")
+    parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
     parser.add_argument(

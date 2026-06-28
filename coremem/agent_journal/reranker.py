@@ -1,4 +1,4 @@
-"""Cross-encoder re-ranker for MemoryPack search."""
+"""Cross-encoder re-ranker for AgentJournal search."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory.bundle import SearchHit
+from coremem.agent_journal.bundle import SearchHit
 
 logger = logging.getLogger(__name__)
 

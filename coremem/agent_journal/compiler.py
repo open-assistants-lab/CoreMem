@@ -1,7 +1,7 @@
-"""Deterministic MemoryPack compiler adapter.
+"""Deterministic AgentJournal compiler adapter.
 
 The compiler accepts a structured update plan, validates every cited claim
-against immutable reference turns, and writes the derived MemoryPack files.
+against immutable reference turns, and writes the derived AgentJournal files.
 It intentionally does not call an LLM.
 """
 
@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory.bundle import (
+from coremem.agent_journal.bundle import (
     ACTIVATIONS,
     MEMORY_KINDS,
     PROFILE_VERSION,
@@ -24,8 +24,8 @@ from coremem.agent_memory.bundle import (
     SOURCE_EVIDENCE_TYPES,
     STATUSES,
     TRUST_VALUES,
-    AgentMemoryBundle,
-    AgentMemoryError,
+    AgentJournalBundle,
+    AgentJournalError,
     _parse_frontmatter,
 )
 
@@ -58,7 +58,7 @@ _RENDERED_FRONTMATTER_KEYS = {
     "title",
     "description",
     "memory_kind",
-    "agent_memory_version",
+    "agent_journal_version",
     "scope",
     "status",
     "activation",
@@ -69,8 +69,8 @@ _RENDERED_FRONTMATTER_KEYS = {
 
 
 @dataclass(frozen=True)
-class AgentMemoryCompileResult:
-    """Result metadata for a deterministic MemoryPack compile."""
+class AgentJournalCompileResult:
+    """Result metadata for a deterministic AgentJournal compile."""
 
     written_pages: tuple[Path, ...]
     boot_pages: tuple[str, ...]
@@ -110,14 +110,14 @@ class _CompiledPage:
     read_next: tuple[str, ...]
 
 
-class AgentMemoryCompiler:
-    """Apply structured MemoryPack update plans without LLM calls."""
+class AgentJournalCompiler:
+    """Apply structured AgentJournal update plans without LLM calls."""
 
-    def __init__(self, bundle: AgentMemoryBundle) -> None:
+    def __init__(self, bundle: AgentJournalBundle) -> None:
         self.bundle = bundle
 
-    def apply_plan(self, plan: Mapping[str, Any]) -> AgentMemoryCompileResult:
-        """Validate and apply a structured MemoryPack update plan."""
+    def apply_plan(self, plan: Mapping[str, Any]) -> AgentJournalCompileResult:
+        """Validate and apply a structured AgentJournal update plan."""
         pages = self._compile_plan(plan)
         self._ensure_output_files()
         snapshots = self._snapshot_targets(pages)
@@ -135,24 +135,24 @@ class AgentMemoryCompiler:
 
             lint_errors = self.bundle.lint()
             if lint_errors:
-                raise AgentMemoryError("compiled bundle failed lint: " + "; ".join(lint_errors))
+                raise AgentJournalError("compiled bundle failed lint: " + "; ".join(lint_errors))
         except Exception:
             self._restore_targets(snapshots)
             raise
 
-        return AgentMemoryCompileResult(
+        return AgentJournalCompileResult(
             written_pages=tuple(written),
             boot_pages=tuple(page.page_id for page in pages if page.boot_worthy),
         )
 
     def _compile_plan(self, plan: Mapping[str, Any]) -> tuple[_CompiledPage, ...]:
         if not isinstance(plan, Mapping):
-            raise AgentMemoryError("compiler plan must be an object")
+            raise AgentJournalError("compiler plan must be an object")
         self._reject_extra_keys(plan, _PLAN_KEYS, "compiler plan")
 
         raw_pages = plan.get("pages")
         if not isinstance(raw_pages, list) or not raw_pages:
-            raise AgentMemoryError("compiler plan pages must be a non-empty list")
+            raise AgentJournalError("compiler plan pages must be a non-empty list")
         log_message = plan.get("log_message")
         if log_message is not None:
             self._require_string(log_message, "compiler plan log_message")
@@ -161,10 +161,10 @@ class AgentMemoryCompiler:
         compiled: list[_CompiledPage] = []
         for index, raw_page in enumerate(raw_pages):
             if not isinstance(raw_page, Mapping):
-                raise AgentMemoryError(f"pages[{index}] must be an object")
+                raise AgentJournalError(f"pages[{index}] must be an object")
             page = self._compile_page(raw_page, f"pages[{index}]")
             if page.page_id in seen_page_ids:
-                raise AgentMemoryError(f"duplicate page_id in compiler plan: {page.page_id}")
+                raise AgentJournalError(f"duplicate page_id in compiler plan: {page.page_id}")
             seen_page_ids.add(page.page_id)
             compiled.append(page)
         return tuple(compiled)
@@ -173,18 +173,18 @@ class AgentMemoryCompiler:
         self._reject_extra_keys(raw_page, _PAGE_KEYS, label)
         missing = sorted(key for key in _PAGE_REQUIRED_KEYS if key not in raw_page)
         if missing:
-            raise AgentMemoryError(f"{label} missing required keys: {', '.join(missing)}")
+            raise AgentJournalError(f"{label} missing required keys: {', '.join(missing)}")
 
         operation = self._require_string(raw_page["operation"], f"{label}.operation")
         if operation not in {"create", "update"}:
-            raise AgentMemoryError(f"{label}.operation must be create or update")
+            raise AgentJournalError(f"{label}.operation must be create or update")
 
         page_id = self._require_page_id(raw_page["page_id"], f"{label}.page_id")
         path = self._page_path(page_id)
         if operation == "create" and path.exists():
-            raise AgentMemoryError(f"{label} create would overwrite existing page: {page_id}")
+            raise AgentJournalError(f"{label} create would overwrite existing page: {page_id}")
         if operation == "update" and not path.exists():
-            raise AgentMemoryError(f"{label} update target does not exist: {page_id}")
+            raise AgentJournalError(f"{label} update target does not exist: {page_id}")
 
         title = self._require_frontmatter_string(raw_page["title"], f"{label}.title")
         description = self._require_frontmatter_string(
@@ -200,17 +200,17 @@ class AgentMemoryCompiler:
         summary = self._require_body_string(raw_page["summary"], f"{label}.summary")
 
         if memory_kind not in MEMORY_KINDS:
-            raise AgentMemoryError(f"{label}.memory_kind is invalid")
+            raise AgentJournalError(f"{label}.memory_kind is invalid")
         if scope not in SCOPES:
-            raise AgentMemoryError(f"{label}.scope is invalid")
+            raise AgentJournalError(f"{label}.scope is invalid")
         if status not in STATUSES:
-            raise AgentMemoryError(f"{label}.status is invalid")
+            raise AgentJournalError(f"{label}.status is invalid")
         if activation not in ACTIVATIONS:
-            raise AgentMemoryError(f"{label}.activation is invalid")
+            raise AgentJournalError(f"{label}.activation is invalid")
         if trust not in TRUST_VALUES:
-            raise AgentMemoryError(f"{label}.trust is invalid")
+            raise AgentJournalError(f"{label}.trust is invalid")
         if boot_worthy and (activation != "startup" or status != "active"):
-            raise AgentMemoryError(
+            raise AgentJournalError(
                 f"{label}.boot_worthy requires activation=startup and status=active"
             )
 
@@ -244,25 +244,25 @@ class AgentMemoryCompiler:
         self, raw_current_state: Any, page_label: str
     ) -> tuple[tuple[_CompiledClaim, ...], tuple[_Citation, ...]]:
         if not isinstance(raw_current_state, list) or not raw_current_state:
-            raise AgentMemoryError(f"{page_label}.current_state must be a non-empty list")
+            raise AgentJournalError(f"{page_label}.current_state must be a non-empty list")
 
         claims: list[_CompiledClaim] = []
         citations: list[_Citation] = []
         for index, raw_claim in enumerate(raw_current_state):
             label = f"{page_label}.current_state[{index}]"
             if not isinstance(raw_claim, Mapping):
-                raise AgentMemoryError(f"{label} must be an object")
+                raise AgentJournalError(f"{label} must be an object")
             self._reject_extra_keys(raw_claim, _STATE_KEYS, label)
             missing = sorted(key for key in _STATE_KEYS if key not in raw_claim)
             if missing:
-                raise AgentMemoryError(f"{label} missing required keys: {', '.join(missing)}")
+                raise AgentJournalError(f"{label} missing required keys: {', '.join(missing)}")
             claim = self._require_body_string(raw_claim["claim"], f"{label}.claim")
             evidence = self._compile_evidence(raw_claim["evidence"], label)
             validation_claim = dict(evidence)
             validation_claim["text"] = claim
             errors = self.bundle.validate_claim(validation_claim)
             if errors:
-                raise AgentMemoryError(f"{label} evidence is invalid: " + "; ".join(errors))
+                raise AgentJournalError(f"{label} evidence is invalid: " + "; ".join(errors))
 
             citation_numbers: list[int] = []
             for source in self._citation_sources(evidence):
@@ -273,14 +273,14 @@ class AgentMemoryCompiler:
 
     def _compile_evidence(self, raw_evidence: Any, label: str) -> Mapping[str, Any]:
         if not isinstance(raw_evidence, Mapping):
-            raise AgentMemoryError(f"{label}.evidence must be an object")
+            raise AgentJournalError(f"{label}.evidence must be an object")
 
         evidence_type = raw_evidence.get("evidence_type")
         if evidence_type == "derived_summary":
             self._reject_extra_keys(raw_evidence, _DERIVED_KEYS, f"{label}.evidence")
             sources = raw_evidence.get("supporting_sources")
             if not isinstance(sources, list) or len(sources) < 2:
-                raise AgentMemoryError(
+                raise AgentJournalError(
                     f"{label}.evidence.supporting_sources must contain at least two sources"
                 )
             compiled_sources = [
@@ -293,15 +293,15 @@ class AgentMemoryCompiler:
 
     def _compile_source(self, raw_source: Any, label: str) -> Mapping[str, str]:
         if not isinstance(raw_source, Mapping):
-            raise AgentMemoryError(f"{label} must be an object")
+            raise AgentJournalError(f"{label} must be an object")
         self._reject_extra_keys(raw_source, _SOURCE_KEYS, label)
         missing = sorted(key for key in _SOURCE_KEYS if key not in raw_source)
         if missing:
-            raise AgentMemoryError(f"{label} missing required keys: {', '.join(missing)}")
+            raise AgentJournalError(f"{label} missing required keys: {', '.join(missing)}")
 
         evidence_type = self._require_string(raw_source["evidence_type"], f"{label}.evidence_type")
         if evidence_type not in SOURCE_EVIDENCE_TYPES:
-            raise AgentMemoryError(f"{label}.evidence_type is invalid")
+            raise AgentJournalError(f"{label}.evidence_type is invalid")
 
         source = {
             "evidence_type": evidence_type,
@@ -326,12 +326,12 @@ class AgentMemoryCompiler:
         boot_worthy = "true" if page.boot_worthy else "false"
         lines = [
             "---",
-            "type: AgentMemory Page",
+            "type: AgentJournal Page",
             f"page_id: {page.page_id}",
             f"title: {page.title}",
             f"description: {page.description}",
             f"memory_kind: {page.memory_kind}",
-            f"agent_memory_version: \"{PROFILE_VERSION}\"",
+            f"agent_journal_version: \"{PROFILE_VERSION}\"",
             f"scope: {page.scope}",
             f"status: {page.status}",
             f"activation: {page.activation}",
@@ -406,7 +406,7 @@ class AgentMemoryCompiler:
 
     def _write_index(self) -> None:
         entries = self._page_entries()
-        lines = ["# MemoryPack Index", ""]
+        lines = ["# AgentJournal Index", ""]
         for entry in entries:
             description = f": {entry['description']}" if entry["description"] else ""
             lines.append(
@@ -418,8 +418,11 @@ class AgentMemoryCompiler:
 
     def _append_log(self, pages: tuple[_CompiledPage, ...], log_message: object) -> None:
         path = self.bundle.root / "log.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else "# AgentMemory Update Log\n"
-        header = "# AgentMemory Update Log"
+        existing = path.read_text(encoding="utf-8") if path.exists() else "# AgentJournal Update Log\n"
+        header = "# AgentJournal Update Log"
+        old_header = "# AgentMemory Update Log"
+        if existing.startswith(old_header):
+            existing = header + existing[len(old_header):]
         body = existing[len(header):].strip() if existing.startswith(header) else existing.strip()
         timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         lines = [header, "", f"## {timestamp} compiler | {SCHEMA_VERSION}", ""]
@@ -439,7 +442,7 @@ class AgentMemoryCompiler:
             for entry in self._page_entries()
             if entry["boot_worthy"] and entry["activation"] == "startup" and entry["status"] == "active"
         ]
-        lines = ["# MemoryPack", "", "## Current Focus", ""]
+        lines = ["# AgentJournal", "", "## Current Focus", ""]
         for entry in boot_entries:
             summary = entry["summary"]
             suffix = f": {summary}" if summary else ""
@@ -457,7 +460,7 @@ class AgentMemoryCompiler:
         for path in sorted(self.bundle.pages_dir.rglob("*.md")):
             text = path.read_text(encoding="utf-8")
             frontmatter, body = _parse_frontmatter(text)
-            if frontmatter.get("type") != "AgentMemory Page":
+            if frontmatter.get("type") != "AgentJournal Page":
                 continue
             page_id = frontmatter.get("page_id")
             if not isinstance(page_id, str):
@@ -503,10 +506,10 @@ class AgentMemoryCompiler:
         self.bundle.root.mkdir(parents=True, exist_ok=True)
         self.bundle.pages_dir.mkdir(parents=True, exist_ok=True)
         defaults = {
-            "MEMORY.md": "# MemoryPack\n\n## Current Focus\n\n## Read Next\n",
-            "index.md": "# MemoryPack Index\n\n",
-            "log.md": "# AgentMemory Update Log\n\n",
-            "SCHEMA.md": f"# AgentMemory Schema\n\nSchema version: `{SCHEMA_VERSION}`\n",
+            "MEMORY.md": "# AgentJournal\n\n## Current Focus\n\n## Read Next\n",
+            "index.md": "# AgentJournal Index\n\n",
+            "log.md": "# AgentJournal Update Log\n\n",
+            "SCHEMA.md": f"# AgentJournal Schema\n\nSchema version: `{SCHEMA_VERSION}`\n",
         }
         for relative, content in defaults.items():
             path = self.bundle.root / relative
@@ -524,52 +527,52 @@ class AgentMemoryCompiler:
     def _reject_extra_keys(self, value: Mapping[str, Any], allowed: set[str], label: str) -> None:
         extra = sorted(str(key) for key in value.keys() if key not in allowed)
         if extra:
-            raise AgentMemoryError(f"{label} has unsupported keys: {', '.join(extra)}")
+            raise AgentJournalError(f"{label} has unsupported keys: {', '.join(extra)}")
 
     def _require_page_id(self, value: Any, label: str) -> str:
         page_id = self._require_string(value, label)
         segments = page_id.split(".")
         if any(not _PAGE_ID_SEGMENT_RE.match(segment) for segment in segments):
-            raise AgentMemoryError(f"{label} is invalid")
+            raise AgentJournalError(f"{label} is invalid")
         path = self._page_path(page_id).resolve()
         try:
             path.relative_to(self.bundle.pages_dir.resolve())
         except ValueError as exc:
-            raise AgentMemoryError(f"{label} must stay under pages/") from exc
+            raise AgentJournalError(f"{label} must stay under pages/") from exc
         return page_id
 
     def _require_frontmatter_string(self, value: Any, label: str) -> str:
         text = self._require_string(value, label)
         if "\n" in text or "\r" in text:
-            raise AgentMemoryError(f"{label} must be a single line")
+            raise AgentJournalError(f"{label} must be a single line")
         return text
 
     def _require_body_string(self, value: Any, label: str) -> str:
         text = self._require_string(value, label)
         if "references/turns/" in text:
-            raise AgentMemoryError(f"{label} must not contain direct reference links")
+            raise AgentJournalError(f"{label} must not contain direct reference links")
         return text
 
     def _require_citation_string(self, value: Any, label: str) -> str:
         text = self._require_string(value, label)
         if "`" in text or "\n" in text or "\r" in text:
-            raise AgentMemoryError(f"{label} cannot be rendered as a MemoryPack citation")
+            raise AgentJournalError(f"{label} cannot be rendered as a AgentJournal citation")
         return text
 
     def _require_quote(self, value: Any, label: str) -> str:
         quote = self._require_string(value, label)
         if '"' in quote or "\n" in quote or "\r" in quote:
-            raise AgentMemoryError(f"{label} cannot contain double quotes or newlines")
+            raise AgentJournalError(f"{label} cannot contain double quotes or newlines")
         return quote
 
     def _require_string(self, value: Any, label: str) -> str:
         if not isinstance(value, str) or not value.strip():
-            raise AgentMemoryError(f"{label} must be a non-empty string")
+            raise AgentJournalError(f"{label} must be a non-empty string")
         return value.strip()
 
     def _require_bool(self, value: Any, label: str) -> bool:
         if not isinstance(value, bool):
-            raise AgentMemoryError(f"{label} must be boolean")
+            raise AgentJournalError(f"{label} must be boolean")
         return value
 
     def _optional_string_list(
@@ -579,7 +582,7 @@ class AgentMemoryCompiler:
             return ()
         value = raw_page[key]
         if not isinstance(value, list):
-            raise AgentMemoryError(f"{page_label}.{key} must be a list")
+            raise AgentJournalError(f"{page_label}.{key} must be a list")
         return tuple(
             self._require_body_string(item, f"{page_label}.{key}[{index}]")
             for index, item in enumerate(value)
@@ -595,7 +598,7 @@ class AgentMemoryCompiler:
         """
         pages = self._compile_plan(plan)
         if len(pages) != 1:
-            raise AgentMemoryError("compile_section requires exactly one page in the plan")
+            raise AgentJournalError("compile_section requires exactly one page in the plan")
         page = pages[0]
         lines = [f"## {timestamp} - {title}", ""]
         lines.append(page.summary)
@@ -616,8 +619,8 @@ class AgentMemoryCompiler:
         return "\n".join(lines)
 
 
-def compile_memorypack_plan(
-    bundle: AgentMemoryBundle, plan: Mapping[str, Any]
-) -> AgentMemoryCompileResult:
-    """Apply a structured MemoryPack update plan to a bundle."""
-    return AgentMemoryCompiler(bundle).apply_plan(plan)
+def compile_journal_plan(
+    bundle: AgentJournalBundle, plan: Mapping[str, Any]
+) -> AgentJournalCompileResult:
+    """Apply a structured AgentJournal update plan to a bundle."""
+    return AgentJournalCompiler(bundle).apply_plan(plan)

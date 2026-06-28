@@ -1,6 +1,6 @@
-"""MemoryPack bundle primitives.
+"""AgentJournal bundle primitives.
 
-This module implements the deterministic substrate for the MemoryPack POC:
+This module implements the deterministic substrate for the AgentJournal POC:
 bundle initialization, immutable reference turns, linting, exact quote
 validation, and simple markdown search. It intentionally does not call an LLM.
 """
@@ -24,7 +24,7 @@ from coremem.types import Memory
 logger = logging.getLogger(__name__)
 
 PROFILE_VERSION = "0.1"
-SCHEMA_VERSION = "memorypack-poc-0.1"
+SCHEMA_VERSION = "agent-journal-0.1"
 ALLOWED_ROLES = {"system", "developer", "user", "assistant", "tool_call", "tool_result"}
 MEMORY_KINDS = {
     "user_profile",
@@ -53,13 +53,13 @@ TRUST_VALUES = {
 _SAFE_REFERENCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-class AgentMemoryError(ValueError):
-    """Raised when a MemoryPack operation cannot be completed safely."""
+class AgentJournalError(ValueError):
+    """Raised when a AgentJournal operation cannot be completed safely."""
 
 
 @dataclass(frozen=True)
 class SearchHit:
-    """A simple MemoryPack search result."""
+    """A simple AgentJournal search result."""
 
     path: Path
     score: float
@@ -148,9 +148,9 @@ def _extract_turn_payload(text: str) -> tuple[dict[str, Any] | None, list[str]]:
     parts = text.split("\n# Canonical Turn Payload\n", 1)
     if len(parts) != 2:
         return None, ["reference turn must contain a # Canonical Turn Payload section"]
-    matches = re.findall(r"```json agent_memory-turn\n(.*?)\n```", parts[1], re.DOTALL)
+    matches = re.findall(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
     if len(matches) != 1:
-        return None, ["reference turn must contain exactly one `json agent_memory-turn` block"]
+        return None, ["reference turn must contain exactly one `json agent_journal-turn` block"]
     try:
         payload = json.loads(matches[0])
     except json.JSONDecodeError as exc:
@@ -193,8 +193,8 @@ def _as_str_list(value: object) -> list[str]:
     return []
 
 
-class AgentMemoryBundle:
-    """A local MemoryPack bundle rooted at a directory."""
+class AgentJournalBundle:
+    """A local AgentJournal bundle rooted at a directory."""
 
     def __init__(self, root: str | Path, *, boot_budget_chars: int = 8000, embed_model: str | None = None) -> None:
         self.root = Path(root)
@@ -223,17 +223,17 @@ class AgentMemoryBundle:
         return self.references_dir / "manifest.json"
 
     def initialize(self) -> None:
-        """Create an empty MemoryPack bundle if needed."""
+        """Create an empty AgentJournal bundle if needed."""
         self.daily_dir.mkdir(parents=True, exist_ok=True)
         (self.root / "agent_context").mkdir(parents=True, exist_ok=True)
         (self.root / "schemas").mkdir(parents=True, exist_ok=True)
 
-        self._write_if_missing("MEMORY.md", "# MemoryPack\n\n## Current Focus\n\n## Read Next\n")
-        self._write_if_missing("index.md", "# MemoryPack Index\n\n")
-        self._write_if_missing("log.md", "# AgentMemory Update Log\n\n")
+        self._write_if_missing("MEMORY.md", "# AgentJournal\n\n## Current Focus\n\n## Read Next\n")
+        self._write_if_missing("index.md", "# AgentJournal Index\n\n")
+        self._write_if_missing("log.md", "# AgentJournal Update Log\n\n")
         self._write_if_missing(
             "SCHEMA.md",
-            f"# AgentMemory Schema\n\nSchema version: `{SCHEMA_VERSION}`\n",
+            f"# AgentJournal Schema\n\nSchema version: `{SCHEMA_VERSION}`\n",
         )
         agent_manifest = self.root / "agent_context" / "manifest.json"
         if not agent_manifest.exists():
@@ -265,13 +265,13 @@ class AgentMemoryBundle:
         self.initialize()
         kept = [msg for msg in messages if include_system or msg.role not in {"system", "developer"}]
         if not kept:
-            raise AgentMemoryError("reference turn must contain at least one persisted message")
+            raise AgentJournalError("reference turn must contain at least one persisted message")
         ids = [msg.id for msg in kept]
         if len(ids) != len(set(ids)):
-            raise AgentMemoryError("reference turn message ids must be unique")
+            raise AgentJournalError("reference turn message ids must be unique")
         turn_id = turn_id or f"turn_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}_{uuid4().hex[:8]}"
         if not re.match(r"^[A-Za-z0-9_.-]+$", turn_id):
-            raise AgentMemoryError("turn_id may only contain letters, numbers, dots, underscores, and hyphens")
+            raise AgentJournalError("turn_id may only contain letters, numbers, dots, underscores, and hyphens")
         session_id = session_id or kept[0].session_id or "default"
         path = self.turns_dir / f"{turn_id}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,7 +327,7 @@ class AgentMemoryBundle:
         return self._validate_source(claim, "claim")
 
     def lint(self) -> list[str]:
-        """Return deterministic MemoryPack lint errors."""
+        """Return deterministic AgentJournal lint errors."""
         errors: list[str] = []
         for relative in ("MEMORY.md", "index.md", "log.md", "SCHEMA.md"):
             if not (self.root / relative).exists():
@@ -407,7 +407,7 @@ class AgentMemoryBundle:
         lines.extend([
             "# Canonical Turn Payload",
             "",
-            "```json agent_memory-turn",
+            "```json agent_journal-turn",
             json.dumps(payload, indent=2, sort_keys=True, default=_json_default),
             "```",
             "",
@@ -419,10 +419,10 @@ class AgentMemoryBundle:
             return {"references": []}
         data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            raise AgentMemoryError("references/manifest.json must be an object")
+            raise AgentJournalError("references/manifest.json must be an object")
         references = data.setdefault("references", [])
         if not isinstance(references, list):
-            raise AgentMemoryError("references/manifest.json references must be a list")
+            raise AgentJournalError("references/manifest.json references must be a list")
         return data
 
     def _append_manifest(
@@ -436,10 +436,10 @@ class AgentMemoryBundle:
         manifest = self._load_manifest()
         references = manifest["references"]
         if not isinstance(references, list):
-            raise AgentMemoryError("references/manifest.json references must be a list")
+            raise AgentJournalError("references/manifest.json references must be a list")
         relative = path.relative_to(self.references_dir).as_posix()
         if any(isinstance(item, dict) and item.get("path") == relative for item in references):
-            raise AgentMemoryError(f"reference already exists in manifest: {relative}")
+            raise AgentJournalError(f"reference already exists in manifest: {relative}")
         references.append({
             "path": relative,
             "sha256": _sha256_file(path),
@@ -517,7 +517,7 @@ class AgentMemoryBundle:
     def _lint_manifest_entry(self, path: Path) -> list[str]:
         try:
             manifest = self._load_manifest()
-        except (json.JSONDecodeError, AgentMemoryError) as exc:
+        except (json.JSONDecodeError, AgentJournalError) as exc:
             return [f"manifest cannot be read: {exc}"]
         relative = path.relative_to(self.references_dir).as_posix()
         references = manifest.get("references", [])
@@ -536,7 +536,7 @@ class AgentMemoryBundle:
         errors: list[str] = []
         try:
             manifest = self._load_manifest()
-        except (json.JSONDecodeError, AgentMemoryError) as exc:
+        except (json.JSONDecodeError, AgentJournalError) as exc:
             return [f"manifest cannot be read: {exc}"]
         references = manifest.get("references", [])
         if not isinstance(references, list):
@@ -652,11 +652,12 @@ class AgentMemoryBundle:
             if not frontmatter:
                 errors.append(f"{relative} missing frontmatter")
                 continue
-            for key in ("type", "page_id", "memory_kind", "agent_memory_version"):
+            version_key = "agent_journal_version" if "agent_journal_version" in frontmatter else "agent_memory_version"
+            for key in ("type", "page_id", "memory_kind", version_key):
                 if key not in frontmatter:
                     errors.append(f"{relative} missing frontmatter field: {key}")
-            if frontmatter.get("type") != "AgentMemory Page":
-                errors.append(f"{relative} type must be AgentMemory Page")
+            if frontmatter.get("type") != "AgentJournal Page":
+                errors.append(f"{relative} type must be AgentJournal Page")
             page_id = frontmatter.get("page_id")
             if isinstance(page_id, str):
                 if page_id in page_ids:
@@ -674,8 +675,9 @@ class AgentMemoryBundle:
                 errors.append(f"{relative} trust is invalid")
             if "safe_to_act" in frontmatter and not isinstance(frontmatter.get("safe_to_act"), bool):
                 errors.append(f"{relative} safe_to_act must be boolean")
-            if frontmatter.get("agent_memory_version") != PROFILE_VERSION:
-                errors.append(f"{relative} agent_memory_version must be {PROFILE_VERSION}")
+            actual_version = frontmatter.get("agent_journal_version") or frontmatter.get("agent_memory_version")
+            if actual_version != PROFILE_VERSION:
+                errors.append(f"{relative} agent_journal_version must be {PROFILE_VERSION}")
             if len(re.findall(r"^# Summary$", body, re.MULTILINE)) != 1:
                 errors.append(f"{relative} must have exactly one # Summary section")
             errors.extend(self._lint_page_citations(path, text))
@@ -724,7 +726,7 @@ class AgentMemoryBundle:
         if self._embed_model is None:
             return
         if self._embedding_index is None:
-            from coremem.agent_memory.embeddings import EmbeddingIndex
+            from coremem.agent_journal.embeddings import EmbeddingIndex
             self._embedding_index = EmbeddingIndex(self.root, model_name=self._embed_model)
         self._embedding_index.refresh(self.pages_dir)
 
@@ -865,8 +867,8 @@ def _bm25(docs, terms, k1=1.5, b=0.75):
     return scored
 
 
-class AgentMemorySearch:
-    """BM25 file-based MemoryPack search with optional cross-encoder re-ranking.
+class AgentJournalSearch:
+    """BM25 file-based AgentJournal search with optional cross-encoder re-ranking.
 
     Searches daily/ directory by default. Falls back to pages/ for backward compat.
     """

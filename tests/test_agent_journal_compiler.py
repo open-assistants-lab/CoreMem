@@ -1,4 +1,4 @@
-"""Tests for the deterministic MemoryPack compiler adapter."""
+"""Tests for the deterministic AgentJournal compiler adapter."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from coremem.agent_memory import AgentMemoryBundle, AgentMemoryCompiler, AgentMemoryError
+from coremem.agent_journal import AgentJournalBundle, AgentJournalCompiler, AgentJournalError
 from coremem.types import Memory
 
 
@@ -49,17 +49,17 @@ def _page_plan(
         "operation": "create",
         "page_id": page_id,
         "title": title,
-        "description": "Current decisions about MemoryPack architecture.",
+        "description": "Current decisions about AgentJournal architecture.",
         "memory_kind": memory_kind,
         "scope": "project",
         "status": "active" if boot_worthy else "active",
         "activation": "startup" if boot_worthy else "query",
         "trust": "user_authoritative",
         "safe_to_act": True,
-        "summary": "CoreMem is testing MemoryPack as compiled markdown memory.",
+        "summary": "CoreMem is testing AgentJournal as compiled markdown memory.",
         "current_state": [
             {
-                "claim": "The POC starts with direct MemoryPack search before observations.",
+                "claim": "The POC starts with direct AgentJournal search before observations.",
                 "evidence": evidence or _source(),
             }
         ],
@@ -70,7 +70,7 @@ def _page_plan(
     }
 
 
-def _snapshot_references(bundle: AgentMemoryBundle) -> dict[str, bytes]:
+def _snapshot_references(bundle: AgentJournalBundle) -> dict[str, bytes]:
     return {
         path.relative_to(bundle.references_dir).as_posix(): path.read_bytes()
         for path in sorted(bundle.references_dir.rglob("*"))
@@ -79,18 +79,18 @@ def _snapshot_references(bundle: AgentMemoryBundle) -> dict[str, bytes]:
 
 
 def test_compiler_creates_valid_page_from_plan(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
 
-    result = AgentMemoryCompiler(bundle).apply_plan({"pages": [_page_plan()]})
+    result = AgentJournalCompiler(bundle).apply_plan({"pages": [_page_plan()]})
 
     page_path = tmp_path / "memorypack" / "pages" / "decisions" / "memory-architecture.md"
     text = page_path.read_text(encoding="utf-8")
     assert result.written_pages == (page_path,)
-    assert "agent_memory_version: \"0.1\"" in text
+    assert "agent_journal_version: \"0.1\"" in text
     assert "# Summary" in text
     assert "# Current State" in text
     assert "# Citations" in text
@@ -99,12 +99,12 @@ def test_compiler_creates_valid_page_from_plan(tmp_path):
 
 
 def test_compiler_updates_existing_page_from_plan(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
-    compiler = AgentMemoryCompiler(bundle)
+    compiler = AgentJournalCompiler(bundle)
     compiler.apply_plan({"pages": [_page_plan()]})
     update_page = {
         **_page_plan(),
@@ -122,37 +122,37 @@ def test_compiler_updates_existing_page_from_plan(tmp_path):
 
 
 def test_compiler_rejects_invalid_quote(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
     plan = {"pages": [_page_plan(evidence=_source(quote="message -> memorypack -> search"))]}
 
-    with pytest.raises(AgentMemoryError, match="source_quote is not an exact substring"):
-        AgentMemoryCompiler(bundle).apply_plan(plan)
+    with pytest.raises(AgentJournalError, match="source_quote is not an exact substring"):
+        AgentJournalCompiler(bundle).apply_plan(plan)
 
     page_path = tmp_path / "memorypack" / "pages" / "decisions" / "memory-architecture.md"
     assert not page_path.exists()
 
 
 def test_compiler_rejects_role_evidence_mismatch(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "assistant said this", role="assistant")],
         turn_id="turn_001",
     )
     plan = {"pages": [_page_plan(evidence=_source(quote="assistant said this"))]}
 
-    with pytest.raises(AgentMemoryError, match="not supported by role"):
-        AgentMemoryCompiler(bundle).apply_plan(plan)
+    with pytest.raises(AgentJournalError, match="not supported by role"):
+        AgentJournalCompiler(bundle).apply_plan(plan)
 
     page_path = tmp_path / "memorypack" / "pages" / "decisions" / "memory-architecture.md"
     assert not page_path.exists()
 
 
 def test_compiler_supports_derived_summary(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
@@ -173,7 +173,7 @@ def test_compiler_supports_derived_summary(tmp_path):
         ],
     }
 
-    AgentMemoryCompiler(bundle).apply_plan({"pages": [_page_plan(evidence=derived)]})
+    AgentJournalCompiler(bundle).apply_plan({"pages": [_page_plan(evidence=derived)]})
 
     text = (bundle.root / "pages" / "decisions" / "memory-architecture.md").read_text(
         encoding="utf-8"
@@ -184,7 +184,7 @@ def test_compiler_supports_derived_summary(tmp_path):
 
 
 def test_compiler_updates_index_log_and_memory(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
@@ -197,7 +197,7 @@ def test_compiler_updates_index_log_and_memory(tmp_path):
         boot_worthy=False,
     )
 
-    result = AgentMemoryCompiler(bundle).apply_plan({
+    result = AgentJournalCompiler(bundle).apply_plan({
         "pages": [boot_page, non_boot_page],
         "log_message": "structured compiler smoke test",
     })
@@ -217,32 +217,32 @@ def test_compiler_updates_index_log_and_memory(tmp_path):
 
 
 def test_compiler_does_not_mutate_references(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
     before = _snapshot_references(bundle)
 
-    AgentMemoryCompiler(bundle).apply_plan({"pages": [_page_plan()]})
+    AgentJournalCompiler(bundle).apply_plan({"pages": [_page_plan()]})
 
     assert _snapshot_references(bundle) == before
 
 
 def test_compiler_outputs_lint_clean_bundle(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
 
-    AgentMemoryCompiler(bundle).apply_plan({"pages": [_page_plan()]})
+    AgentJournalCompiler(bundle).apply_plan({"pages": [_page_plan()]})
 
     assert bundle.lint() == []
 
 
 def test_compiler_rolls_back_on_lint_failure(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     turn_a = [_memory("msg_001", "the sky is blue")]
     turn_b = [_memory("msg_002", "water is wet")]
     bundle.write_reference_turn(turn_a, turn_id="turn_001")
@@ -254,13 +254,13 @@ def test_compiler_rolls_back_on_lint_failure(tmp_path):
         title="Page A",
         evidence=_source(turn_id="turn_001", quote="the sky is blue"),
     )
-    compiler = AgentMemoryCompiler(bundle)
+    compiler = AgentJournalCompiler(bundle)
     result = compiler.apply_plan({"pages": [page_a]})
     assert result.written_pages
 
     page_at_path = bundle.root / "pages" / "page" / "a.md"
     corrupted = page_at_path.read_text(encoding="utf-8").replace(
-        'agent_memory_version: "0.1"', 'agent_memory_version: "9.9"'
+        'agent_journal_version: "0.1"', 'agent_journal_version: "9.9"'
     )
     page_at_path.write_text(corrupted, encoding="utf-8")
 
@@ -276,7 +276,7 @@ def test_compiler_rolls_back_on_lint_failure(tmp_path):
             turn_id="turn_002", message_id="msg_002", quote="water is wet"
         ),
     )
-    with pytest.raises(AgentMemoryError, match="compiled bundle failed lint"):
+    with pytest.raises(AgentJournalError, match="compiled bundle failed lint"):
         compiler.apply_plan({"pages": [page_b]})
 
     # page_b (the create target) was not snapshotted, so it may remain as
@@ -286,16 +286,16 @@ def test_compiler_rolls_back_on_lint_failure(tmp_path):
         assert (bundle.root / name).read_bytes() == pre_root[name]
 
     # page_a's corruption is preserved (the compiler never touched it).
-    assert 'agent_memory_version: "9.9"' in page_at_path.read_text(encoding="utf-8")
+    assert 'agent_journal_version: "9.9"' in page_at_path.read_text(encoding="utf-8")
 
 
 def test_compiler_preserves_extra_frontmatter_on_update(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "message -> wiki (okf) -> search, as POC?")],
         turn_id="turn_001",
     )
-    compiler = AgentMemoryCompiler(bundle)
+    compiler = AgentJournalCompiler(bundle)
     compiler.apply_plan({"pages": [_page_plan()]})
 
     # Inject extra frontmatter keys manually.
@@ -321,7 +321,7 @@ def test_compiler_preserves_extra_frontmatter_on_update(tmp_path):
 
 
 def test_boot_worthy_valid_page_appears_in_memory(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "agent identity is CoreMem v0.10")],
         turn_id="turn_001",
@@ -330,7 +330,7 @@ def test_boot_worthy_valid_page_appears_in_memory(tmp_path):
                        boot_worthy=True, evidence=_source(quote="agent identity is CoreMem v0.10"))
     plan["status"] = "active"
     plan["activation"] = "startup"
-    result = AgentMemoryCompiler(bundle).apply_plan({"pages": [plan]})
+    result = AgentJournalCompiler(bundle).apply_plan({"pages": [plan]})
     assert len(result.boot_pages) == 1
     assert result.boot_pages[0] == "agent-identity"
     mem = (tmp_path / "memorypack" / "MEMORY.md").read_text()
@@ -339,7 +339,7 @@ def test_boot_worthy_valid_page_appears_in_memory(tmp_path):
 
 
 def test_boot_worthy_rejects_wrong_activation(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "test")],
         turn_id="turn_001",
@@ -347,12 +347,12 @@ def test_boot_worthy_rejects_wrong_activation(tmp_path):
     plan = _page_plan(page_id="bad-boot", boot_worthy=True, evidence=_source(quote="test"))
     plan["activation"] = "manual"
     plan["status"] = "active"
-    with pytest.raises(AgentMemoryError, match="boot_worthy requires activation=startup"):
-        AgentMemoryCompiler(bundle).apply_plan({"pages": [plan]})
+    with pytest.raises(AgentJournalError, match="boot_worthy requires activation=startup"):
+        AgentJournalCompiler(bundle).apply_plan({"pages": [plan]})
 
 
 def test_boot_worthy_rejects_wrong_status(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "test")],
         turn_id="turn_001",
@@ -360,19 +360,19 @@ def test_boot_worthy_rejects_wrong_status(tmp_path):
     plan = _page_plan(page_id="bad-boot", boot_worthy=True, evidence=_source(quote="test"))
     plan["activation"] = "startup"
     plan["status"] = "pending_review"
-    with pytest.raises(AgentMemoryError, match="boot_worthy requires activation=startup"):
-        AgentMemoryCompiler(bundle).apply_plan({"pages": [plan]})
+    with pytest.raises(AgentJournalError, match="boot_worthy requires activation=startup"):
+        AgentJournalCompiler(bundle).apply_plan({"pages": [plan]})
 
 
 def test_non_boot_page_omitted_from_memory(tmp_path):
-    bundle = AgentMemoryBundle(tmp_path / "memorypack")
+    bundle = AgentJournalBundle(tmp_path / "memorypack")
     bundle.write_reference_turn(
         [_memory("msg_001", "mundane conversation")],
         turn_id="turn_001",
     )
     plan = _page_plan(page_id="mundane-page", boot_worthy=False, evidence=_source(quote="mundane conversation"))
     plan["activation"] = "query"
-    result = AgentMemoryCompiler(bundle).apply_plan({"pages": [plan]})
+    result = AgentJournalCompiler(bundle).apply_plan({"pages": [plan]})
     assert len(result.boot_pages) == 0
     mem = (tmp_path / "memorypack" / "MEMORY.md").read_text()
     assert "mundane-page" not in mem

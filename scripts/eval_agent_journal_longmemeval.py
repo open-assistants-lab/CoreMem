@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic LongMemEval loader and raw MemoryPack reference baseline.
+"""Deterministic LongMemEval loader and raw AgentJournal reference baseline.
 
-This is the Stage 2 MemoryPack eval slice: adapt LongMemEval-shaped JSON to
-MemoryPack reference turns, prove oracle fields are stripped before ingestion and
+This is the Stage 2 AgentJournal eval slice: adapt LongMemEval-shaped JSON to
+AgentJournal reference turns, prove oracle fields are stripped before ingestion and
 retrieval, then score a raw lexical reference-message/session baseline. It does
 not call an LLM and does not use embedding backends.
 """
@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from coremem.agent_memory import AgentMemoryBundle
+from coremem.agent_journal import AgentJournalBundle
 from coremem.providers import create_provider
 from coremem.types import Memory
 
@@ -127,9 +127,9 @@ def prepare_instances(
     return prepared, truth_by_question_id
 
 
-def build_reference_bundle(root: str | Path, instances: Sequence[PreparedInstance]) -> AgentMemoryBundle:
-    """Write one MemoryPack reference turn per stripped haystack session."""
-    bundle = AgentMemoryBundle(root)
+def build_reference_bundle(root: str | Path, instances: Sequence[PreparedInstance]) -> AgentJournalBundle:
+    """Write one AgentJournal reference turn per stripped haystack session."""
+    bundle = AgentJournalBundle(root)
     bundle.initialize()
     for instance in instances:
         for session in instance.sessions:
@@ -307,7 +307,7 @@ def _empty_score(instance: PreparedInstance, truth: QuestionTruth, *, mode: str,
 
 
 def _score_instance(
-    bundle: AgentMemoryBundle,
+    bundle: AgentJournalBundle,
     instance: PreparedInstance,
     truth: QuestionTruth,
     *,
@@ -425,7 +425,7 @@ def _fuzzy_tf(term: str, words: list[str], max_dist: int = 1) -> int:
 
 
 def _search_reference_messages(
-    bundle: AgentMemoryBundle,
+    bundle: AgentJournalBundle,
     query: str,
     *,
     allowed_turn_ids: set[str],
@@ -479,7 +479,7 @@ def _expand_queries(query: str, llm_provider=None) -> list[str]:
 
 
 def _reference_messages(
-    bundle: AgentMemoryBundle,
+    bundle: AgentJournalBundle,
     *,
     allowed_turn_ids: set[str] | None = None,
 ) -> list[ReferenceMessage]:
@@ -513,13 +513,13 @@ def _extract_turn_payload(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     parts = text.split("\n# Canonical Turn Payload\n", 1)
     if len(parts) != 2:
-        raise ValueError(f"missing canonical MemoryPack turn payload section: {path}")
-    match = re.search(r"```json agent_memory-turn\n(.*?)\n```", parts[1], re.DOTALL)
+        raise ValueError(f"missing canonical AgentJournal turn payload section: {path}")
+    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
     if not match:
-        raise ValueError(f"missing canonical MemoryPack turn payload: {path}")
+        raise ValueError(f"missing canonical AgentJournal turn payload: {path}")
     payload = json.loads(match.group(1))
     if not isinstance(payload, dict):
-        raise ValueError(f"canonical MemoryPack turn payload must be an object: {path}")
+        raise ValueError(f"canonical AgentJournal turn payload must be an object: {path}")
     return payload
 
 
@@ -794,7 +794,7 @@ def _safe_reset_root(root: Path) -> None:
     if root.exists() and any(root.iterdir()):
         markers = [root / "SCHEMA.md", root / "references" / "manifest.json"]
         if not all(marker.exists() for marker in markers):
-            raise ValueError(f"refusing to overwrite non-MemoryPack directory: {root}")
+            raise ValueError(f"refusing to overwrite non-AgentJournal directory: {root}")
     shutil.rmtree(root)
 
 
@@ -813,10 +813,10 @@ def _mean(values: Sequence[int | float]) -> float:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the deterministic MemoryPack LongMemEval raw-reference baseline",
+        description="Run the deterministic AgentJournal LongMemEval raw-reference baseline",
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
-    parser.add_argument("--root", type=Path, help="MemoryPack bundle root to write")
+    parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
     parser.add_argument(
