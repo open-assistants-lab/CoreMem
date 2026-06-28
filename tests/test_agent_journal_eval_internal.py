@@ -14,7 +14,6 @@ def test_internal_eval_builds_valid_fixture_and_scores_retrieval(tmp_path):
     assert result["bundle"]["reference_turn_count"] == 8
     assert result["bundle"]["page_count"] == 7
     assert result["bundle"]["stale_claim_count"] == 0
-    assert result["bundle"]["memory_has_reference_links"] is False
     assert result["bundle"]["system_prompt_leak"] is False
 
     metrics = result["metrics"]

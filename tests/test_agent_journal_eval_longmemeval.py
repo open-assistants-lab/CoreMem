@@ -121,19 +121,24 @@ def test_longmemeval_eval_builds_references_and_scores_metrics(tmp_path):
 
 
 def test_longmemeval_eval_strips_ground_truth_from_memorypack_files(tmp_path):
+    from scripts.eval_agent_journal_longmemeval import _TURN_MESSAGES
+
+    _TURN_MESSAGES.clear()
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     root = tmp_path / "memorypack"
 
     run_eval(data_path, root, k=3)
 
-    memorypack_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted(root.rglob("*")) if path.is_file()
+    all_text = "\n".join(
+        m.content
+        for msgs in _TURN_MESSAGES.values()
+        for m in msgs
     )
-    assert "has_answer" not in memorypack_text
-    assert "answer_session_ids" not in memorypack_text
-    assert '"answer"' not in memorypack_text
-    assert "Maya picked the pear tart" in memorypack_text
-    assert "The current project codename is Quartz." not in memorypack_text
+    assert "has_answer" not in all_text
+    assert "answer_session_ids" not in all_text
+    assert '"answer"' not in all_text
+    assert "Maya picked the pear tart" in all_text
+    assert "The current project codename is Quartz." not in all_text
 
 
 def test_longmemeval_eval_returns_rows_and_breakdown(tmp_path):

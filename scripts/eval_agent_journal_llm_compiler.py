@@ -25,7 +25,8 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from eval_memorypack_longmemeval import (  # noqa: E402
+from eval_agent_journal_longmemeval import (  # noqa: E402
+    _TURN_MESSAGES,
     PreparedInstance,
     PreparedSession,
     QuestionTruth,
@@ -100,18 +101,8 @@ def _search_compiled_pages(
 
 
 def _session_messages(bundle: AgentJournalBundle, turn_id: str) -> list[dict[str, Any]]:
-    path = bundle.turns_dir / f"{turn_id}.md"
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8")
-    parts = text.split("\n# Canonical Turn Payload\n", 1)
-    if len(parts) != 2:
-        return []
-    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
-    if not match:
-        return []
-    payload = json.loads(match.group(1))
-    return payload.get("messages", [])
+    msgs = _TURN_MESSAGES.get(turn_id, [])
+    return [{"message_id": m.id, "role": m.role, "content": m.content} for m in msgs]
 
 
 async def run_eval(

@@ -1,6 +1,6 @@
 """LLM-backed AgentJournal compiler.
 
-Calls an LLM to generate structured AgentJournal plans from reference turns,
+Calls an LLM to generate structured AgentJournal plans from source messages,
 then validates and renders them through the deterministic compiler.
 """
 
@@ -173,17 +173,27 @@ class AgentJournalLLMCompiler:
         """
         cache_entry = self._check_cache(turn_id, messages)
         if cache_entry is not None:
-            return self._apply_section(cache_entry, timestamp=timestamp, title=title)
+            return self._apply_section(cache_entry, timestamp=timestamp, title=title, messages=messages)
         turn_content = self._format_turn(turn_id, session_id, messages)
         plan = await self._generate_plan(turn_content, turn_id, session_id, messages)
         self._save_cache(turn_id, messages, plan)
-        return self._apply_section(plan, timestamp=timestamp, title=title)
+        return self._apply_section(plan, timestamp=timestamp, title=title, messages=messages)
 
     def _apply_section(
-        self, plan: dict[str, Any], *, timestamp: str | None, title: str | None
+        self,
+        plan: dict[str, Any],
+        *,
+        timestamp: str | None,
+        title: str | None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> AgentJournalCompileResult:
         """Validate plan and append section to daily page."""
-        section = self.compiler.compile_section(plan, timestamp=timestamp or "00:00", title=title or "Conversation")
+        section = self.compiler.compile_section(
+            plan,
+            timestamp=timestamp or "00:00",
+            title=title,
+            messages=messages,
+        )
         date_str = datetime.now(UTC).strftime("%Y-%m-%d")
         daily_dir = self.bundle.root / "daily"
         daily_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +203,7 @@ class AgentJournalLLMCompiler:
             daily_path.write_text(existing.rstrip() + "\n\n" + section, encoding="utf-8")
         else:
             daily_path.write_text(
-                f"---\ndate: {date_str}\nagent_journal_version: 1\n---\n\n"
+                f"---\ndate: {date_str}\nagent_journal_version: \"{PROFILE_VERSION}\"\n---\n\n"
                 f"# {date_str}\n\n{section}",
                 encoding="utf-8",
             )
@@ -236,7 +246,8 @@ class AgentJournalLLMCompiler:
             parts.append(self._format_turn(turn_id, session_id, messages))
         all_content = "\n---\n".join(parts)
         plan = await self._generate_instance_plan(all_content, sessions)
-        return self.compiler.apply_plan(plan)
+        all_messages = [msg for _, _, messages in sessions for msg in messages]
+        return self.compiler.apply_plan(plan, messages=all_messages)
 
     def _format_turn(
         self,

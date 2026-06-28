@@ -36,6 +36,8 @@ STOPWORDS = {
     "which",
 }
 
+_TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
+
 
 @dataclass(frozen=True)
 class ScriptedTurn:
@@ -78,18 +80,13 @@ class PageSpec:
 
 
 def build_fixture(root: str | Path) -> AgentJournalBundle:
-    """Create the scripted reference turns and handwritten AgentJournal pages."""
+    """Create scripted source messages and handwritten AgentJournal pages."""
     bundle = AgentJournalBundle(root)
     bundle.initialize()
 
+    _TURN_MESSAGES.clear()
     for turn in scripted_turns():
-        bundle.write_reference_turn(
-            turn.messages,
-            turn_id=turn.turn_id,
-            session_id=turn.session_id,
-            agent_context_hash="sha256:internal-scripted-fixture",
-            metadata={"fixture": "memorypack-internal-eval"},
-        )
+        _TURN_MESSAGES[turn.turn_id] = turn.messages
 
     for page in handwritten_pages():
         path = bundle.daily_dir / page.relative_path
@@ -573,7 +570,7 @@ read_when:
 
 def _citation(turn_id: str, message_id: str, evidence_type: str, quote: str) -> str:
     return (
-        f"- [{turn_id}](../../references/turns/{turn_id}.md), `{message_id}`, "
+        f"- {turn_id}, `{message_id}`, "
         f"`{evidence_type}`: \"{quote}\""
     )
 
@@ -581,13 +578,14 @@ def _citation(turn_id: str, message_id: str, evidence_type: str, quote: str) -> 
 def _claims_from_page(page: PageSpec) -> list[dict[str, str]]:
     claims = []
     pattern = re.compile(
-        r"\[([^\]]+)\]\(\.\./\.\./references/turns/([^.)]+)\.md\), "
+        r"^- ([A-Za-z0-9_.-]+), "
         r"`([^`]+)`, `([^`]+)`: \"([^\"]+)\"",
+        re.MULTILINE,
     )
     for match in pattern.finditer(page.content):
-        label, turn_id, message_id, evidence_type, quote = match.groups()
+        turn_id, message_id, evidence_type, quote = match.groups()
         claims.append({
-            "text": f"{page.page_id} cites {label}",
+            "text": f"{page.page_id} cites {turn_id}",
             "page_id": page.page_id,
             "evidence_type": evidence_type,
             "source_turn_id": turn_id,
@@ -698,13 +696,17 @@ def _score_citations(bundle: AgentJournalBundle) -> dict[str, Any]:
     claims = citation_claims()
     invalid = []
     for claim in claims:
-        errors = bundle.validate_claim(claim)
+        turn_id = claim.get("source_turn_id", "")
+        msgs = _TURN_MESSAGES.get(turn_id, [])
+        errors = bundle.validate_claim(claim, msgs)
         if errors:
             invalid.append({"page_id": claim["page_id"], "errors": errors})
 
     negative = dict(claims[0])
+    negative_turn_id = negative.get("source_turn_id", "")
+    negative_msgs = _TURN_MESSAGES.get(negative_turn_id, [])
     negative["source_quote"] = "this quote does not exist in the reference"
-    negative_errors = bundle.validate_claim(negative)
+    negative_errors = bundle.validate_claim(negative, negative_msgs)
 
     return {
         "checked": len(claims),
@@ -718,16 +720,14 @@ def _score_citations(bundle: AgentJournalBundle) -> dict[str, Any]:
 
 def _bundle_metrics(bundle: AgentJournalBundle) -> dict[str, Any]:
     pages = sorted(p for d in (bundle.pages_dir, bundle.daily_dir) if d.exists() for p in d.rglob("*.md"))
-    references = sorted(bundle.turns_dir.rglob("*.md"))
     page_text = "\n".join(path.read_text(encoding="utf-8") for path in pages)
     memory_text = (bundle.root / "MEMORY.md").read_text(encoding="utf-8")
     index_text = (bundle.root / "index.md").read_text(encoding="utf-8")
     return {
-        "reference_turn_count": len(references),
+        "reference_turn_count": len(_TURN_MESSAGES),
         "page_count": len(pages),
         "memory_chars": len(memory_text),
         "index_chars": len(index_text),
-        "memory_has_reference_links": "references/turns/" in memory_text,
         "system_prompt_leak": bool(re.search(r"system prompt|developer prompt", page_text, re.I)),
         "stale_claim_count": page_text.count("active decision is generated from YAML"),
     }
@@ -749,41 +749,21 @@ def _search_reference_messages(bundle: AgentJournalBundle, query: str, *, limit:
 
 def _reference_messages(bundle: AgentJournalBundle) -> list[ReferenceMessage]:
     messages: list[ReferenceMessage] = []
-    for path in sorted(bundle.turns_dir.rglob("*.md")):
-        payload = _extract_turn_payload(path)
-        turn_id = str(payload["turn_id"])
-        session_id = str(payload["session_id"])
-        for message in payload.get("messages", []):
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            message_id = message.get("message_id")
-            role = message.get("role")
-            if isinstance(content, str) and isinstance(message_id, str) and isinstance(role, str):
-                messages.append(
-                    ReferenceMessage(
-                        turn_id=turn_id,
-                        session_id=session_id,
-                        message_id=message_id,
-                        role=role,
-                        content=content,
-                    ),
-                )
+    for turn_id, turn_messages in _TURN_MESSAGES.items():
+        sessions: set[str] = set()
+        for msg in turn_messages:
+            session_id = msg.session_id or "default"
+            messages.append(
+                ReferenceMessage(
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    message_id=msg.id,
+                    role=msg.role,
+                    content=msg.content,
+                ),
+            )
+            sessions.add(session_id)
     return messages
-
-
-def _extract_turn_payload(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    parts = text.split("\n# Canonical Turn Payload\n", 1)
-    if len(parts) != 2:
-        raise ValueError(f"missing canonical AgentJournal turn payload section: {path}")
-    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
-    if not match:
-        raise ValueError(f"missing canonical AgentJournal turn payload: {path}")
-    payload = json.loads(match.group(1))
-    if not isinstance(payload, dict):
-        raise ValueError(f"canonical AgentJournal turn payload must be an object: {path}")
-    return payload
 
 
 def _page_id(path: Path) -> str:

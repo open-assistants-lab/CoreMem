@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministic LongMemEval loader and raw AgentJournal reference baseline.
+"""Deterministic LongMemEval loader and raw AgentJournal baseline.
 
 This is the Stage 2 AgentJournal eval slice: adapt LongMemEval-shaped JSON to
-AgentJournal reference turns, prove oracle fields are stripped before ingestion and
-retrieval, then score a raw lexical reference-message/session baseline. It does
-not call an LLM and does not use embedding backends.
+in-memory source messages, prove oracle fields are stripped before ingestion and
+retrieval, then score a raw lexical message/session baseline. It does not call
+an LLM and does not use embedding backends.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Any
 from coremem.agent_journal import AgentJournalBundle
 from coremem.providers import create_provider
 from coremem.types import Memory
+
+_TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
 MODE = "raw-reference-retrieval"
@@ -128,18 +130,13 @@ def prepare_instances(
 
 
 def build_reference_bundle(root: str | Path, instances: Sequence[PreparedInstance]) -> AgentJournalBundle:
-    """Write one AgentJournal reference turn per stripped haystack session."""
+    """Store sessions in-memory for the evaluation."""
     bundle = AgentJournalBundle(root)
     bundle.initialize()
+    _TURN_MESSAGES.clear()
     for instance in instances:
         for session in instance.sessions:
-            bundle.write_reference_turn(
-                session.messages,
-                turn_id=session.turn_id,
-                session_id=session.session_id,
-                agent_context_hash="sha256:longmemeval-stripped-reference-baseline",
-                metadata={},
-            )
+            _TURN_MESSAGES[session.turn_id] = tuple(session.messages)
     return bundle
 
 
@@ -484,43 +481,21 @@ def _reference_messages(
     allowed_turn_ids: set[str] | None = None,
 ) -> list[ReferenceMessage]:
     messages: list[ReferenceMessage] = []
-    for path in sorted(bundle.turns_dir.rglob("*.md")):
-        payload = _extract_turn_payload(path)
-        turn_id = str(payload["turn_id"])
+    for turn_id, turn_msgs in _TURN_MESSAGES.items():
         if allowed_turn_ids is not None and turn_id not in allowed_turn_ids:
             continue
-        session_id = str(payload["session_id"])
-        for message in payload.get("messages", []):
-            if not isinstance(message, dict):
-                continue
-            message_id = message.get("message_id")
-            role = message.get("role")
-            content = message.get("content")
-            if isinstance(message_id, str) and isinstance(role, str) and isinstance(content, str):
-                messages.append(
-                    ReferenceMessage(
-                        turn_id=turn_id,
-                        session_id=session_id,
-                        message_id=message_id,
-                        role=role,
-                        content=content,
-                    ),
-                )
+        for msg in turn_msgs:
+            session_id = msg.session_id or "default"
+            messages.append(
+                ReferenceMessage(
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    message_id=msg.id,
+                    role=msg.role,
+                    content=msg.content,
+                ),
+            )
     return messages
-
-
-def _extract_turn_payload(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    parts = text.split("\n# Canonical Turn Payload\n", 1)
-    if len(parts) != 2:
-        raise ValueError(f"missing canonical AgentJournal turn payload section: {path}")
-    match = re.search(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
-    if not match:
-        raise ValueError(f"missing canonical AgentJournal turn payload: {path}")
-    payload = json.loads(match.group(1))
-    if not isinstance(payload, dict):
-        raise ValueError(f"canonical AgentJournal turn payload must be an object: {path}")
-    return payload
 
 
 def _aggregate_metrics(rows: Sequence[Mapping[str, Any]], *, k: int) -> dict[str, Any]:

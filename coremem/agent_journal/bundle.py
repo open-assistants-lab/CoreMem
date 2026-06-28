@@ -1,8 +1,8 @@
 """AgentJournal bundle primitives.
 
-This module implements the deterministic substrate for the AgentJournal POC:
-bundle initialization, immutable reference turns, linting, exact quote
-validation, and simple markdown search. It intentionally does not call an LLM.
+This module implements the deterministic substrate for the AgentJournal:
+bundle initialization, linting, exact quote validation, and simple
+markdown search. It intentionally does not call an LLM.
 """
 
 from __future__ import annotations
@@ -17,9 +17,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
-
-from coremem.types import Memory
 
 logger = logging.getLogger(__name__)
 
@@ -76,20 +73,6 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _sha256_file(path: Path) -> str:
-    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
-
-
-def _frontmatter_list(values: Sequence[str]) -> str:
-    return "[" + ", ".join(values) + "]"
-
-
 def _parse_scalar(value: str) -> object:
     value = value.strip()
     if value == "":
@@ -144,45 +127,9 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     return frontmatter, body
 
 
-def _extract_turn_payload(text: str) -> tuple[dict[str, Any] | None, list[str]]:
-    parts = text.split("\n# Canonical Turn Payload\n", 1)
-    if len(parts) != 2:
-        return None, ["reference turn must contain a # Canonical Turn Payload section"]
-    matches = re.findall(r"```json agent_journal-turn\n(.*?)\n```", parts[1], re.DOTALL)
-    if len(matches) != 1:
-        return None, ["reference turn must contain exactly one `json agent_journal-turn` block"]
-    try:
-        payload = json.loads(matches[0])
-    except json.JSONDecodeError as exc:
-        return None, [f"reference turn canonical payload is invalid JSON: {exc}"]
-    if not isinstance(payload, dict):
-        return None, ["reference turn canonical payload must be a JSON object"]
-    return payload, []
-
-
 def _find_links(text: str) -> list[str]:
     links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
     return [link for link in links if not re.match(r"^[a-z][a-z0-9+.-]*:", link)]
-
-
-def _extract_citation_claims(text: str) -> list[dict[str, str]]:
-    pattern = re.compile(
-        r"(?:^[-*]\s+)?(?:\[[^\]]+\]\s+)?"
-        r"\[[^\]]+\]\(([^)]+references/turns/[^)]+?\.md)\),\s*"
-        r"`([^`]+)`,\s*`([^`]+)`:\s*(?:\n)?\"([^\"]+)\"",
-        re.MULTILINE,
-    )
-    claims: list[dict[str, str]] = []
-    for match in pattern.finditer(text):
-        link, message_id, evidence_type, quote = match.groups()
-        turn_id = Path(link).stem
-        claims.append({
-            "evidence_type": evidence_type,
-            "source_turn_id": turn_id,
-            "source_message_id": message_id,
-            "source_quote": quote,
-        })
-    return claims
 
 
 def _as_str_list(value: object) -> list[str]:
@@ -203,24 +150,12 @@ class AgentJournalBundle:
         self._embedding_index: Any = None
 
     @property
-    def references_dir(self) -> Path:
-        return self.root / "references"
-
-    @property
-    def turns_dir(self) -> Path:
-        return self.references_dir / "turns"
-
-    @property
     def pages_dir(self) -> Path:
         return self.root / "pages"
 
     @property
     def daily_dir(self) -> Path:
         return self.root / "daily"
-
-    @property
-    def manifest_path(self) -> Path:
-        return self.references_dir / "manifest.json"
 
     def initialize(self) -> None:
         """Create an empty AgentJournal bundle if needed."""
@@ -251,58 +186,8 @@ class AgentJournalBundle:
                 encoding="utf-8",
             )
 
-    def write_reference_turn(
-        self,
-        messages: Sequence[Memory],
-        *,
-        turn_id: str | None = None,
-        session_id: str | None = None,
-        agent_context_hash: str = "unavailable",
-        metadata: Mapping[str, Any] | None = None,
-        include_system: bool = False,
-    ) -> Path:
-        """Write an immutable reference turn and append it to the manifest."""
-        self.initialize()
-        kept = [msg for msg in messages if include_system or msg.role not in {"system", "developer"}]
-        if not kept:
-            raise AgentJournalError("reference turn must contain at least one persisted message")
-        ids = [msg.id for msg in kept]
-        if len(ids) != len(set(ids)):
-            raise AgentJournalError("reference turn message ids must be unique")
-        turn_id = turn_id or f"turn_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}_{uuid4().hex[:8]}"
-        if not re.match(r"^[A-Za-z0-9_.-]+$", turn_id):
-            raise AgentJournalError("turn_id may only contain letters, numbers, dots, underscores, and hyphens")
-        session_id = session_id or kept[0].session_id or "default"
-        path = self.turns_dir / f"{turn_id}.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            raise FileExistsError(path)
-
-        sorted_messages = sorted(kept, key=self._message_sort_key)
-        payload = {
-            "turn_id": turn_id,
-            "session_id": session_id,
-            "started_at": self._message_ts(sorted_messages[0]),
-            "ended_at": self._message_ts(sorted_messages[-1]),
-            "agent_context_hash": agent_context_hash,
-            "messages": [self._message_payload(msg) for msg in sorted_messages],
-            "metadata": dict(metadata or {}),
-        }
-        content = self._render_reference_turn(
-            turn_id=turn_id,
-            session_id=session_id,
-            message_ids=ids,
-            agent_context_hash=agent_context_hash,
-            messages=sorted_messages,
-            payload=payload,
-            sensitive=include_system,
-        )
-        path.write_text(content, encoding="utf-8")
-        self._append_manifest(path, turn_id, ids, agent_context_hash)
-        return path
-
-    def validate_claim(self, claim: Mapping[str, Any]) -> list[str]:
-        """Validate a proposed claim's evidence against reference turns."""
+    def validate_claim(self, claim: Mapping[str, Any], messages: Sequence[Any] | None = None) -> list[str]:
+        """Validate a proposed claim's evidence against in-memory messages."""
         errors: list[str] = []
         evidence_type = claim.get("evidence_type")
         if evidence_type not in EVIDENCE_TYPES:
@@ -322,9 +207,9 @@ class AgentJournalBundle:
                         continue
                     if source.get("evidence_type") not in SOURCE_EVIDENCE_TYPES:
                         errors.append(f"supporting_sources[{index}] evidence_type is invalid")
-                    errors.extend(self._validate_source(source, f"supporting_sources[{index}]"))
+                    errors.extend(self._validate_source(source, f"supporting_sources[{index}]", messages))
             return errors
-        return self._validate_source(claim, "claim")
+        return self._validate_source(claim, "claim", messages)
 
     def lint(self) -> list[str]:
         """Return deterministic AgentJournal lint errors."""
@@ -334,7 +219,6 @@ class AgentJournalBundle:
                 errors.append(f"missing required file: {relative}")
         errors.extend(self._lint_memory_file())
         errors.extend(self._lint_memory_pages())
-        errors.extend(self._lint_manifest())
         return errors
 
     def _write_if_missing(self, relative: str, content: str) -> None:
@@ -342,118 +226,7 @@ class AgentJournalBundle:
         if not path.exists():
             path.write_text(content, encoding="utf-8")
 
-    def _message_ts(self, message: Memory) -> str:
-        return message.ts.isoformat() if message.ts else _utc_now()
-
-    def _message_sort_key(self, message: Memory) -> str:
-        return message.ts.isoformat() if message.ts else ""
-
-    def _normalize_role(self, role: str) -> str:
-        if role == "tool":
-            return "tool_result"
-        return role
-
-    def _message_payload(self, message: Memory) -> dict[str, Any]:
-        role = self._normalize_role(message.role)
-        return {
-            "message_id": message.id,
-            "role": role,
-            "created_at": self._message_ts(message),
-            "content": message.content,
-            "user_id": message.user_id,
-            "agent_id": message.agent_id,
-            "session_id": message.session_id,
-            "metadata": message.metadata,
-        }
-
-    def _render_reference_turn(
-        self,
-        *,
-        turn_id: str,
-        session_id: str,
-        message_ids: Sequence[str],
-        agent_context_hash: str,
-        messages: Sequence[Memory],
-        payload: Mapping[str, Any],
-        sensitive: bool,
-    ) -> str:
-        tags = ["conversation", "source", "memorypack"]
-        if sensitive:
-            tags.append("sensitive-agent-context")
-        lines = [
-            "---",
-            "type: Conversation Turn Source",
-            f"title: {turn_id}",
-            f"description: Reference turn {turn_id}.",
-            f"resource: coremem://turns/{turn_id}",
-            f"tags: {_frontmatter_list(tags)}",
-            f"timestamp: {_utc_now()}",
-            f"turn_id: {turn_id}",
-            f"session_id: {session_id}",
-            f"message_ids: {_frontmatter_list(message_ids)}",
-            f"agent_context_hash: {agent_context_hash}",
-            "---",
-            "",
-            "# Messages",
-            "",
-        ]
-        for message in messages:
-            lines.extend([
-                f"## {message.id} {self._normalize_role(message.role)}",
-                "",
-                message.content,
-                "",
-            ])
-        lines.extend([
-            "# Canonical Turn Payload",
-            "",
-            "```json agent_journal-turn",
-            json.dumps(payload, indent=2, sort_keys=True, default=_json_default),
-            "```",
-            "",
-        ])
-        return "\n".join(lines)
-
-    def _load_manifest(self) -> dict[str, Any]:
-        if not self.manifest_path.exists():
-            return {"references": []}
-        data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise AgentJournalError("references/manifest.json must be an object")
-        references = data.setdefault("references", [])
-        if not isinstance(references, list):
-            raise AgentJournalError("references/manifest.json references must be a list")
-        return data
-
-    def _append_manifest(
-        self,
-        path: Path,
-        turn_id: str,
-        message_ids: Sequence[str],
-        agent_context_hash: str,
-    ) -> None:
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest = self._load_manifest()
-        references = manifest["references"]
-        if not isinstance(references, list):
-            raise AgentJournalError("references/manifest.json references must be a list")
-        relative = path.relative_to(self.references_dir).as_posix()
-        if any(isinstance(item, dict) and item.get("path") == relative for item in references):
-            raise AgentJournalError(f"reference already exists in manifest: {relative}")
-        references.append({
-            "path": relative,
-            "sha256": _sha256_file(path),
-            "turn_id": turn_id,
-            "message_ids": list(message_ids),
-            "agent_context_hash": agent_context_hash,
-            "created_at": _utc_now(),
-        })
-        self.manifest_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-
-    def _validate_source(self, source: Mapping[str, Any], label: str) -> list[str]:
+    def _validate_source(self, source: Mapping[str, Any], label: str, messages: Sequence[Any] | None = None) -> list[str]:
         errors: list[str] = []
         turn_id = source.get("source_turn_id")
         message_id = source.get("source_message_id")
@@ -473,35 +246,34 @@ class AgentJournalBundle:
         if not isinstance(quote, str) or not quote:
             errors.append(f"{label} source_quote is required")
             return errors
-        turn_path = self.turns_dir / f"{turn_id}.md"
-        if not turn_path.exists():
-            errors.append(f"{label} source_turn_id does not resolve: {turn_id}")
-            return errors
-        manifest_errors = self._lint_manifest_entry(turn_path)
-        errors.extend(f"{label} {error}" for error in manifest_errors)
-        payload, payload_errors = _extract_turn_payload(turn_path.read_text(encoding="utf-8"))
-        errors.extend(f"{label} {error}" for error in payload_errors)
-        if payload is None:
-            return errors
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            errors.append(f"{label} canonical payload messages must be a list")
-            return errors
-        matched = next((msg for msg in messages if isinstance(msg, dict) and msg.get("message_id") == message_id), None)
-        if matched is None:
-            errors.append(f"{label} source_message_id does not exist: {message_id}")
-            return errors
-        content = matched.get("content")
-        role = matched.get("role")
-        evidence_type = source.get("evidence_type")
-        if not self._role_supports_evidence(role, evidence_type):
-            errors.append(f"{label} evidence_type {evidence_type!r} is not supported by role {role!r}")
-        if not isinstance(content, str):
-            errors.append(f"{label} cited message content is not a string")
-            return errors
-        if quote not in content:
-            errors.append(f"{label} source_quote is not an exact substring")
+        if messages is not None:
+            matched = next((msg for msg in messages if self._message_value(msg, "message_id", "id") == message_id), None)
+            if matched is None:
+                errors.append(f"{label} source_message_id does not exist: {message_id}")
+                return errors
+            role = self._message_value(matched, "role")
+            content = self._message_value(matched, "content")
+            role = "tool_result" if role == "tool" else role
+            evidence_type = source.get("evidence_type")
+            if not self._role_supports_evidence(role, evidence_type):
+                errors.append(f"{label} evidence_type {evidence_type!r} is not supported by role {role!r}")
+            if not isinstance(content, str):
+                errors.append(f"{label} cited message content is not a string")
+                return errors
+            if quote not in content:
+                errors.append(f"{label} source_quote is not an exact substring")
         return errors
+
+    def _message_value(self, message: Any, *keys: str) -> Any:
+        if isinstance(message, Mapping):
+            for key in keys:
+                if key in message:
+                    return message[key]
+            return None
+        for key in keys:
+            if hasattr(message, key):
+                return getattr(message, key)
+        return None
 
     def _role_supports_evidence(self, role: object, evidence_type: object) -> bool:
         if role in {"system", "developer"}:
@@ -514,118 +286,6 @@ class AgentJournalBundle:
             return role == "tool_result"
         return False
 
-    def _lint_manifest_entry(self, path: Path) -> list[str]:
-        try:
-            manifest = self._load_manifest()
-        except (json.JSONDecodeError, AgentJournalError) as exc:
-            return [f"manifest cannot be read: {exc}"]
-        relative = path.relative_to(self.references_dir).as_posix()
-        references = manifest.get("references", [])
-        if not isinstance(references, list):
-            return ["manifest references must be a list"]
-        matches = [item for item in references if isinstance(item, dict) and item.get("path") == relative]
-        if len(matches) != 1:
-            return [f"manifest entry missing or duplicated for {relative}"]
-        expected = matches[0].get("sha256")
-        actual = _sha256_file(path)
-        if expected != actual:
-            return [f"manifest hash mismatch for {relative}"]
-        return []
-
-    def _lint_manifest(self) -> list[str]:
-        errors: list[str] = []
-        try:
-            manifest = self._load_manifest()
-        except (json.JSONDecodeError, AgentJournalError) as exc:
-            return [f"manifest cannot be read: {exc}"]
-        references = manifest.get("references", [])
-        if not isinstance(references, list):
-            return ["manifest references must be a list"]
-        seen: set[str] = set()
-        for index, item in enumerate(references):
-            if not isinstance(item, dict):
-                errors.append(f"manifest references[{index}] must be an object")
-                continue
-            relative = item.get("path")
-            if not isinstance(relative, str) or not relative:
-                errors.append(f"manifest references[{index}] path is required")
-                continue
-            if relative in seen:
-                errors.append(f"manifest duplicate reference path: {relative}")
-            seen.add(relative)
-            path = self.references_dir / relative
-            if not path.exists():
-                errors.append(f"manifest reference missing file: {relative}")
-                continue
-            expected = item.get("sha256")
-            actual = _sha256_file(path)
-            if expected != actual:
-                errors.append(f"manifest hash mismatch for {relative}")
-            errors.extend(self._lint_reference_manifest_consistency(path, item))
-            errors.extend(self._lint_reference_turn(path))
-        for path in sorted(self.turns_dir.glob("*.md")):
-            relative = path.relative_to(self.references_dir).as_posix()
-            if relative not in seen:
-                errors.append(f"unmanifested reference file: {relative}")
-        return errors
-
-    def _lint_reference_manifest_consistency(self, path: Path, item: Mapping[str, Any]) -> list[str]:
-        text = path.read_text(encoding="utf-8")
-        frontmatter, _ = _parse_frontmatter(text)
-        payload, payload_errors = _extract_turn_payload(text)
-        if payload_errors or payload is None:
-            return []
-        errors: list[str] = []
-        if item.get("turn_id") != frontmatter.get("turn_id") or item.get("turn_id") != payload.get("turn_id"):
-            errors.append(f"manifest turn_id mismatch for {path.relative_to(self.references_dir)}")
-        payload_ids = [
-            msg.get("message_id")
-            for msg in payload.get("messages", [])
-            if isinstance(msg, dict) and isinstance(msg.get("message_id"), str)
-        ]
-        manifest_ids = item.get("message_ids")
-        if isinstance(manifest_ids, list) and manifest_ids != payload_ids:
-            errors.append(f"manifest message_ids mismatch for {path.relative_to(self.references_dir)}")
-        return errors
-
-    def _lint_reference_turn(self, path: Path) -> list[str]:
-        text = path.read_text(encoding="utf-8")
-        frontmatter, _ = _parse_frontmatter(text)
-        errors = []
-        for key in ("type", "turn_id", "session_id", "message_ids", "agent_context_hash"):
-            if key not in frontmatter:
-                errors.append(f"{path.relative_to(self.root)} missing frontmatter field: {key}")
-        payload, payload_errors = _extract_turn_payload(text)
-        errors.extend(f"{path.relative_to(self.root)} {error}" for error in payload_errors)
-        if payload is None:
-            return errors
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            errors.append(f"{path.relative_to(self.root)} payload messages must be a list")
-            return errors
-        ids: list[str] = []
-        for index, message in enumerate(messages):
-            if not isinstance(message, dict):
-                errors.append(f"{path.relative_to(self.root)} messages[{index}] must be an object")
-                continue
-            message_id = message.get("message_id")
-            role = message.get("role")
-            content = message.get("content")
-            if not isinstance(message_id, str) or not message_id:
-                errors.append(f"{path.relative_to(self.root)} messages[{index}] message_id is required")
-            else:
-                ids.append(message_id)
-            if role not in ALLOWED_ROLES:
-                errors.append(f"{path.relative_to(self.root)} messages[{index}] role is invalid")
-            tags = _as_str_list(frontmatter.get("tags", []))
-            if role in {"system", "developer"} and "sensitive-agent-context" not in tags:
-                errors.append(f"{path.relative_to(self.root)} system/developer message requires sensitive-agent-context tag")
-            if not isinstance(content, str):
-                errors.append(f"{path.relative_to(self.root)} messages[{index}] content must be a string")
-        if len(ids) != len(set(ids)):
-            errors.append(f"{path.relative_to(self.root)} message ids must be unique")
-        return errors
-
     def _lint_memory_file(self) -> list[str]:
         path = self.root / "MEMORY.md"
         if not path.exists():
@@ -634,8 +294,6 @@ class AgentJournalBundle:
         errors: list[str] = []
         if len(text) > self.boot_budget_chars:
             errors.append("MEMORY.md exceeds configured boot budget")
-        if "references/turns/" in text:
-            errors.append("MEMORY.md must not include reference turn links or content")
         errors.extend(self._lint_links(path, text))
         return errors
 
@@ -651,6 +309,10 @@ class AgentJournalBundle:
             relative = path.relative_to(self.root)
             if not frontmatter:
                 errors.append(f"{relative} missing frontmatter")
+                continue
+            if self._is_daily_journal_file(path, frontmatter):
+                errors.extend(self._lint_daily_journal(path, frontmatter, body))
+                errors.extend(self._lint_links(path, text))
                 continue
             version_key = "agent_journal_version" if "agent_journal_version" in frontmatter else "agent_memory_version"
             for key in ("type", "page_id", "memory_kind", version_key):
@@ -680,23 +342,28 @@ class AgentJournalBundle:
                 errors.append(f"{relative} agent_journal_version must be {PROFILE_VERSION}")
             if len(re.findall(r"^# Summary$", body, re.MULTILINE)) != 1:
                 errors.append(f"{relative} must have exactly one # Summary section")
-            errors.extend(self._lint_page_citations(path, text))
             errors.extend(self._lint_links(path, text))
         errors.extend(self._lint_index_links())
         return errors
 
-    def _lint_page_citations(self, path: Path, text: str) -> list[str]:
+    def _is_daily_journal_file(self, path: Path, frontmatter: Mapping[str, object]) -> bool:
+        try:
+            path.relative_to(self.daily_dir)
+        except ValueError:
+            return False
+        return "date" in frontmatter and "page_id" not in frontmatter
+
+    def _lint_daily_journal(self, path: Path, frontmatter: Mapping[str, object], body: str) -> list[str]:
         relative = path.relative_to(self.root)
         errors: list[str] = []
-        has_current_claims = bool(re.search(r"^# Current State\n.*?^- ", text, re.MULTILINE | re.DOTALL))
-        has_citations = "# Citations" in text
-        if has_current_claims and not has_citations:
-            errors.append(f"{relative} has current claims but no # Citations section")
-            return errors
-        for claim in _extract_citation_claims(text):
-            errors.extend(f"{relative} {error}" for error in self.validate_claim(claim))
-        if has_citations and not _extract_citation_claims(text):
-            errors.append(f"{relative} has # Citations but no parseable reference citations")
+        date = frontmatter.get("date")
+        if not isinstance(date, str) or not date:
+            errors.append(f"{relative} date is required")
+        version = frontmatter.get("agent_journal_version")
+        if version != PROFILE_VERSION:
+            errors.append(f"{relative} agent_journal_version must be {PROFILE_VERSION}")
+        if isinstance(date, str) and f"# {date}" not in body:
+            errors.append(f"{relative} must have # {date} heading")
         return errors
 
     def _lint_index_links(self) -> list[str]:
@@ -973,9 +640,3 @@ def _extract_sections(text: str) -> list[str]:
             section = section[:cit_idx]
         sections.append(section.strip())
     return sections
-    for hit in hits:
-        sid = hit.session_id
-        if sid not in grouped or hit.score > grouped[sid][0]:
-            grouped[sid] = (hit.score, hit.path)
-    top = sorted(grouped.items(), key=lambda x: -x[1][0])[:limit]
-    return [SearchHit(path=p, score=s, session_id=sid) for sid, (s, p) in top]

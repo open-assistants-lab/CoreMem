@@ -6,6 +6,7 @@ Single HybridDB instance. Messages stored with turn_id for AgentJournal compilat
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,8 @@ from coremem.types import Memory, SearchQuery, SearchResult
 
 from coremem.agent_journal import (
     AgentJournalBundle,
+    AgentJournalCompileResult,
+    AgentJournalError,
     AgentJournalLLMCompiler,
     AgentJournalSearch,
     CrossEncoderReranker,
@@ -99,8 +102,8 @@ class MemoryCore:
         core = MemoryCore(path="./memory")
         tid = core.ingest("user", "I like coffee", session_id="s1")
         core.ingest("assistant", "Great!", session_id="s1")
-        await core.compile_turn(turn_id=tid, timestamp="10:30", title="Coffee Chat")
-        results = core.search("coffee")
+        await core.compile_turn(turn_id=tid)
+        results = core.search_messages("coffee")
         hits = core.search_journal("coffee")
     """
 
@@ -138,6 +141,17 @@ class MemoryCore:
         if "turn_id" not in cols:
             self._db.raw_query("ALTER TABLE messages ADD COLUMN turn_id TEXT DEFAULT ''")
             self._db.raw_query("CREATE INDEX IF NOT EXISTS idx_messages_turn_id ON messages(turn_id)")
+        self._db.raw_query(
+            """
+            CREATE TABLE IF NOT EXISTS compiled_turns (
+                turn_id TEXT PRIMARY KEY,
+                source_hash TEXT NOT NULL,
+                compiled_at TEXT NOT NULL,
+                daily_path TEXT NOT NULL,
+                message_count INTEGER NOT NULL
+            )
+            """
+        )
 
     @property
     def db(self) -> HybridDB:
@@ -184,7 +198,7 @@ class MemoryCore:
             )
         return tid
 
-    def search(
+    def search_messages(
         self, query: str, limit: int = 10,
         role: str | None = None,
         session_id: str | None = None,
@@ -210,7 +224,7 @@ class MemoryCore:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_enhanced(
+    def search_messages_deep(
         self, query: str, limit: int = 10,
         role: str | None = None,
         session_id: str | None = None,
@@ -391,22 +405,184 @@ class MemoryCore:
 
     # ── AgentJournal methods ───────────────────────────────────
 
-    async def compile_turn(self, turn_id: str, timestamp: str, title: str) -> None:
-        rows = self._db.query(
-            "SELECT id, role, content, session_id FROM messages WHERE turn_id = ? ORDER BY ts",
-            [turn_id],
-        )
+    async def compile_turn(
+        self,
+        turn_id: str,
+        timestamp: str | None = None,
+        title: str | None = None,
+        *,
+        force: bool = False,
+    ) -> AgentJournalCompileResult | None:
+        rows = self._turn_rows(turn_id)
         if not rows:
-            return
+            return None
+        source_hash = self._turn_source_hash(rows)
+        compiled = self._compiled_turn(turn_id)
+        if compiled is not None:
+            if compiled["source_hash"] == source_hash and not force:
+                return None
+            if not force:
+                raise AgentJournalError(
+                    f"turn changed after compilation: {turn_id}; pass force=True to append a new section"
+                )
         session_id = rows[0]["session_id"]
-        messages = [{"message_id": r["id"], "role": r["role"], "content": r["content"]} for r in rows]
-        await self._journal_compiler.compile_session(
+        if timestamp is None:
+            timestamp = self._display_timestamp(rows[0].get("ts"))
+        result = await self._journal_compiler.compile_session(
             turn_id=turn_id,
             session_id=session_id,
-            messages=messages,
+            messages=self._turn_messages(rows),
             timestamp=timestamp,
             title=title,
         )
+        self._record_compiled_turn(turn_id, source_hash, result, len(rows))
+        return result
+
+    async def compile_latest_turn(
+        self,
+        session_id: str,
+        timestamp: str | None = None,
+        title: str | None = None,
+        *,
+        force: bool = False,
+    ) -> AgentJournalCompileResult | None:
+        rows = self._db.raw_query(
+            """
+            SELECT turn_id FROM messages
+            WHERE session_id = ? AND turn_id != ''
+            GROUP BY turn_id
+            ORDER BY MAX(ts) DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        if not rows:
+            return None
+        return await self.compile_turn(
+            rows[0]["turn_id"],
+            timestamp=timestamp,
+            title=title,
+            force=force,
+        )
+
+    async def compile_uncompiled_turns(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "compiled": [],
+            "skipped": [],
+            "changed": [],
+            "errors": [],
+        }
+        if limit <= 0:
+            return summary
+        where = "turn_id != ''"
+        params: list[Any] = []
+        if session_id is not None:
+            where += " AND session_id = ?"
+            params.append(session_id)
+        turn_rows = self._db.raw_query(
+            f"""
+            SELECT turn_id FROM messages
+            WHERE {where}
+            GROUP BY turn_id
+            ORDER BY MIN(ts) ASC
+            LIMIT ?
+            """,
+            tuple(params) + (limit,),
+        )
+        for row in turn_rows:
+            turn_id = row["turn_id"]
+            rows = self._turn_rows(turn_id)
+            if not rows:
+                summary["skipped"].append(turn_id)  # type: ignore[index, union-attr]
+                continue
+            source_hash = self._turn_source_hash(rows)
+            compiled = self._compiled_turn(turn_id)
+            if compiled is not None:
+                if compiled["source_hash"] == source_hash:
+                    summary["skipped"].append(turn_id)  # type: ignore[index, union-attr]
+                else:
+                    summary["changed"].append(turn_id)  # type: ignore[index, union-attr]
+                continue
+            try:
+                result = await self.compile_turn(turn_id)
+            except Exception as exc:
+                summary["errors"].append({"turn_id": turn_id, "error": str(exc)})  # type: ignore[index, union-attr]
+            else:
+                if result is None:
+                    summary["skipped"].append(turn_id)  # type: ignore[index, union-attr]
+                else:
+                    summary["compiled"].append(turn_id)  # type: ignore[index, union-attr]
+        return summary
+
+    def _turn_rows(self, turn_id: str) -> list[dict[str, Any]]:
+        return self._db.raw_query(
+            "SELECT id, role, content, session_id, ts FROM messages WHERE turn_id = ? ORDER BY ts",
+            (turn_id,),
+        )
+
+    def _turn_messages(self, rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+        return [{"message_id": r["id"], "role": r["role"], "content": r["content"]} for r in rows]
+
+    def _turn_source_hash(self, rows: list[dict[str, Any]]) -> str:
+        payload = [
+            {
+                "id": row.get("id", ""),
+                "role": row.get("role", ""),
+                "content": row.get("content", ""),
+                "session_id": row.get("session_id", ""),
+                "ts": row.get("ts", ""),
+            }
+            for row in rows
+        ]
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    def _compiled_turn(self, turn_id: str) -> dict[str, Any] | None:
+        rows = self._db.raw_query(
+            "SELECT * FROM compiled_turns WHERE turn_id = ?",
+            (turn_id,),
+        )
+        return rows[0] if rows else None
+
+    def _record_compiled_turn(
+        self,
+        turn_id: str,
+        source_hash: str,
+        result: AgentJournalCompileResult,
+        message_count: int,
+    ) -> None:
+        daily_path = str(result.written_pages[0]) if result.written_pages else ""
+        self._db.raw_query(
+            """
+            INSERT INTO compiled_turns (turn_id, source_hash, compiled_at, daily_path, message_count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(turn_id) DO UPDATE SET
+                source_hash = excluded.source_hash,
+                compiled_at = excluded.compiled_at,
+                daily_path = excluded.daily_path,
+                message_count = excluded.message_count
+            """,
+            (
+                turn_id,
+                source_hash,
+                datetime.now(UTC).isoformat(),
+                daily_path,
+                message_count,
+            ),
+        )
+
+    def _display_timestamp(self, ts: str | None) -> str | None:
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts).strftime("%H:%M")
+        except ValueError:
+            return None
 
     async def dream(self) -> dict:
         return await dream(self._agent_journal_bundle)

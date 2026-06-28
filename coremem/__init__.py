@@ -4,7 +4,7 @@ Usage:
     from coremem import MemoryCore
 
     core = MemoryCore(path="./memory")
-    results = core.search("How many model kits?")
+    results = core.search_messages("How many model kits?")
     core.ingest("user", "I built a Spitfire model kit")
 """
 

@@ -1,15 +1,14 @@
 """Deterministic AgentJournal compiler adapter.
 
-The compiler accepts a structured update plan, validates every cited claim
-against immutable reference turns, and writes the derived AgentJournal files.
-It intentionally does not call an LLM.
+The compiler accepts a structured update plan, validates cited claims against
+in-memory source messages when available, and writes the derived AgentJournal
+files. It intentionally does not call an LLM.
 """
 
 from __future__ import annotations
 
-import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,9 +115,9 @@ class AgentJournalCompiler:
     def __init__(self, bundle: AgentJournalBundle) -> None:
         self.bundle = bundle
 
-    def apply_plan(self, plan: Mapping[str, Any]) -> AgentJournalCompileResult:
+    def apply_plan(self, plan: Mapping[str, Any], messages: Sequence[Any] | None = None) -> AgentJournalCompileResult:
         """Validate and apply a structured AgentJournal update plan."""
-        pages = self._compile_plan(plan)
+        pages = self._compile_plan(plan, messages)
         self._ensure_output_files()
         snapshots = self._snapshot_targets(pages)
 
@@ -145,7 +144,7 @@ class AgentJournalCompiler:
             boot_pages=tuple(page.page_id for page in pages if page.boot_worthy),
         )
 
-    def _compile_plan(self, plan: Mapping[str, Any]) -> tuple[_CompiledPage, ...]:
+    def _compile_plan(self, plan: Mapping[str, Any], messages: Sequence[Any] | None = None) -> tuple[_CompiledPage, ...]:
         if not isinstance(plan, Mapping):
             raise AgentJournalError("compiler plan must be an object")
         self._reject_extra_keys(plan, _PLAN_KEYS, "compiler plan")
@@ -162,14 +161,14 @@ class AgentJournalCompiler:
         for index, raw_page in enumerate(raw_pages):
             if not isinstance(raw_page, Mapping):
                 raise AgentJournalError(f"pages[{index}] must be an object")
-            page = self._compile_page(raw_page, f"pages[{index}]")
+            page = self._compile_page(raw_page, f"pages[{index}]", messages)
             if page.page_id in seen_page_ids:
                 raise AgentJournalError(f"duplicate page_id in compiler plan: {page.page_id}")
             seen_page_ids.add(page.page_id)
             compiled.append(page)
         return tuple(compiled)
 
-    def _compile_page(self, raw_page: Mapping[str, Any], label: str) -> _CompiledPage:
+    def _compile_page(self, raw_page: Mapping[str, Any], label: str, messages: Sequence[Any] | None = None) -> _CompiledPage:
         self._reject_extra_keys(raw_page, _PAGE_KEYS, label)
         missing = sorted(key for key in _PAGE_REQUIRED_KEYS if key not in raw_page)
         if missing:
@@ -214,7 +213,7 @@ class AgentJournalCompiler:
                 f"{label}.boot_worthy requires activation=startup and status=active"
             )
 
-        current_state, citations = self._compile_current_state(raw_page["current_state"], label)
+        current_state, citations = self._compile_current_state(raw_page["current_state"], label, messages)
         details = self._optional_string_list(raw_page, "details", label)
         open_questions = self._optional_string_list(raw_page, "open_questions", label)
         read_next = self._optional_string_list(raw_page, "read_next", label)
@@ -241,7 +240,7 @@ class AgentJournalCompiler:
         )
 
     def _compile_current_state(
-        self, raw_current_state: Any, page_label: str
+        self, raw_current_state: Any, page_label: str, messages: Sequence[Any] | None = None
     ) -> tuple[tuple[_CompiledClaim, ...], tuple[_Citation, ...]]:
         if not isinstance(raw_current_state, list) or not raw_current_state:
             raise AgentJournalError(f"{page_label}.current_state must be a non-empty list")
@@ -260,7 +259,7 @@ class AgentJournalCompiler:
             evidence = self._compile_evidence(raw_claim["evidence"], label)
             validation_claim = dict(evidence)
             validation_claim["text"] = claim
-            errors = self.bundle.validate_claim(validation_claim)
+            errors = self.bundle.validate_claim(validation_claim, messages)
             if errors:
                 raise AgentJournalError(f"{label} evidence is invalid: " + "; ".join(errors))
 
@@ -357,10 +356,9 @@ class AgentJournalCompiler:
         lines.extend(["", "# Citations", ""])
         for citation in page.citations:
             source = citation.source
-            link = self._citation_link(page.path, str(source["source_turn_id"]))
             lines.extend([
                 (
-                    f"[{citation.number}] [{source['source_turn_id']}]({link}), "
+                    f"[{citation.number}] {source['source_turn_id']}, "
                     f"`{source['source_message_id']}`, `{source['evidence_type']}`:"
                 ),
                 f"\"{source['source_quote']}\"",
@@ -520,10 +518,6 @@ class AgentJournalCompiler:
         segments = page_id.split(".")
         return self.bundle.pages_dir.joinpath(*segments).with_suffix(".md")
 
-    def _citation_link(self, page_path: Path, turn_id: str) -> str:
-        target = self.bundle.turns_dir / f"{turn_id}.md"
-        return os.path.relpath(target, start=page_path.parent)
-
     def _reject_extra_keys(self, value: Mapping[str, Any], allowed: set[str], label: str) -> None:
         extra = sorted(str(key) for key in value.keys() if key not in allowed)
         if extra:
@@ -589,18 +583,23 @@ class AgentJournalCompiler:
         )
 
     def compile_section(
-        self, plan: Mapping[str, Any], *, timestamp: str, title: str
+        self,
+        plan: Mapping[str, Any],
+        *,
+        timestamp: str,
+        title: str | None = None,
+        messages: Sequence[Any] | None = None,
     ) -> str:
         """Validate a plan and return a daily journal section string.
 
         Reuses the same claim validation as apply_plan() but outputs a
         ``## HH:MM - Title`` section instead of writing files.
         """
-        pages = self._compile_plan(plan)
+        pages = self._compile_plan(plan, messages)
         if len(pages) != 1:
             raise AgentJournalError("compile_section requires exactly one page in the plan")
         page = pages[0]
-        lines = [f"## {timestamp} - {title}", ""]
+        lines = [f"## {timestamp} - {title or page.title}", ""]
         lines.append(page.summary)
         lines.append("")
         lines.append("**Claims:**")
@@ -620,7 +619,7 @@ class AgentJournalCompiler:
 
 
 def compile_journal_plan(
-    bundle: AgentJournalBundle, plan: Mapping[str, Any]
+    bundle: AgentJournalBundle, plan: Mapping[str, Any], messages: Sequence[Any] | None = None
 ) -> AgentJournalCompileResult:
     """Apply a structured AgentJournal update plan to a bundle."""
-    return AgentJournalCompiler(bundle).apply_plan(plan)
+    return AgentJournalCompiler(bundle).apply_plan(plan, messages)

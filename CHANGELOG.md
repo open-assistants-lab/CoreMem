@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.10.0] — 2026-06-28 — AgentJournal: replace observer/reflector with deterministic compiler + dreaming + BM25 search
+
+### Breaking changes
+- **Observer/reflector pipeline removed.** `ObserverPipeline`, `ReflectorPipeline`, `ToolExtractor` deleted. No more LLM-based observation extraction per turn.
+- **`coremem/migrations/` removed.** Observer-specific schema migrations deleted.
+- **Old source deleted:** `coremem/observer.py`, `coremem/observer_utils.py`, `coremem/reflector.py`, `coremem/tool_extractor.py`.
+- **Old test files deleted:** `test_observer.py`, `test_observer_gleaning.py`, `test_reflector.py`, `test_pipelines.py`, `test_tool_extractor.py`.
+- **Old scripts deleted:** `scripts/judge_prompts.py`, `scripts/verify_prompts.py`, `benchmarks/longmemeval/`.
+
+### Added
+- **`coremem/agent_journal/`** — new module replacing observer/reflector architecture:
+  - `AgentJournalBundle` — file-based journal bundle (daily pages, agent context manifest, linting)
+  - `AgentJournalCompiler` — deterministic compiler: validates exact quotes, enforces evidence-type role constraints, applies structured plans without LLM calls
+  - `AgentJournalLLMCompiler` — LLM-backed compiler with retry loop, quote-fixing post-processor, caching, auto-extract fallback
+  - `AgentJournalSearch` — BM25 + stemming + fuzzy matching (Levenshtein) + stopword filtering + cross-encoder re-ranking
+  - `CrossEncoderReranker` — sigmoid-normalized cross-encoder re-ranker with public `load()` method
+  - `dream()` — diary study consolidation: events/emotions/cognitions/behaviors/context analysis, 7-day chunking, dedup, cursor tracking
+  - `rebuild_index()` — generates `weekly/`, `monthly/`, `index.md` navigation from daily pages
+- **Daily journal format** — `daily/YYYY-MM-DD.md` with timestamped sections (`## HH:MM - Title`), citations excluded from BM25
+- **`MemoryCore.compile_turn()`** — async method compiling a turn into a daily journal entry
+- **`MemoryCore.search_journal()`** — searches compiled journal pages via BM25 + cross-encoder
+- **`MemoryCore.dream()`** — async consolidation across diary pages
+- **`MemoryCore.rebuild_index()`** — regenerate weekly/monthly/index navigation
+- **`ingest_turn()`** — batch-ingest a list of messages under one `turn_id`; returns the `turn_id`
+- **`ingest()` auto-generates `turn_id`** — user messages start a new turn, assistant/tool messages join the current turn
+
+### Renamed
+- **`AgentMemory*` → `AgentJournal*`** — `AgentMemoryBundle` → `AgentJournalBundle`, `AgentMemorySearch` → `AgentJournalSearch`, `AgentMemoryCompiler` → `AgentJournalCompiler`, `AgentMemoryLLMCompiler` → `AgentJournalLLMCompiler`, `AgentMemoryError` → `AgentJournalError`, `AgentMemoryCompileResult` → `AgentJournalCompileResult`
+- **`MemoryCore.search_memory()` → `MemoryCore.search_journal()`**
+- **`MemoryCore.search()` → `MemoryCore.search_messages()`**
+- **`MemoryCore.search_enhanced()` → `MemoryCore.search_messages_deep()`**
+- **`compile_memorypack_plan` → `compile_journal_plan`**
+- **`coremem/agent_memory/` → `coremem/agent_journal/`** (directory)
+- **`MemoryPack` → `AgentJournal`** in all docstrings, LLM prompts, generated file headers, error messages
+- **`agent_memory-turn` code block marker → `agent_journal-turn`**
+- **`SCHEMA_VERSION`**: `"memorypack-poc-0.1"` → `"agent-journal-0.1"`
+- **Frontmatter field**: `agent_memory_version` → `agent_journal_version` (lint accepts both for migration)
+- **Test files**: `test_memorypack*.py` → `test_agent_journal*.py`
+- **Eval scripts**: `eval_memorypack*.py` → `eval_agent_journal*.py`
+- **Journal path**: directory name `agent_memory/` → `agent_journal/` (still co-located with HybridDB)
+
+### Changed
+- `MemoryCore.__init__()` docstring clarifies two-tier model: HybridDB for raw messages, AgentJournal for compiled pages
+- `MemoryCore.compile_turn()` now derives the display timestamp from the first message and no longer requires `timestamp` or `title` arguments; omitted titles use the generated AgentJournal page title.
+- `MemoryCore.compile_turn()` is now idempotent for unchanged turns and returns `AgentJournalCompileResult | None`.
+- Added `MemoryCore.compile_latest_turn(session_id=...)` and `MemoryCore.compile_uncompiled_turns(...)` for explicit compile automation.
+- HybridDB table schema includes `turn_id TEXT` column + index (auto-created if missing)
+- HybridDB table schema includes a `compiled_turns` ledger to prevent duplicate AgentJournal sections for unchanged turns.
+- `coremem/__init__.py` exports only `MemoryCore` and top-level utilities (no AgentJournal classes)
+
+### Fixed
+- `MemoryCore.compile_turn()` now uses `HybridDB.raw_query()` for SQL lookup instead of calling `query()` with raw SQL.
+
+### Tests
+- 92 tests pass
+
 ## [0.9.1] — 2026-06-15 — Observer bug fixes: importance, watermark, decay, metadata, timestamp
 
 ### Fixed
