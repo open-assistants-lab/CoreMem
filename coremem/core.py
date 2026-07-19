@@ -25,6 +25,7 @@ from coremem.agent_journal import (
     dream,
     rebuild_index,
 )
+from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import LLMProvider, expand_queries
 from coremem.rerank import get_cross_encoder, rerank
@@ -135,7 +136,12 @@ class MemoryCore:
         hits = core.search_journal("coffee")
     """
 
-    def __init__(self, path: str, llm_provider: LLMProvider | None = None):
+    def __init__(
+        self,
+        path: str,
+        llm_provider: LLMProvider | None = None,
+        agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
+    ):
         self._db = HybridDB(path=path)
         self._heuristics = SearchHeuristics()
         self._llm_provider = llm_provider
@@ -143,11 +149,14 @@ class MemoryCore:
         workspace_root = Path(path).resolve().parent
         self._agent_journal_root = workspace_root / "agent_journal"
         self._agent_journal_bundle = AgentJournalBundle(self._agent_journal_root)
-        self._journal_compiler = AgentJournalLLMCompiler(self._agent_journal_bundle)
-        self._reranker = CrossEncoderReranker()
+        self._journal_compiler = AgentJournalLLMCompiler(
+            self._agent_journal_bundle,
+            model=agent_journal_model,
+        )
+        self._reranker: CrossEncoderReranker | None = None
         self._agent_journal_search = AgentJournalSearch(
             self._agent_journal_root,
-            reranker=self._reranker,
+            reranker=None,
         )
 
     def _ensure_tables(self) -> None:
@@ -471,7 +480,7 @@ class MemoryCore:
                 )
         session_id = rows[0]["session_id"]
         if timestamp is None:
-            timestamp = self._display_timestamp(rows[0].get("ts"))
+            timestamp = self._full_timestamp(rows[0].get("ts"))
         result = await self._journal_compiler.compile_session(
             turn_id=turn_id,
             session_id=session_id,
@@ -620,11 +629,11 @@ class MemoryCore:
             ),
         )
 
-    def _display_timestamp(self, ts: str | None) -> str | None:
+    def _full_timestamp(self, ts: str | None) -> str | None:
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts).strftime("%H:%M")
+            return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M")
         except ValueError:
             return None
 

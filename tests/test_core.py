@@ -81,6 +81,14 @@ def test_core_ingest_single():
         core._test_cleanup()
 
 
+def test_memorycore_accepts_custom_agent_journal_model():
+    core = _tmp_core(agent_journal_model="deepseek:test-model")
+    try:
+        assert core._journal_compiler.provider._model == "test-model"
+    finally:
+        core._test_cleanup()
+
+
 def test_core_fetch():
     core = _tmp_core()
     try:
@@ -172,7 +180,7 @@ def test_compile_turn_derives_timestamp_and_allows_default_title():
         call = calls[0]
         assert call["turn_id"] == turn_id
         assert call["session_id"] == "s1"
-        assert call["timestamp"] == "14:05"
+        assert call["timestamp"] == "2026-06-28 14:05"
         assert call["title"] is None
         assert [m["role"] for m in call["messages"]] == ["user", "assistant"]
     finally:

@@ -10,7 +10,6 @@ from coremem.agent_journal.bundle import (
 from coremem.agent_journal.compiler import (
     AgentJournalCompiler,
     AgentJournalCompileResult,
-    compile_journal_plan,
 )
 from coremem.agent_journal.dreaming import dream
 from coremem.agent_journal.embeddings import EmbeddingIndex
@@ -27,7 +26,6 @@ __all__ = [
     "AgentJournalLLMCompiler",
     "AgentJournalSearch",
     "SearchHit",
-    "compile_journal_plan",
     "compute_agent_context_hash",
     "dream",
 ]

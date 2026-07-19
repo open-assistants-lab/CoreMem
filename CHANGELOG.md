@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased] — LongMemEval Oracle + S eval, 429 retry, quote sanitization, streaming loader, S dup-session fix
+
+### Added
+- **429 retry with exponential backoff** in `_OllamaCloudAdapter._post_with_retry()` — retries up to 10 times on 429 with exponential backoff (1s→2s→4s→…→120s cap), respecting server `Retry-After` header. Both `chat()` and `chat_with_tools()` use it.
+- **Quote sanitization** in `AgentJournalLLMCompiler._fix_source_quote()` — final quote is sanitized to replace `"` → `'` and newlines → spaces before storage, preventing `_require_quote` validation failures.
+- **Streaming loader** `stream_longmemeval_instances()` in eval script — uses `ijson` to yield one question at a time (2 MB peak memory vs 2.4 GB for bulk load). Enabled with `--stream` flag.
+- **`--stream` CLI flag** for eval script — streams questions one at a time for large datasets (S/M variants).
+- **Per-question JSONL output** `--jsonl-output` in streaming mode — appends one line per question per mode as they complete, flushed immediately. Crash-safe raw results collection.
+- **`ijson` dependency** for streaming JSON parsing.
+
+### Fixed
+- **Duplicate session IDs in S/M variants** — `_prepare_instance()` now uses position-based public_session_id (`lme_{index:04d}_session_{session_index:04d}`) instead of mapping raw_session_id to public_session_id. The S/M datasets have the same raw_session_id appearing multiple times within a question, which caused `UNIQUE constraint failed: messages.id` in SQLite.
+
+### Changed
+- `_OllamaCloudAdapter` now imports `asyncio` for retry sleep.
+- `_prepare_instance()` session ID generation now always uses position index, not raw session ID lookup.
+
+### LongMemEval Oracle Results (500 questions, ~2 sessions/q, k=5)
+- `memorycore`: 93.8% session_recall@5, 75.4% message_recall@5 (zero LLM calls)
+- `memorycore_deep`: **95.1% session_recall@5, 85.4% message_recall@5** (1 LLM call/q for query expansion)
+- `memorycore_journal`: 66.6% session_recall@5, 60.0% message_recall@5 (1 LLM call/q for journal compilation)
+- All 3 modes: 0% abstention false positive rate
+- Results: `eval_output/lme-oracle/results.json`
+
+### LongMemEval S Results (500 questions, ~48 sessions/q, k=5, memorycore only)
+- `memorycore`: 86.5% session_recall@5, 67.0% message_recall@5, 96.8% session_hit@5 (zero LLM calls)
+- `memorycore_deep` and `memorycore_journal` not yet run on S — need bigger VM (cross-encoder ~500 MB RAM)
+- Best types: single-session-assistant (1.0), single-session-user (0.969), knowledge-update (0.931)
+- Hardest types: multi-session (0.779), temporal-reasoning (0.796)
+- Results: `eval_output/lme-s/results.json`, `eval_output/lme-s/results.jsonl`
+
 ## [0.10.0] — 2026-06-28 — AgentJournal: replace observer/reflector with deterministic compiler + dreaming + BM25 search
 
 ### Breaking changes

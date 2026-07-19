@@ -1,6 +1,6 @@
 # CoreMem
 
-> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **93.0% R@5 on LongMemEval (500 questions)** with `search_enhanced`, **75.4%** with the zero-LLM `search()` path.
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **95.1% R@5 on LongMemEval Oracle (500 questions)** with `search_messages_deep`, **93.8%** with the zero-LLM `search_messages()` path.
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
@@ -36,21 +36,40 @@ CoreMem solves all three:
 | **MMR session diversity** | One result per session, preventing cross-encoder overfit |
 | **Score normalization** | Per-sub-query normalization in enhanced search for balanced merging |
 
-## LongMemEval Results (500 questions, zero LLM tuning)
+## LongMemEval Oracle Results (500 questions, ~2 sessions each, k=5)
 
-| Mode | R@5 | MRR | Rank@1 |
-|------|-----|-----|--------|
-| `search()` | 75.4% | 0.562 | 45.8% |
-| `search_enhanced()` | **93.0%** | 0.892 | 86.6% |
+| Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
+|------|-------------|-------------------|-------------------|------------------|
+| `search_messages()` | 0 | 93.8% | 75.4% | 6.0% |
+| `search_messages_deep()` | 1 | **95.1%** | **85.4%** | **6.0%** |
+| `search_journal()` | 1 | 66.6% | 60.0% | 28.0% |
 
-| Question type | `search` | `search_enhanced` |
-|---------------|----------|-------------------|
-| multi-session | 76.7% | **96.2%** |
-| knowledge-update | 82.1% | **97.4%** |
-| single-session-user | 72.9% | **94.3%** |
-| temporal-reasoning | 74.4% | **91.7%** |
-| single-session-assistant | 76.8% | **89.3%** |
-| single-session-preference | 60.0% | **76.7%** |
+`search_messages_deep` is the best overall — highest on every message-level metric, uses 20% less context. `search_messages` (zero-LLM) achieves 93.8% session recall with no API calls. `search_journal` is a supplementary fast-path for human/agent skimming — 79% hit rate in healthy batches, empty_retrieval inflated by a 429-damaged eval batch.
+
+All three modes abstain correctly on unanswerable questions (0% false positive rate).
+
+Results: `eval_output/lme-oracle/results.json`
+
+## LongMemEval S Results (500 questions, ~48 sessions each, k=5, memorycore only)
+
+| Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
+|------|-------------|-------------------|-------------------|------------------|
+| `search_messages()` | 0 | **86.5%** | 67.0% | 6.0% |
+| `search_messages_deep()` | 1 | *not yet run* | *not yet run* | — |
+| `search_journal()` | 1 | *not yet run* | *not yet run* | — |
+
+Zero-LLM `search_messages` holds at 86.5% session recall even with ~48 sessions to search through (vs ~2 in oracle). Near-perfect on single-session types (0.97–1.0), harder on multi-session and temporal-reasoning (0.78–0.80).
+
+| Question type | session_recall@5 | message_recall@5 | n |
+|---------------|-------------------|-------------------|---|
+| single-session-assistant | **100.0%** | 85.7% | 56 |
+| single-session-user | 96.9% | 89.8% | 70 |
+| knowledge-update | 93.1% | 73.8% | 78 |
+| single-session-preference | 86.7% | 54.4% | 30 |
+| temporal-reasoning | 79.6% | 58.8% | 133 |
+| multi-session | 77.9% | 53.9% | 133 |
+
+Results: `eval_output/lme-s/results.json`, `eval_output/lme-s/results.jsonl`
 
 ## Installation
 

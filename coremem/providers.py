@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Protocol
 
@@ -232,6 +233,26 @@ class _OllamaCloudAdapter:
         self._base_url = base_url.rstrip("/")
         self._tool_temp = tool_temp
 
+    async def _post_with_retry(
+        self, client: httpx.AsyncClient, url: str, *, json: dict, headers: dict,
+        max_retries: int = 10,
+    ) -> dict[str, Any]:
+        for attempt in range(max_retries):
+            resp = await client.post(url, json=json, headers=headers)
+            if resp.status_code == 429:
+                server_hint = resp.headers.get("Retry-After")
+                if server_hint:
+                    delay = min(int(server_hint), 120)
+                else:
+                    delay = min(2 ** attempt, 120)
+                await asyncio.sleep(delay)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        resp = await client.post(url, json=json, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
     async def chat(self, messages: list[dict[str, Any]]) -> ChatResponse:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -243,12 +264,9 @@ class _OllamaCloudAdapter:
             "stream": False,
         }
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            resp = await client.post(
-                f"{self._base_url}/api/chat",
-                json=body, headers=headers,
+            data = await self._post_with_retry(
+                client, f"{self._base_url}/api/chat", json=body, headers=headers,
             )
-            resp.raise_for_status()
-            data = resp.json()
         content = data.get("message", {}).get("content", "")
         return ChatResponse(
             content=content,
@@ -270,12 +288,9 @@ class _OllamaCloudAdapter:
             "temperature": self._tool_temp,
         }
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            resp = await client.post(
-                f"{self._base_url}/api/chat",
-                json=body, headers=headers,
+            data = await self._post_with_retry(
+                client, f"{self._base_url}/api/chat", json=body, headers=headers,
             )
-            resp.raise_for_status()
-            data = resp.json()
         content = data.get("message", {}).get("content", "")
         tool_calls_data = data.get("message", {}).get("tool_calls", [])
         formatted_tool_calls = None
@@ -400,6 +415,7 @@ class _GeminiAdapter:
 
 _PROVIDER_META: dict[str, dict[str, str]] = {
     "openai": {"env_key": "OPENAI_API_KEY", "base_url": "https://api.openai.com"},
+    "deepseek": {"env_key": "DEEPSEEK_API_KEY", "base_url": "https://api.deepseek.com"},
     "anthropic": {"env_key": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com"},
     "gemini": {"env_key": "GEMINI_API_KEY", "base_url": "https://generativelanguage.googleapis.com"},
     "ollama": {"env_key": "", "base_url": "http://localhost:11434"},
@@ -421,8 +437,8 @@ def create_provider(model_string: str, **kwargs: Any) -> LLMProvider:
     """Create an LLM provider from a ``provider_prefix:model_name`` string.
 
     Args:
-        model_string: e.g. ``"openai:gpt-4o-mini"``, ``"ollama:llama3.2"``,
-            ``"anthropic:claude-sonnet-4-20250514"``.
+        model_string: e.g. ``"openai:gpt-4o-mini"``, ``"deepseek:deepseek-v4-flash"``,
+            ``"ollama:llama3.2"``, ``"anthropic:claude-sonnet-4-20250514"``.
         **kwargs: passed to the provider adapter constructor (e.g. ``tool_temp=0.1``).
 
     Returns:
@@ -442,7 +458,7 @@ def create_provider(model_string: str, **kwargs: Any) -> LLMProvider:
         base_url = os.environ.get(f"{prefix.upper()}_BASE_URL", f"https://api.{prefix}.com")
     else:
         api_key = os.environ.get(meta["env_key"], "")
-        base_url = meta["base_url"]
+        base_url = os.environ.get(f"{prefix.upper()}_BASE_URL", meta["base_url"])
 
     cls = _PROVIDER_CLASSES.get(prefix, _OpenAIAdapter)
     return cls(model=model, api_key=api_key, base_url=base_url, **kwargs)

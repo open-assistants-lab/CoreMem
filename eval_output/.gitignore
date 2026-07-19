@@ -1,0 +1,5 @@
+# Per-question instance data (HybridDB, vectors) — too large for git
+**/instances/
+# Checkpoint files — intermediate, results.json is the final output
+**/*.checkpoint.json
+.DS_Store

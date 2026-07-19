@@ -1,0 +1,186 @@
+{
+  "complete": true,
+  "completed_question_ids": [
+    "c8090214_abs",
+    "e01b8e2f",
+    "f0853d11"
+  ],
+  "dataset": "/tmp/longmemeval_mini.json",
+  "evaluation_scope": "per_question_haystack",
+  "journal_llm_model": "ollama-cloud:deepseek-v4-flash",
+  "k": 5,
+  "mode": "memorycore_journal",
+  "modes": {
+    "memorycore_journal": {
+      "metrics": {
+        "abstention_false_positive_rate": 0.0,
+        "abstention_question_count": 1,
+        "answerable_question_count": 2,
+        "by_question_type": {
+          "single-session-user": {
+            "abstention_false_positive_rate": 0.0,
+            "context_chars_mean": 7360.0,
+            "count": 1,
+            "empty_retrieval_rate": 0.0,
+            "message_hit@5": 1.0,
+            "message_mrr": 1.0,
+            "message_recall@5": 1.0,
+            "session_hit@5": 1.0,
+            "session_map": 1.0,
+            "session_mrr": 1.0,
+            "session_precision@5": 0.2,
+            "session_recall@5": 1.0
+          },
+          "temporal-reasoning": {
+            "abstention_false_positive_rate": 0.0,
+            "context_chars_mean": 758.0,
+            "count": 2,
+            "empty_retrieval_rate": 0.5,
+            "message_hit@5": 1.0,
+            "message_mrr": 1.0,
+            "message_recall@5": 1.0,
+            "session_hit@5": 1.0,
+            "session_map": 1.0,
+            "session_mrr": 1.0,
+            "session_precision@5": 0.2,
+            "session_recall@5": 1.0
+          }
+        },
+        "context_chars_mean": 2958.667,
+        "context_chars_total": 8876,
+        "empty_retrieval_rate": 0.333,
+        "message_hit@5": 1.0,
+        "message_mrr": 1.0,
+        "message_recall@5": 1.0,
+        "message_scored_question_count": 2,
+        "question_count": 3,
+        "session_hit@5": 1.0,
+        "session_map": 1.0,
+        "session_mrr": 1.0,
+        "session_precision@5": 0.2,
+        "session_recall@5": 1.0,
+        "session_scored_question_count": 2
+      },
+      "results": [
+        {
+          "context_chars": 7360,
+          "journal_compile": {
+            "compiler": "llm",
+            "errors": [],
+            "llm_model": "ollama-cloud:deepseek-v4-flash",
+            "pages": 1
+          },
+          "journal_hit_count": 1,
+          "journal_top_score": 1.4142353981873261,
+          "mode": "memorycore_journal",
+          "query": "Where did I go on a week-long trip with my family?",
+          "question_id": "e01b8e2f",
+          "question_type": "single-session-user",
+          "retrieved_message_ids": [
+            "lme_0000_session_0000_turn_0002_user",
+            "lme_0000_session_0000_turn_0004_user",
+            "lme_0000_session_0000_turn_0005_assistant",
+            "lme_0000_session_0000_turn_0006_user",
+            "lme_0000_session_0000_turn_0008_user",
+            "lme_0000_session_0000_turn_0009_assistant",
+            "lme_0000_session_0000_turn_0010_user",
+            "lme_0000_session_0000_turn_0011_assistant"
+          ],
+          "retrieved_page_ids": [
+            "2023-05-22.md"
+          ],
+          "retrieved_scores": [
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261,
+            1.4142353981873261
+          ],
+          "retrieved_session_ids": [
+            "lme_0000_session_0000"
+          ],
+          "retrieved_turn_ids": [
+            "lme_0000__0000_lme_0000_session_0000"
+          ],
+          "top_score": 1.4142353981873261
+        },
+        {
+          "context_chars": 0,
+          "journal_compile": {
+            "compiler": "llm",
+            "errors": [],
+            "llm_model": "ollama-cloud:deepseek-v4-flash",
+            "pages": 1
+          },
+          "mode": "memorycore_journal",
+          "query": "How many days before I bought my iPad did I attend the Holiday Market?",
+          "question_id": "c8090214_abs",
+          "question_type": "temporal-reasoning",
+          "retrieved_message_ids": [],
+          "retrieved_page_ids": [],
+          "retrieved_scores": [],
+          "retrieved_session_ids": [],
+          "retrieved_turn_ids": [],
+          "top_score": 0.0,
+          "used_reference_search": false
+        },
+        {
+          "context_chars": 1516,
+          "journal_compile": {
+            "compiler": "llm",
+            "errors": [],
+            "llm_model": "ollama-cloud:deepseek-v4-flash",
+            "pages": 1
+          },
+          "journal_hit_count": 1,
+          "journal_top_score": 2.005056868603321,
+          "mode": "memorycore_journal",
+          "query": "How many days had passed between the 'Walk for Hunger' event and the 'Coastal Cleanup' event?",
+          "question_id": "f0853d11",
+          "question_type": "temporal-reasoning",
+          "retrieved_message_ids": [
+            "lme_0002_session_0000_turn_0000_user",
+            "lme_0002_session_0000_turn_0002_user",
+            "lme_0002_session_0000_turn_0004_user",
+            "lme_0002_session_0000_turn_0006_user",
+            "lme_0002_session_0000_turn_0008_user",
+            "lme_0002_session_0000_turn_0010_user"
+          ],
+          "retrieved_page_ids": [
+            "2023-03-14.md"
+          ],
+          "retrieved_scores": [
+            2.005056868603321,
+            2.005056868603321,
+            2.005056868603321,
+            2.005056868603321,
+            2.005056868603321,
+            2.005056868603321
+          ],
+          "retrieved_session_ids": [
+            "lme_0002_session_0000"
+          ],
+          "retrieved_turn_ids": [
+            "lme_0002__0000_lme_0002_session_0000"
+          ],
+          "top_score": 2.005056868603321
+        }
+      ]
+    }
+  },
+  "summary": {
+    "memorycore_journal": {
+      "abstention_false_positive_rate": 0.0,
+      "empty_retrieval_rate": 0.333,
+      "message_hit@5": 1.0,
+      "message_recall@5": 1.0,
+      "session_hit@5": 1.0,
+      "session_map": 1.0,
+      "session_mrr": 1.0,
+      "session_recall@5": 1.0
+    }
+  }
+}

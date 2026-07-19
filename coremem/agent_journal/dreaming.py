@@ -72,7 +72,7 @@ def _validate_output(text: str) -> bool:
 
 async def dream(
     bundle: AgentJournalBundle,
-    model: str = "ollama-cloud:deepseek-v4-flash",
+    model: str = "openai:gpt-4o-mini",
     max_retries: int = 1,
 ) -> dict[str, Any]:
     """Run dreaming consolidation on unprocessed daily pages.

@@ -17,6 +17,7 @@ import math
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from coremem import MemoryCore
-from coremem.agent_journal import AgentJournalBundle, CrossEncoderReranker
+from coremem.agent_journal import AgentJournalBundle, AgentJournalLLMCompiler, CrossEncoderReranker
 from coremem.providers import create_provider
 from coremem.types import Memory
 
@@ -32,7 +33,6 @@ _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
 MODES = ("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal")
-JOURNAL_COMPILERS = ("none", "verbatim", "llm")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -120,6 +120,37 @@ def load_longmemeval_instances(
     return result
 
 
+def stream_longmemeval_instances(
+    data_path: str | Path,
+    *,
+    question_types: Sequence[str] | None = None,
+    limit: int | None = None,
+    skip_indices: set[int] | None = None,
+) -> Iterable[tuple[int, dict[str, Any]]]:
+    """Stream LongMemEval JSON one instance at a time via ijson (low memory).
+
+    Yields (index, raw_instance) tuples. Index is the position in the original
+    array (before filtering), matching the index used by _prepare_instance.
+    """
+    import ijson
+
+    skip = skip_indices or set()
+    allowed_types = set(question_types) if question_types else None
+    count = 0
+    with open(data_path, "rb") as f:
+        for index, obj in enumerate(ijson.items(f, "item")):
+            if index in skip:
+                count += 1
+                continue
+            if allowed_types and obj.get("question_type") not in allowed_types:
+                count += 1
+                continue
+            if limit is not None and count >= limit:
+                break
+            yield index, obj
+            count += 1
+
+
 def prepare_instances(
     raw_instances: Sequence[Mapping[str, Any]],
 ) -> tuple[list[PreparedInstance], dict[str, QuestionTruth]]:
@@ -172,65 +203,21 @@ def build_memorycore(
     return core
 
 
-def compile_eval_journal(core: MemoryCore, instance: PreparedInstance, *, compiler: str = "verbatim") -> dict[str, Any]:
-    """Compile per-session journal pages for LongMemEval journal retrieval."""
-    if compiler not in JOURNAL_COMPILERS:
-        raise ValueError(f"unknown journal compiler: {compiler}; choose from {JOURNAL_COMPILERS}")
-    if compiler == "none":
-        return {"compiler": compiler, "pages": 0, "errors": []}
-    if compiler == "llm":
-        summary = asyncio.run(core.compile_uncompiled_turns(limit=max(1, len(instance.sessions))))
-        compiled = summary.get("compiled", [])
-        errors = summary.get("errors", [])
-        return {"compiler": compiler, "pages": len(compiled), "errors": errors}
-
-    journal_root = core._agent_journal_root  # noqa: SLF001 - eval harness writes fixture pages directly.
-    pages_dir = journal_root / "pages"
-    pages_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-    for session in instance.sessions:
-        page_id = _safe_identifier(session.session_id)
-        path = pages_dir / f"{page_id}.md"
-        path.write_text(_render_eval_journal_page(instance, session), encoding="utf-8")
-        written += 1
-    return {"compiler": compiler, "pages": written, "errors": []}
-
-
-def _render_eval_journal_page(instance: PreparedInstance, session: PreparedSession) -> str:
-    frontmatter = [
-        "---",
-        f"title: LongMemEval Session {session.session_id}",
-        "memory_kind: transcript",
-        "scope: user",
-        f"question_id: {instance.question_id}",
-        f"session_id: {session.session_id}",
-        f"turn_id: {session.turn_id}",
-        "agent_journal_version: eval-verbatim-v1",
-        "---",
-        "",
-    ]
-    lines = [
-        *frontmatter,
-        f"# LongMemEval Session {session.session_id}",
-        "",
-        f"Question ID: {instance.question_id}",
-        f"Session ID: {session.session_id}",
-        f"Source Turn ID: {session.turn_id}",
-        "",
-        "## Messages",
-        "",
-    ]
-    for msg in session.messages:
-        lines.extend([
-            f"### {msg.id} ({msg.role})",
-            "",
-            f"Source message ID: {msg.id}",
-            f"Role: {msg.role}",
-            "",
-            msg.content,
-            "",
-        ])
-    return "\n".join(lines).rstrip() + "\n"
+def compile_eval_journal(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    *,
+    llm_model: str,
+) -> dict[str, Any]:
+    """Compile sessions via LLM and write daily journal pages."""
+    core._journal_compiler = AgentJournalLLMCompiler(  # noqa: SLF001
+        core._agent_journal_bundle,  # noqa: SLF001
+        model=llm_model,
+    )
+    summary = asyncio.run(core.compile_uncompiled_turns(limit=max(1, len(instance.sessions))))
+    compiled = summary.get("compiled", [])
+    errors = summary.get("errors", [])
+    return {"compiler": "llm", "llm_model": llm_model, "pages": len(compiled), "errors": errors}
 
 
 def _search_messages_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
@@ -277,21 +264,19 @@ def run_eval(
     limit: int | None = None,
     reset: bool = False,
     expand_model: str | None = None,
-    compile_journal: bool = False,
-    journal_compiler: str = "verbatim",
+    journal_llm_model: str | None = None,
+    cleanup_instances: bool = False,
     resume: bool = False,
     resume_path: str | Path | None = None,
     progress: bool = False,
+    stream: bool = False,
+    jsonl_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load data, run canonical per-question LongMemEval retrieval, and score modes."""
     if k <= 0:
         raise ValueError("k must be positive")
     if mode not in MODES and mode != "all":
         raise ValueError(f"unknown mode: {mode}; choose from {MODES} or 'all'")
-    if journal_compiler not in JOURNAL_COMPILERS:
-        raise ValueError(f"unknown journal compiler: {journal_compiler}; choose from {JOURNAL_COMPILERS}")
-    if compile_journal:
-        journal_compiler = "llm"
 
     root = Path(root)
     if reset and root.exists():
@@ -299,13 +284,13 @@ def run_eval(
     elif root.exists() and any(root.iterdir()) and not resume:
         raise FileExistsError(f"bundle root already exists: {root}")
 
-    raw_instances = load_longmemeval_instances(data_path, question_types=question_types, limit=limit)
-    prepared, truth_by_question_id = prepare_instances(raw_instances)
-
     llm_provider = create_provider(expand_model) if expand_model else None
 
     # ── BM25 baseline (separate bundle, in-memory messages) ──
+    # Streaming not supported for raw_bm25 (needs all messages in memory)
     if mode == "raw_bm25":
+        raw_instances = load_longmemeval_instances(data_path, question_types=question_types, limit=limit)
+        prepared, truth_by_question_id = prepare_instances(raw_instances)
         bundle = build_reference_bundle(root, prepared)
         lint_errors = bundle.lint()
         rows = [
@@ -334,6 +319,8 @@ def run_eval(
     # ── MemoryCore modes: canonical LongMemEval per-question haystack injection ──
     active_modes = MODES if mode == "all" else (mode,)
     active_modes = tuple(m for m in active_modes if m != "raw_bm25")
+    if "memorycore_journal" in active_modes and not journal_llm_model:
+        raise ValueError("--journal-llm-model is required when memorycore_journal is in modes")
     mode_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in active_modes}
     completed_question_ids: set[str] = set()
     journal_reranker = CrossEncoderReranker() if "memorycore_journal" in active_modes else None
@@ -349,7 +336,7 @@ def run_eval(
                 mode=mode,
                 k=k,
                 active_modes=active_modes,
-                journal_compiler=journal_compiler,
+                journal_llm_model=journal_llm_model,
             )
             completed_question_ids = set(str(qid) for qid in state.get("completed_question_ids", []))
             state_modes = state.get("modes", {})
@@ -363,16 +350,180 @@ def run_eval(
                             if isinstance(row, Mapping)
                         ]
 
-    for index, instance in enumerate(prepared):
+    # Open JSONL for incremental output (append mode for crash safety)
+    jsonl_file = None
+    if jsonl_path is not None:
+        jsonl_file = open(jsonl_path, "a", encoding="utf-8")
+
+    try:
+        if stream:
+            result = _run_streaming(
+                data_path=data_path,
+                root=root,
+                active_modes=active_modes,
+                k=k,
+                question_types=question_types,
+                limit=limit,
+                journal_llm_model=journal_llm_model,
+                journal_reranker=journal_reranker,
+                mode_rows=mode_rows,
+                completed_question_ids=completed_question_ids,
+                cleanup_instances=cleanup_instances,
+                resume_path=resume_path,
+                progress=progress,
+                jsonl_file=jsonl_file,
+            )
+        else:
+            raw_instances = load_longmemeval_instances(data_path, question_types=question_types, limit=limit)
+            prepared, truth_by_question_id = prepare_instances(raw_instances)
+            total = len(prepared)
+
+            for index, instance in enumerate(prepared):
+                if instance.question_id in completed_question_ids:
+                    if progress:
+                        print(f"[{index + 1}/{total}] {instance.question_id}: resumed", flush=True)
+                    continue
+                instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
+                if instance_root.exists():
+                    _safe_reset_root(instance_root)
+                if progress:
+                    print(f"[{index + 1}/{total}] {instance.question_id}: running", flush=True)
+                question_start = time.time()
+                core = build_memorycore(
+                    instance_root,
+                    instances=(instance,),
+                    journal_reranker=journal_reranker,
+                )
+                journal_summary: dict[str, Any] | None = None
+                if "memorycore_journal" in active_modes:
+                    journal_summary = compile_eval_journal(
+                        core,
+                        instance,
+                        llm_model=journal_llm_model,
+                    )
+                truth = truth_by_question_id[instance.question_id]
+
+                new_rows = _score_question(
+                    core, instance, truth,
+                    active_modes=active_modes, k=k,
+                    journal_summary=journal_summary,
+                )
+                question_elapsed = time.time() - question_start
+                instance_disk_mb = _dir_size_mb(instance_root)
+                for m in active_modes:
+                    row = new_rows.get(m)
+                    if row is not None:
+                        row["question_time_seconds"] = round(question_elapsed, 1)
+                        row["instance_disk_mb"] = round(instance_disk_mb, 1)
+                        mode_rows[m].append(row)
+                        if jsonl_file is not None:
+                            jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
+                            jsonl_file.flush()
+                completed_question_ids.add(instance.question_id)
+                if cleanup_instances and instance_root.exists():
+                    shutil.rmtree(instance_root, ignore_errors=True)
+                if resume_path is not None:
+                    checkpoint = _build_mode_result(
+                        data_path=str(data_path),
+                        mode=mode,
+                        k=k,
+                        mode_rows=mode_rows,
+                        completed_question_ids=completed_question_ids,
+                        complete=False,
+                        journal_llm_model=journal_llm_model,
+                    )
+                    _write_resume_checkpoint(Path(resume_path), checkpoint, complete=False)
+            result = _build_mode_result(
+                data_path=str(data_path),
+                mode=mode,
+                k=k,
+                mode_rows=mode_rows,
+                completed_question_ids=completed_question_ids,
+                complete=True,
+                journal_llm_model=journal_llm_model,
+            )
+    finally:
+        if jsonl_file is not None:
+            jsonl_file.close()
+
+    if resume_path is not None:
+        _write_resume_checkpoint(Path(resume_path), result, complete=True)
+    return result
+
+
+def _score_question(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    active_modes: Sequence[str],
+    k: int,
+    journal_summary: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Score one question across all active modes. Returns {mode: row}."""
+    new_rows: dict[str, dict[str, Any]] = {}
+    for m in active_modes:
+        if m == "memorycore":
+            new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=False)
+        elif m == "memorycore_deep":
+            new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
+        elif m == "memorycore_journal":
+            row = _score_instance_journal(core, instance, truth, k=k)
+            row["journal_compile"] = journal_summary or {"compiler": "llm", "pages": 0, "errors": []}
+            new_rows[m] = row
+    return new_rows
+
+
+def _run_streaming(
+    *,
+    data_path: str | Path,
+    root: Path,
+    active_modes: Sequence[str],
+    k: int,
+    question_types: Sequence[str] | None,
+    limit: int | None,
+    journal_llm_model: str | None,
+    journal_reranker: CrossEncoderReranker | None,
+    mode_rows: dict[str, list[dict[str, Any]]],
+    completed_question_ids: set[str],
+    cleanup_instances: bool,
+    resume_path: str | Path | None,
+    progress: bool,
+    jsonl_file: Any,
+) -> dict[str, Any]:
+    """Stream questions one at a time from the JSON file via ijson.
+
+    Each question is loaded, prepared, scored, and its instance cleaned up
+    before the next question is loaded. This keeps peak memory low enough
+    for the S variant (265 MB JSON, ~2.4 GB if loaded all at once).
+    """
+    # Build a set of completed question IDs to skip during streaming
+    # We also need to track the global index for instance dir naming
+    skip_indices: set[int] = set()
+    # On resume, we don't know which indices were completed (only question IDs).
+    # We stream all questions, skip by question_id, and rebuild skip_indices as we go.
+    total_yielded = 0
+
+    for index, raw_obj in stream_longmemeval_instances(
+        data_path,
+        question_types=question_types,
+        limit=limit,
+        skip_indices=skip_indices,
+    ):
+        instance, truth = _prepare_instance(raw_obj, index)
+
         if instance.question_id in completed_question_ids:
             if progress:
-                print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: resumed", flush=True)
+                print(f"[{index + 1}] {instance.question_id}: resumed", flush=True)
             continue
+
         instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
         if instance_root.exists():
             _safe_reset_root(instance_root)
         if progress:
-            print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: running", flush=True)
+            print(f"[{index + 1}] {instance.question_id}: running", flush=True)
+
+        question_start = time.time()
         core = build_memorycore(
             instance_root,
             instances=(instance,),
@@ -380,45 +531,54 @@ def run_eval(
         )
         journal_summary: dict[str, Any] | None = None
         if "memorycore_journal" in active_modes:
-            journal_summary = compile_eval_journal(core, instance, compiler=journal_compiler)
-        truth = truth_by_question_id[instance.question_id]
+            journal_summary = compile_eval_journal(
+                core,
+                instance,
+                llm_model=journal_llm_model,
+            )
 
+        new_rows = _score_question(
+            core, instance, truth,
+            active_modes=active_modes, k=k,
+            journal_summary=journal_summary,
+        )
+        question_elapsed = time.time() - question_start
+        instance_disk_mb = _dir_size_mb(instance_root)
         for m in active_modes:
-            if m == "memorycore":
-                row = _score_instance_memorycore(core, instance, truth, k=k, deep=False)
-            elif m == "memorycore_deep":
-                row = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
-            elif m == "memorycore_journal":
-                row = _score_instance_journal(core, instance, truth, k=k)
-                row["journal_compile"] = journal_summary or {"compiler": journal_compiler, "pages": 0, "errors": []}
-            else:
-                continue
-            mode_rows[m].append(row)
+            row = new_rows.get(m)
+            if row is not None:
+                row["question_time_seconds"] = round(question_elapsed, 1)
+                row["instance_disk_mb"] = round(instance_disk_mb, 1)
+                mode_rows[m].append(row)
+                if jsonl_file is not None:
+                    jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
+                    jsonl_file.flush()
         completed_question_ids.add(instance.question_id)
+        total_yielded += 1
+
+        if cleanup_instances and instance_root.exists():
+            shutil.rmtree(instance_root, ignore_errors=True)
         if resume_path is not None:
             checkpoint = _build_mode_result(
                 data_path=str(data_path),
-                mode=mode,
+                mode="all" if len(active_modes) > 1 else active_modes[0],
                 k=k,
                 mode_rows=mode_rows,
                 completed_question_ids=completed_question_ids,
                 complete=False,
-                journal_compiler=journal_compiler,
+                journal_llm_model=journal_llm_model,
             )
             _write_resume_checkpoint(Path(resume_path), checkpoint, complete=False)
 
-    result = _build_mode_result(
+    return _build_mode_result(
         data_path=str(data_path),
-        mode=mode,
+        mode="all" if len(active_modes) > 1 else active_modes[0],
         k=k,
         mode_rows=mode_rows,
         completed_question_ids=completed_question_ids,
         complete=True,
-        journal_compiler=journal_compiler,
+        journal_llm_model=journal_llm_model,
     )
-    if resume_path is not None:
-        _write_resume_checkpoint(Path(resume_path), result, complete=True)
-    return result
 
 
 def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[PreparedInstance, QuestionTruth]:
@@ -427,10 +587,14 @@ def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[Prep
     question_type = _string_field(stripped, "question_type", "unknown")
     query = _string_field(stripped, "question", "")
     raw_session_ids = _session_ids(stripped)
-    public_session_ids = {
-        raw_session_id: f"lme_{instance_index:04d}_session_{session_index:04d}"
-        for session_index, raw_session_id in enumerate(raw_session_ids)
-    }
+    # Each session position gets a unique public_session_id, even when the
+    # same raw_session_id appears multiple times (S/M variants).
+    # Map first occurrence of each raw_session_id for answer_session_ids lookup.
+    public_session_ids: dict[str, str] = {}
+    for session_index, raw_session_id in enumerate(raw_session_ids):
+        public_id = f"lme_{instance_index:04d}_session_{session_index:04d}"
+        if raw_session_id not in public_session_ids:
+            public_session_ids[raw_session_id] = public_id
     dates = _haystack_dates(stripped)
     sessions_raw = stripped.get("haystack_sessions", [])
     if not isinstance(sessions_raw, list):
@@ -442,7 +606,7 @@ def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[Prep
         if not isinstance(session_raw, list):
             raise ValueError(f"{question_id}: haystack_sessions[{session_index}] must be a list")
         raw_session_id = raw_session_ids[session_index] if session_index < len(raw_session_ids) else f"session_{session_index:04d}"
-        session_id = public_session_ids.get(raw_session_id, f"lme_{instance_index:04d}_session_{session_index:04d}")
+        session_id = f"lme_{instance_index:04d}_session_{session_index:04d}"
         turn_id = _turn_id(instance_index, session_id, session_index)
         ts = _parse_date(dates[session_index] if session_index < len(dates) else None)
         messages: list[Memory] = []
@@ -503,6 +667,14 @@ def _strip_ground_truth(value: Any) -> Any:
     if isinstance(value, list):
         return [_strip_ground_truth(item) for item in value]
     return value
+
+
+def _dir_size_mb(path: Path) -> float:
+    total = 0
+    for f in path.rglob("*"):
+        if f.is_file():
+            total += f.stat().st_size
+    return total / (1024 * 1024)
 
 
 def _empty_score(instance: PreparedInstance, truth: QuestionTruth, *, mode: str, k: int = 5) -> dict[str, Any]:
@@ -839,7 +1011,7 @@ def _build_mode_result(
     mode_rows: Mapping[str, Sequence[Mapping[str, Any]]],
     completed_question_ids: set[str],
     complete: bool,
-    journal_compiler: str,
+    journal_llm_model: str | None = None,
 ) -> dict[str, Any]:
     modes: dict[str, Any] = {}
     for mode_name, rows in mode_rows.items():
@@ -848,16 +1020,29 @@ def _build_mode_result(
             "results": row_list,
             "metrics": _aggregate_metrics(row_list, k=k),
         }
-    return {
+    result: dict[str, Any] = {
         "dataset": data_path,
         "evaluation_scope": "per_question_haystack",
         "mode": mode,
-        "journal_compiler": journal_compiler,
         "k": k,
         "complete": complete,
         "completed_question_ids": sorted(completed_question_ids),
         "modes": modes,
     }
+    if journal_llm_model:
+        result["journal_llm_model"] = journal_llm_model
+
+    # Cumulative stats across all modes
+    all_rows = [r for m in modes.values() for r in m.get("results", [])]
+    times = [r.get("question_time_seconds", 0) for r in all_rows if r.get("question_time_seconds") is not None]
+    disks = [r.get("instance_disk_mb", 0) for r in all_rows if r.get("instance_disk_mb") is not None]
+    if times:
+        result["cumulative_time_seconds"] = round(sum(times), 1)
+        result["mean_time_seconds"] = round(sum(times) / len(times), 1)
+    if disks:
+        result["cumulative_disk_mb"] = round(sum(disks), 1)
+        result["mean_disk_mb"] = round(sum(disks) / len(disks), 1)
+    return result
 
 
 def _load_resume_checkpoint(path: Path) -> dict[str, Any] | None:
@@ -882,7 +1067,7 @@ def _validate_resume_checkpoint(
     mode: str,
     k: int,
     active_modes: Sequence[str],
-    journal_compiler: str,
+    journal_llm_model: str | None = None,
 ) -> None:
     if state.get("dataset") != data_path:
         raise ValueError("resume checkpoint dataset does not match")
@@ -890,8 +1075,8 @@ def _validate_resume_checkpoint(
         raise ValueError("resume checkpoint mode does not match")
     if state.get("k") != k:
         raise ValueError("resume checkpoint k does not match")
-    if state.get("journal_compiler") != journal_compiler:
-        raise ValueError("resume checkpoint journal compiler does not match")
+    if journal_llm_model and state.get("journal_llm_model") != journal_llm_model:
+        raise ValueError("resume checkpoint journal LLM model does not match")
     state_modes = set((state.get("modes") or {}).keys())
     if state_modes != set(active_modes):
         raise ValueError("resume checkpoint modes do not match")
@@ -1214,24 +1399,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="LLM model for query expansion (e.g. ollama-cloud:deepseek-v4-flash). Default: no expansion.",
     )
     parser.add_argument(
-        "--compile-journal",
-        action="store_true",
-        help="Deprecated alias for --journal-compiler llm.",
-    )
-    parser.add_argument(
-        "--journal-compiler",
-        default="verbatim",
-        choices=JOURNAL_COMPILERS,
-        help="Journal compiler for memorycore_journal: verbatim is deterministic and LLM-free (default).",
+        "--journal-llm-model",
+        default=None,
+        help="LLM model for journal compilation (e.g. ollama-cloud:deepseek-v4-flash). Required for memorycore_journal mode.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint file if present")
     parser.add_argument("--resume-path", type=Path, help="Checkpoint path for resumable runs")
+    parser.add_argument("--cleanup-instances", action="store_true", help="Delete per-question instance dirs after scoring (saves disk)")
     parser.add_argument("--progress", action="store_true", help="Print per-question progress")
+    parser.add_argument("--stream", action="store_true", help="Stream questions one at a time via ijson (low memory, for large datasets like S/M)")
     args = parser.parse_args(argv)
 
     resume_path = args.resume_path
     if resume_path is None and args.output is not None:
         resume_path = args.output.with_suffix(args.output.suffix + ".checkpoint.json")
+
+    jsonl_path: Path | None = None
+    if args.jsonl_output is not None:
+        jsonl_path = args.jsonl_output
+        # In streaming mode, JSONL is appended per-question inside run_eval
+        if not args.stream:
+            # Non-streaming: JSONL written at end via _write_outputs
+            jsonl_path = None
 
     if args.root is None:
         with tempfile.TemporaryDirectory(prefix="agent-memory-longmemeval-") as tmp:
@@ -1240,16 +1429,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mode=args.mode, k=args.k,
                 question_types=args.question_types, limit=args.limit,
                 expand_model=args.expand_model,
-                compile_journal=args.compile_journal,
-                journal_compiler=args.journal_compiler,
+                journal_llm_model=args.journal_llm_model,
+                cleanup_instances=args.cleanup_instances,
                 resume=args.resume,
                 resume_path=resume_path,
                 progress=args.progress,
+                stream=args.stream,
+                jsonl_path=jsonl_path,
             )
             if "modes" in result:
                 result["summary"] = _build_summary(result["modes"], args.k)
             _write_outputs(
-                result, output=args.output, jsonl_output=args.jsonl_output,
+                result, output=args.output, jsonl_output=args.jsonl_output if not args.stream else None,
                 include_scoring=args.include_scoring,
             )
             _print_result(result, as_json=args.json, include_scoring=args.include_scoring)
@@ -1261,16 +1452,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode, k=args.k,
             question_types=args.question_types, limit=args.limit,
             reset=args.overwrite, expand_model=args.expand_model,
-            compile_journal=args.compile_journal,
-            journal_compiler=args.journal_compiler,
+            journal_llm_model=args.journal_llm_model,
+            cleanup_instances=args.cleanup_instances,
             resume=args.resume,
             resume_path=resume_path,
             progress=args.progress,
+            stream=args.stream,
+            jsonl_path=jsonl_path,
         )
         if "modes" in result:
             result["summary"] = _build_summary(result["modes"], args.k)
         _write_outputs(
-            result, output=args.output, jsonl_output=args.jsonl_output,
+            result, output=args.output, jsonl_output=args.jsonl_output if not args.stream else None,
             include_scoring=args.include_scoring,
         )
         _print_result(result, as_json=args.json, include_scoring=args.include_scoring)

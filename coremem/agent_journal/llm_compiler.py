@@ -29,6 +29,8 @@ from coremem.agent_journal.bundle import (
 from coremem.agent_journal.compiler import AgentJournalCompiler, AgentJournalCompileResult
 from coremem.providers import LLMProvider, create_provider
 
+DEFAULT_AGENT_JOURNAL_MODEL = "openai:gpt-4o-mini"
+
 SYSTEM_PROMPT = f"""You are a AgentJournal compiler. Your job is to analyze conversation turns and produce structured AgentJournal pages.
 
 Each page has this schema (output as JSON):
@@ -148,7 +150,7 @@ class AgentJournalLLMCompiler:
     def __init__(
         self,
         bundle: AgentJournalBundle,
-        model: str = "ollama-cloud:deepseek-v4-flash",
+        model: str = DEFAULT_AGENT_JOURNAL_MODEL,
         max_retries: int = 3,
         cache_dir: str | Path | None = None,
     ) -> None:
@@ -188,13 +190,19 @@ class AgentJournalLLMCompiler:
         messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> AgentJournalCompileResult:
         """Validate plan and append section to daily page."""
+        date_str: str
+        time_str: str
+        if timestamp and " " in timestamp:
+            date_str, time_str = timestamp.split(" ", 1)
+        else:
+            date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+            time_str = timestamp or "00:00"
         section = self.compiler.compile_section(
             plan,
-            timestamp=timestamp or "00:00",
+            timestamp=time_str,
             title=title,
             messages=messages,
         )
-        date_str = datetime.now(UTC).strftime("%Y-%m-%d")
         daily_dir = self.bundle.root / "daily"
         daily_dir.mkdir(parents=True, exist_ok=True)
         daily_path = daily_dir / f"{date_str}.md"
@@ -366,6 +374,12 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
                         source["source_quote"] = re_extracted
                         source["source_message_id"] = correct_mid
                         break
+        # Sanitize final quote: strip double quotes and newlines that _require_quote would reject
+        final = source.get("source_quote", "")
+        if final:
+            cleaned = final.replace('"', "'").replace("\n", " ").replace("\r", " ").strip()
+            if cleaned and len(cleaned) >= 10:
+                source["source_quote"] = cleaned[:500]
 
     def _quote_in_message(self, quote: str, content: str) -> bool:
         return quote in content or quote.casefold() in content.casefold()
