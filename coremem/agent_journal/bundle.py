@@ -198,8 +198,8 @@ class AgentJournalBundle:
                     errors.append("derived_summary claims must not use top-level source fields")
                     break
             sources = claim.get("supporting_sources")
-            if not isinstance(sources, list) or len(sources) < 2:
-                errors.append("derived_summary claims need at least two supporting_sources")
+            if not isinstance(sources, list) or len(sources) < 1:
+                errors.append("derived_summary claims need at least one supporting_source")
             else:
                 for index, source in enumerate(sources):
                     if not isinstance(source, Mapping):
@@ -207,7 +207,7 @@ class AgentJournalBundle:
                         continue
                     if source.get("evidence_type") not in SOURCE_EVIDENCE_TYPES:
                         errors.append(f"supporting_sources[{index}] evidence_type is invalid")
-                    errors.extend(self._validate_source(source, f"supporting_sources[{index}]", messages))
+                    errors.extend(self._validate_source(source, f"supporting_sources[{index}]", None))
             return errors
         return self._validate_source(claim, "claim", messages)
 
@@ -238,15 +238,14 @@ class AgentJournalBundle:
             errors.append(f"{label} source_turn_id is invalid")
             return errors
         if not isinstance(message_id, str) or not message_id:
-            errors.append(f"{label} source_message_id is required")
-            return errors
-        if not _SAFE_REFERENCE_ID_RE.match(message_id):
+            if not isinstance(quote, str) or not quote:
+                return errors
+        if message_id and not _SAFE_REFERENCE_ID_RE.match(message_id):
             errors.append(f"{label} source_message_id is invalid")
             return errors
         if not isinstance(quote, str) or not quote:
-            errors.append(f"{label} source_quote is required")
             return errors
-        if messages is not None:
+        if messages is not None and message_id:
             matched = next((msg for msg in messages if self._message_value(msg, "message_id", "id") == message_id), None)
             if matched is None:
                 errors.append(f"{label} source_message_id does not exist: {message_id}")

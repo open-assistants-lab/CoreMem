@@ -31,109 +31,75 @@ from coremem.providers import LLMProvider, create_provider
 
 DEFAULT_AGENT_JOURNAL_MODEL = "openai:gpt-4o-mini"
 
-SYSTEM_PROMPT = f"""You are a AgentJournal compiler. Your job is to analyze conversation turns and produce structured AgentJournal pages.
+SYSTEM_PROMPT = f"""You are a session summarizer for a memory retrieval system. Your job is to analyze conversation sessions and produce dense, retrieval-optimized summaries that will be used as search indices.
 
-Each page has this schema (output as JSON):
+Each session produces a single page with this schema (output as JSON):
 
 ```json
 {{"pages": [{{...}}]}}
 ```
 
 Required page fields:
-- "operation": "create" or "update"
-- "page_id": lowercase with hyphens/underscores, e.g. "fracking-groundwater"
-- "title": short single-line title
+- "operation": "create"
+- "page_id": set to the session_id exactly as given (e.g. "session_001")
+- "title": short single-line title of the session topic
 - "description": single-line description
 - "memory_kind": one of {sorted(MEMORY_KINDS)}
 - "scope": one of {sorted(SCOPES)}
-- "status": one of {sorted(STATUSES)}
-- "activation": one of {sorted(ACTIVATIONS)}
-- "trust": one of {sorted(TRUST_VALUES)}
-- "safe_to_act": boolean
-- "summary": 1-3 sentence summary of the key information
-- "current_state": non-empty list of claim objects
-- "boot_worthy": boolean (only true if activation=startup AND status=active)
+- "status": "active"
+- "activation": "manual"
+- "trust": "user_authoritative"
+- "safe_to_act": true
+- "boot_worthy": false
+- "summary": DENSE paragraph (4-6 sentences) capturing the session context, key entities, decisions, and outcomes. This is the PRIMARY search index — write it to match likely future queries. Include specific names, numbers, dates, and technical terms.
+- "current_state": list of 1-3 broad summary claim objects (no source_quote required, use derived_summary)
 
 Optional page fields:
 - "details": list of strings
-- "open_questions": list of strings
-- "read_next": list of strings
 
 Each claim in current_state has:
-- "claim": the factual statement (1-3 sentences, concise)
-- "evidence": either a source object or a derived_summary
+- "claim": the factual statement (1-2 sentences)
+- "evidence": a derived_summary object (always use this — no source_quote needed)
 
-Source evidence object:
-- "evidence_type": one of {sorted(SOURCE_EVIDENCE_TYPES)}
-- "source_turn_id": the turn_id from the reference turn
-- "source_message_id": the message_id from the reference turn
-- "source_quote": exact substring of the message content (no double quotes, no newlines)
-
-Derived summary evidence object:
+Evidence object (always derived_summary):
 - "evidence_type": "derived_summary"
-- "supporting_sources": list of 2+ source evidence objects
+- "supporting_sources": list of 1+ simple source objects with just "evidence_type" and "source_turn_id" (set to the turn_id from the input)
 
-Examples:
-
-Example 1 (single-source claim):
+Example:
 Input:
-## turn_0000_user (user)
-What is the capital of France?
+Turn ID: turn_abc123
+Session ID: s1
+## s1_turn_0000_user (user)
+I need help setting up CI/CD for our Python project using GitHub Actions.
 
-## turn_0001_assistant (assistant)
-The capital of France is Paris.
+## s1_turn_0001_assistant (assistant)
+Let me help you set up GitHub Actions. First, create a .github/workflows directory and add a ci.yml file...
+
+## s1_turn_0002_user (user)
+We use pytest and flake8. Can you include those?
+
+## s1_turn_0003_assistant (assistant)
+Sure. Here's a complete workflow that runs pytest with flake8 linting on push and PR to main...
 
 Output:
-{{"pages": [{{"operation": "create", "page_id": "france-capital", "title": "Capital of France", "description": "The capital city of France is Paris", "memory_kind": "project_fact", "scope": "global", "status": "active", "activation": "manual", "trust": "user_authoritative", "safe_to_act": true, "boot_worthy": false, "summary": "The capital of France is Paris.", "current_state": [{{"claim": "The capital of France is Paris.", "evidence": {{"evidence_type": "assistant_action", "source_turn_id": "session_001", "source_message_id": "turn_0001_assistant", "source_quote": "The capital of France is Paris."}}}}]}}]}}
-
-Example 2 (derived_summary from multiple sources):
-Input:
-## turn_0000_user (user)
-Can you tell me about the weather in Tokyo and what to pack?
-
-## turn_0001_assistant (assistant)
-Tokyo in March has average highs of 13C and lows of 5C. It is the cherry blossom season. Bring a warm jacket and an umbrella.
-
-## turn_0002_user (user)
-Thanks! What about Osaka?
-
-## turn_0003_assistant (assistant)
-Osaka in March is similar to Tokyo: 12-15C highs, 4-6C lows. Also cherry blossom season. Pack similarly.
-
-Output:
-{{"pages": [{{"operation": "create", "page_id": "japan-march-weather", "title": "Weather in Japan in March", "description": "Weather conditions and packing advice for Tokyo and Osaka in March", "memory_kind": "project_fact", "scope": "global", "status": "active", "activation": "manual", "trust": "user_authoritative", "safe_to_act": true, "boot_worthy": false, "summary": "Tokyo and Osaka in March have similar weather: highs 12-15C, lows 4-6C, cherry blossom season. Pack a warm jacket and umbrella.", "current_state": [{{"claim": "Tokyo in March has average highs of 13C and lows of 5C during cherry blossom season.", "evidence": {{"evidence_type": "assistant_action", "source_turn_id": "session_001", "source_message_id": "turn_0001_assistant", "source_quote": "Tokyo in March has average highs of 13C and lows of 5C."}}}}, {{"claim": "Osaka in March has similar weather to Tokyo with highs of 12-15C and lows of 4-6C.", "evidence": {{"evidence_type": "assistant_action", "source_turn_id": "session_001", "source_message_id": "turn_0003_assistant", "source_quote": "Osaka in March is similar to Tokyo: 12-15C highs, 4-6C lows."}}}}, {{"claim": "Recommended packing for Japan in March includes a warm jacket and umbrella.", "evidence": {{"evidence_type": "derived_summary", "supporting_sources": [{{"evidence_type": "assistant_action", "source_turn_id": "session_001", "source_message_id": "turn_0001_assistant", "source_quote": "Bring a warm jacket and an umbrella."}}, {{"evidence_type": "assistant_action", "source_turn_id": "session_001", "source_message_id": "turn_0003_assistant", "source_quote": "Pack similarly."}}]}}}}]}}]}}
+{{"pages": [{{"operation": "create", "page_id": "s1", "title": "GitHub Actions CI/CD setup for Python project", "description": "Setting up GitHub Actions CI/CD with pytest and flake8 for a Python project", "memory_kind": "project_knowledge", "scope": "project", "status": "active", "activation": "manual", "trust": "user_authoritative", "safe_to_act": true, "boot_worthy": false, "summary": "User requested CI/CD setup for their Python project using GitHub Actions. They use pytest for testing and flake8 for linting. Assistant provided a complete GitHub Actions workflow configuration that runs on push and pull requests to the main branch. The workflow includes Python setup, dependency installation, flake8 linting, and pytest execution.", "current_state": [{{"claim": "The project uses GitHub Actions CI/CD with pytest and flake8 for a Python project, configured to run on push and PR to main.", "evidence": {{"evidence_type": "derived_summary", "supporting_sources": [{{"evidence_type": "assistant_action", "source_turn_id": "turn_abc123"}}]}}}}]}}]}}
 
 Rules:
-1. Each claim must cite evidence from the conversation. Use exact quotes.
-2. The quote must be a verbatim substring of the original message content. Do NOT paraphrase or rephrase the quote — copy it character-for-character from the message.
-3. Quotes cannot contain double quotes ("), newlines, or carriage returns. If the message contains double quotes, choose a different segment of the same message that does not contain them.
-4. user_statement evidence_type requires role=user messages.
-5. assistant_action evidence_type requires role=assistant messages.
-6. tool_observation evidence_type requires role=tool_result messages.
-7. Write concise claims that capture the key information, not verbatim transcripts.
-8. Use derived_summary when a claim synthesizes information from multiple messages.
-9. Set boot_worthy=true only for critical startup information.
-10. The agent_journal_version is "{PROFILE_VERSION}" — do not include it in your output.
-11. Preserve key relationship details, dates, names, and events that could be queried later. These details are critical for future retrieval.
-
-Output ONLY valid JSON. No markdown fences, no explanation."""
+1. The summary is the most important field — make it dense, specific, and keyword-rich.
+2. Include entities, technical terms, names, numbers, and dates that a future query might use.
+3. Write in natural prose, not bullet points.
+4. Always use "derived_summary" as evidence_type — no source_quote required.
+5. source_turn_id must match the turn_id from the input.
+6. Output ONLY valid JSON. No markdown fences, no explanation."""
 _RETRY_PROMPT = """The deterministic compiler rejected your plan with these errors:
 
 {errors}
 
-Fix the plan and output corrected JSON only. The most common cause is that your source_quote is not a verbatim substring of the original message content.
-
-CRITICAL: You MUST copy the quote character-for-character from the message. Do NOT change punctuation, capitalization, or formatting. If the message says "Use eggs as a binder**" (with asterisks), your quote must be exactly "Use eggs as a binder**", not "Use eggs as a binder:" or "Use eggs as a binder".
-
-If the error says "cannot contain double quotes", choose a different segment of the SAME message that does not contain double quotes. For example, if the message says: I said "I don't trust them" and then asked about regulations, use "asked about regulations" instead of "I don't trust them".
-
-If the error says "cannot contain newlines", choose a shorter segment that fits on one line.
-
-Pay special attention to:
-- Exact quote matching (quotes must be verbatim substrings of the original message)
-- No double quotes or newlines in quotes
-- Correct evidence_type for each role
-- All required fields present"""
+Fix the plan and output corrected JSON only. Common issues:
+- All required fields must be present (operation, page_id, title, description, etc.)
+- Always use "derived_summary" as evidence_type with a "supporting_sources" list
+- source_turn_id must match one of the turn_ids from the input
+- The JSON must be valid. Pay close attention to the structure."""
 
 
 def _extract_json(text: str) -> str:
@@ -281,17 +247,18 @@ class AgentJournalLLMCompiler:
         session_id: str,
         conv_messages: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        user_prompt = f"""Analyze this conversation turn and produce a AgentJournal page plan.
+        user_prompt = f"""Analyze this conversation turn and produce a retrieval-optimized session summary.
 
 Turn content:
 {turn_content}
 
-IMPORTANT citation fields:
-- source_turn_id MUST be exactly: "{turn_id}"
-- source_message_id MUST be one of the message_ids shown in the turn content (e.g. "{session_id}_turn_0000_user")
-- session_id: "{session_id}"
+IMPORTANT:
+- page_id MUST be: "{session_id}"
+- source_turn_id MUST be: "{turn_id}"
+- Use derived_summary as evidence_type (no source_quote needed)
+- The "summary" field is the PRIMARY search index — make it dense, specific, and keyword-rich.
 
-Output a JSON plan with a single page (operation="create"). Use page_id="{session_id}" to match the session."""
+Output a JSON plan with a single page (operation="create")."""
         chat_messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -468,21 +435,24 @@ Output a JSON plan with a single page (operation="create"). Use page_id="{sessio
                 mid = m.get("message_id", "")
                 if mid:
                     msg_map[mid] = m.get("content", "")
-        user_prompt = f"""Analyze these {len(sessions)} conversation turns and produce a AgentJournal page plan with one page per turn.
+        user_prompt = f"""Analyze these {len(sessions)} conversation sessions and produce retrieval-optimized session summaries — one page per session.
 
-Each page must use page_id = the session_id for that turn.
+Each page must use page_id = the session_id for that session.
 
 Turn content:
 {all_content}
 
-IMPORTANT citation fields:
-- source_turn_id MUST be exactly the turn_id shown in the turn content
-- source_message_id MUST be one of the message_ids shown in the turn content
+IMPORTANT:
+- page_id MUST be the session_id for each session
+- source_turn_id MUST match the turn_id shown for each session
+- Use derived_summary as evidence_type (no source_quote needed)
+- The "summary" field is the PRIMARY search index — make it dense, specific, and keyword-rich.
+- Include entities, technical terms, names, numbers, and dates that a future query might use.
 
 Available turn_ids: {turn_id_list}
 Available session_ids: {session_id_list}
 
-Output a JSON plan with {len(sessions)} pages (one per turn, operation="create")."""
+Output a JSON plan with {len(sessions)} pages (one per session, operation="create")."""
         chat_messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},

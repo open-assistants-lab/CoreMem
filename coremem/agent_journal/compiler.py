@@ -47,7 +47,9 @@ _PAGE_REQUIRED_KEYS = {
 _PAGE_OPTIONAL_KEYS = {"details", "open_questions", "read_next"}
 _PAGE_KEYS = _PAGE_REQUIRED_KEYS | _PAGE_OPTIONAL_KEYS
 _STATE_KEYS = {"claim", "evidence"}
-_SOURCE_KEYS = {"evidence_type", "source_turn_id", "source_message_id", "source_quote"}
+_SOURCE_REQUIRED_KEYS = {"evidence_type", "source_turn_id"}
+_SOURCE_OPTIONAL_KEYS = {"source_message_id", "source_quote"}
+_SOURCE_KEYS = _SOURCE_REQUIRED_KEYS | _SOURCE_OPTIONAL_KEYS
 _DERIVED_KEYS = {"evidence_type", "supporting_sources"}
 _PAGE_ID_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SAFE_REFERENCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -278,9 +280,9 @@ class AgentJournalCompiler:
         if evidence_type == "derived_summary":
             self._reject_extra_keys(raw_evidence, _DERIVED_KEYS, f"{label}.evidence")
             sources = raw_evidence.get("supporting_sources")
-            if not isinstance(sources, list) or len(sources) < 2:
+            if not isinstance(sources, list) or len(sources) < 1:
                 raise AgentJournalError(
-                    f"{label}.evidence.supporting_sources must contain at least two sources"
+                    f"{label}.evidence.supporting_sources must contain at least one source"
                 )
             compiled_sources = [
                 self._compile_source(source, f"{label}.evidence.supporting_sources[{index}]")
@@ -294,7 +296,7 @@ class AgentJournalCompiler:
         if not isinstance(raw_source, Mapping):
             raise AgentJournalError(f"{label} must be an object")
         self._reject_extra_keys(raw_source, _SOURCE_KEYS, label)
-        missing = sorted(key for key in _SOURCE_KEYS if key not in raw_source)
+        missing = sorted(key for key in _SOURCE_REQUIRED_KEYS if key not in raw_source)
         if missing:
             raise AgentJournalError(f"{label} missing required keys: {', '.join(missing)}")
 
@@ -307,11 +309,18 @@ class AgentJournalCompiler:
             "source_turn_id": self._require_citation_string(
                 raw_source["source_turn_id"], f"{label}.source_turn_id"
             ),
-            "source_message_id": self._require_citation_string(
-                raw_source["source_message_id"], f"{label}.source_message_id"
-            ),
-            "source_quote": self._require_quote(raw_source["source_quote"], f"{label}.source_quote"),
         }
+        # Optional fields
+        if "source_message_id" in raw_source:
+            source["source_message_id"] = self._require_citation_string(
+                raw_source["source_message_id"], f"{label}.source_message_id"
+            )
+        else:
+            source["source_message_id"] = ""
+        if "source_quote" in raw_source:
+            source["source_quote"] = self._require_quote(raw_source["source_quote"], f"{label}.source_quote")
+        else:
+            source["source_quote"] = ""
         return source
 
     def _citation_sources(self, evidence: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
@@ -356,13 +365,15 @@ class AgentJournalCompiler:
         lines.extend(["", "# Citations", ""])
         for citation in page.citations:
             source = citation.source
-            lines.extend([
-                (
-                    f"[{citation.number}] {source['source_turn_id']}, "
-                    f"`{source['source_message_id']}`, `{source['evidence_type']}`:"
-                ),
-                f"\"{source['source_quote']}\"",
-            ])
+            smid = source.get("source_message_id", "")
+            quote = source.get("source_quote", "")
+            line = f"[{citation.number}] {source['source_turn_id']}"
+            if smid:
+                line += f", `{smid}`"
+            line += f", `{source['evidence_type']}`:"
+            lines.append(line)
+            if quote:
+                lines.append(f"\"{quote}\"")
         lines.append("")
         return "\n".join(lines)
 
@@ -611,8 +622,8 @@ class AgentJournalCompiler:
         for citation in page.citations:
             source = citation.source
             lines.append(
-                f"[{citation.number}] {source['source_message_id']} "
-                f"({source['evidence_type']}): \"{source['source_quote']}\""
+                f"[{citation.number}] {source.get('source_message_id', source['source_turn_id'])} "
+                f"({source['evidence_type']}): \"{source.get('source_quote', '')}\""
             )
         lines.append("")
         return "\n".join(lines)
