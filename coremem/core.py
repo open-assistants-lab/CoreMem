@@ -380,6 +380,19 @@ class MemoryCore:
         ranked.sort(key=lambda result: result.score, reverse=True)
         if use_cross_encoder:
             ranked = rerank(query, ranked)
+        else:
+            mc_results = self.search_messages(query, limit=per_query_limit)
+            for rank, result in enumerate(mc_results, start=1):
+                memory_id = result.memory.id or ""
+                if not memory_id:
+                    continue
+                memory, score = fused.get(memory_id, (result.memory, 0.0))
+                fused[memory_id] = (memory, score + 1.0 / (60 + rank))
+            ranked = [
+                SearchResult(memory=memory, score=score)
+                for memory, score in fused.values()
+            ]
+            ranked.sort(key=lambda result: result.score, reverse=True)
         return _mmr_diversify(ranked, limit)
 
     def reconstruct_sessions(
