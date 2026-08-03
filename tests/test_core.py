@@ -619,3 +619,43 @@ def test_recall_unknown_strategy_raises():
             core.recall("hello", strategy="invalid")
     finally:
         core._test_cleanup()
+
+
+def test_search_with_fusion_returns_results():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
+        results = core.search_with_fusion("hiking Yosemite", limit=5)
+        assert len(results) > 0
+    finally:
+        core._test_cleanup()
+
+
+def test_search_with_fusion_empty():
+    core = _tmp_core()
+    try:
+        results = core.search_with_fusion("nonexistent query", limit=5)
+        assert results == []
+    finally:
+        core._test_cleanup()
+
+
+def test_search_with_session_reranking_returns_results():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
+        results = core.search_with_session_reranking("hiking Yosemite", limit=5)
+        assert len(results) > 0
+    finally:
+        core._test_cleanup()
+
+
+def test_search_with_session_reranking_empty():
+    core = _tmp_core()
+    try:
+        results = core.search_with_session_reranking("nonexistent query", limit=5)
+        assert results == []
+    finally:
+        core._test_cleanup()

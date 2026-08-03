@@ -271,7 +271,7 @@ def _search_messages_llm_expansion_mode(core: MemoryCore, query: str, k: int) ->
     return [
         RawSearchHit(
             message=ReferenceMessage(
-                turn_id=r.memory.id or "",
+                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
                 session_id=r.memory.session_id or "",
                 message_id=r.memory.id or "",
                 role=r.memory.role,
@@ -944,7 +944,7 @@ def _search_messages_context_mode(core: MemoryCore, query: str, k: int) -> list[
     return [
         RawSearchHit(
             message=ReferenceMessage(
-                turn_id=r.memory.id or "",
+                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
                 session_id=r.memory.session_id or "",
                 message_id=r.memory.id or "",
                 role=r.memory.role,

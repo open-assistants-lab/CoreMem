@@ -448,7 +448,7 @@ requires-dist = [
     { name = "coremem", extras = ["observer"], marker = "extra == 'all'" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
     { name = "httpx", marker = "extra == 'observer'", specifier = ">=0.25.0" },
-    { name = "hybriddb", specifier = ">=0.4.5" },
+    { name = "hybriddb", specifier = ">=0.5.3" },
     { name = "ijson", specifier = ">=3.5.0" },
     { name = "numpy", specifier = ">=1.24.0,<3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -863,14 +863,14 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.4.5"
+version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/59/7822714f0749b66fa5f0d8d4b7a293093e4013b583d440dded6fa378d410/hybriddb-0.4.5.tar.gz", hash = "sha256:1dce44aeca41cb8cba37cdd0ef995555f634225d9b5240ff348a6556bc154520", size = 256207, upload-time = "2026-06-14T16:26:35.628Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/fe/e46ac3a7f2cc5996054d1cdfabb34b4b6c7e7d4024932fa15f22da2e3ddb/hybriddb-0.5.3.tar.gz", hash = "sha256:e468bbf0debf96f13bb2ec6fcc8b01093acff134b1ed8169454970a3fc0b5bca", size = 264158, upload-time = "2026-07-30T16:23:45.399Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/e7/5fdb069cb5bec0f2fe66776bd36dd4935674ad10dc30a14fabb035f8c992/hybriddb-0.4.5-py3-none-any.whl", hash = "sha256:24730c5a09c029a9c1fdfd5bff009e21c022157733a5ef4b294072fe7e038b49", size = 40000, upload-time = "2026-06-14T16:26:34.05Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/d0/7d325bac31a0766b03bcdf2c43e23c9e2a065687e2c28062217185f9af69/hybriddb-0.5.3-py3-none-any.whl", hash = "sha256:4ca781e7b7ec072480f2f8d17e2199592fa9ca30c16e83081405aa3369bde576", size = 40885, upload-time = "2026-07-30T16:23:43.47Z" },
 ]
 
 [[package]]

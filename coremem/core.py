@@ -472,7 +472,6 @@ class MemoryCore:
             if bundle.messages:
                 priority_ids.append(bundle.messages[0].id)
             priority_ids.extend(bundle.anchor_ids)
-            priority_ids.extend(message.id for message in bundle.messages)
             selected: list[Memory] = []
             selected_ids: set[str] = set()
             used_chars = 0
@@ -486,6 +485,15 @@ class MemoryCore:
                     continue
                 selected.append(message)
                 selected_ids.add(message_id)
+                used_chars += message_chars
+            for message in sorted(bundle.messages, key=lambda m: position.get(m.id, 0)):
+                if message.id in selected_ids:
+                    continue
+                message_chars = len(message.content)
+                if used_chars + message_chars > per_bundle_budget:
+                    continue
+                selected.append(message)
+                selected_ids.add(message.id)
                 used_chars += message_chars
             selected.sort(key=lambda message: position[message.id])
             budgeted.append(SessionBundle(
@@ -823,6 +831,8 @@ class MemoryCore:
         k_messages: int = 20,
         context_window: int = 1,
     ) -> list[SearchResult]:
+        import warnings
+        warnings.warn("search_with_context is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
         if k_sessions <= 0 or k_messages <= 0:
             return []
         context_window = max(0, context_window)
@@ -888,6 +898,8 @@ class MemoryCore:
         neighbors_per_direction: int = 1,
         max_per_session: int = 2,
     ) -> list[SearchResult]:
+        import warnings
+        warnings.warn("search_with_traversal is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
         if limit <= 0 or seed_limit <= 0:
             return []
 
@@ -1102,6 +1114,7 @@ class MemoryCore:
                     if message.id and message.id not in seen:
                         seen.add(message.id)
                         results.append(SearchResult(memory=message, score=0.0))
+            results.sort(key=lambda r: r.score, reverse=True)
             return results[:limit]
 
         raise ValueError(f"unknown strategy: {strategy}")
@@ -1113,6 +1126,8 @@ class MemoryCore:
         per_query_limit: int = 20,
         session_limit: int = 5,
     ) -> list[SearchResult]:
+        import warnings
+        warnings.warn("search_with_session_reranking is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
         if limit <= 0:
             return []
 

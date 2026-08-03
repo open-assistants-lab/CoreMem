@@ -9,16 +9,16 @@ Usage:
 """
 
 from coremem.core import MemoryCore
-from coremem.heuristics import SearchHeuristics, _mmr_diversify
+from coremem.heuristics import SearchHeuristics
 from coremem.query import decompose_queries, expand_queries
 from coremem.rerank import rerank
-from coremem.types import Memory, SearchQuery, SearchResult, SessionBundle
+from coremem.types import Memory, SearchResult, SessionBundle
 from coremem.providers import create_provider
 
 __version__ = "0.10.0"
 
 __all__ = [
-    "MemoryCore", "Memory", "SearchResult", "SearchQuery", "SessionBundle",
-    "SearchHeuristics", "decompose_queries", "expand_queries", "rerank", "_mmr_diversify",
+    "MemoryCore", "Memory", "SearchResult", "SessionBundle",
+    "SearchHeuristics", "decompose_queries", "expand_queries", "rerank",
     "create_provider",
 ]

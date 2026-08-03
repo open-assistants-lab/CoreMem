@@ -61,7 +61,6 @@ def decompose_queries(query: str) -> list[str]:
         match = re.search(pattern, query, re.IGNORECASE)
         if match:
             variants.extend(part.strip(" '‘’\"") for part in match.groups())
-            break
 
     seen: set[str] = set()
     result: list[str] = []
