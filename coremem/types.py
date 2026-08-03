@@ -39,6 +39,16 @@ class SearchResult:
 
 
 @dataclass
+class SessionBundle:
+    """Reconstructed context for one retrieved session."""
+    session_id: str
+    messages: list[Memory]
+    score: float = 0.0
+    complete: bool = False
+    anchor_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SearchQuery:
     """A search query with optional metadata and column filters."""
     text: str

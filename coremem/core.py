@@ -27,9 +27,9 @@ from coremem.agent_journal import (
 )
 from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
-from coremem.query import LLMProvider, expand_queries
+from coremem.query import LLMProvider, decompose_queries, expand_queries
 from coremem.rerank import get_cross_encoder, rerank
-from coremem.types import Memory, SearchQuery, SearchResult
+from coremem.types import Memory, SearchQuery, SearchResult, SessionBundle
 
 _DEFAULT_SEARCH_DEPTH = 5
 
@@ -78,6 +78,8 @@ def _row_to_memory(row: dict[str, Any]) -> Memory:
             metadata = json.loads(row["metadata"])
         except (json.JSONDecodeError, TypeError):
             pass
+    if row.get("turn_id"):
+        metadata.setdefault("turn_id", row["turn_id"])
     return Memory(
         id=row.get("id", ""),
         content=row.get("content", ""),
@@ -188,6 +190,17 @@ class MemoryCore:
             )
             """
         )
+        if "journal_records" not in self._db.list_tables():
+            self._db.create_table("journal_records", {
+                "id": "TEXT PRIMARY KEY",
+                "session_id": "TEXT NOT NULL",
+                "content": "LONGTEXT",
+                "compiled_at": "TEXT NOT NULL",
+                "embedding": "TEXT",
+            })
+        self._db.raw_query(
+            "CREATE INDEX IF NOT EXISTS idx_journal_records_session ON journal_records(session_id)"
+        )
 
     @property
     def db(self) -> HybridDB:
@@ -263,7 +276,7 @@ class MemoryCore:
                 metadata=metadata,
             ):
                 continue
-            score = row.get("score", 0.0)
+            score = row.get("_score", row.get("score", 0.0))
             score = SearchHeuristics.apply_all(
                 query=query,
                 content=mem.content,
@@ -274,8 +287,10 @@ class MemoryCore:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_messages_deep(
-        self, query: str, limit: int = 10,
+    def search_messages_llm_expansion(
+        self,
+        query: str,
+        limit: int = 5,
         role: str | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
@@ -322,7 +337,7 @@ class MemoryCore:
                         ch = hash(mem.content[:200])
                         if ch not in seen_content:
                             seen_content.add(ch)
-                            score = row.get("score", 0.0)
+                            score = row.get("_score", row.get("score", 0.0))
                             if score_range > 0:
                                 score = (score - min_score) / score_range
                             all_results.append(SearchResult(memory=mem, score=score))
@@ -335,6 +350,152 @@ class MemoryCore:
         all_results = _mmr_diversify(all_results, effective_limit)
         all_results = rerank(query, all_results)
         return all_results[:limit]
+
+    def search_messages_decomposed(
+        self,
+        query: str,
+        limit: int = 5,
+        per_query_limit: int = 20,
+        use_cross_encoder: bool = False,
+    ) -> list[SearchResult]:
+        if limit <= 0 or per_query_limit <= 0:
+            return []
+
+        fused: dict[str, tuple[Memory, float]] = {}
+        for query_index, variant in enumerate(decompose_queries(query)):
+            weight = 2.0 if query_index == 0 else 1.0
+            for rank, result in enumerate(
+                self.search_messages(variant, limit=per_query_limit), start=1,
+            ):
+                memory_id = result.memory.id or ""
+                if not memory_id:
+                    continue
+                memory, score = fused.get(memory_id, (result.memory, 0.0))
+                fused[memory_id] = (memory, score + weight / (60 + rank))
+
+        ranked = [
+            SearchResult(memory=memory, score=score)
+            for memory, score in fused.values()
+        ]
+        ranked.sort(key=lambda result: result.score, reverse=True)
+        if use_cross_encoder:
+            ranked = rerank(query, ranked)
+        return _mmr_diversify(ranked, limit)
+
+    def reconstruct_sessions(
+        self,
+        query: str,
+        session_limit: int = 5,
+        max_context_chars: int = 16_000,
+        short_max_messages: int = 12,
+        short_max_chars: int = 8_000,
+        segment_max_messages: int = 6,
+        segment_max_chars: int = 4_000,
+        primary_results: list[SearchResult] | None = None,
+    ) -> list[SessionBundle]:
+        primary = (
+            primary_results
+            if primary_results is not None
+            else self.search_messages_decomposed(query, limit=session_limit)
+        )
+        bundles: list[SessionBundle] = []
+        seen_sessions: set[str] = set()
+        for result in primary:
+            session_id = result.memory.session_id or ""
+            if not session_id or session_id in seen_sessions:
+                continue
+            seen_sessions.add(session_id)
+            rows = self._db.raw_query(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC, rowid ASC",
+                (session_id,),
+            )
+            messages = [_row_to_memory(row) for row in rows]
+            total_chars = sum(len(message.content) for message in messages)
+            if len(messages) <= short_max_messages and total_chars <= short_max_chars:
+                bundles.append(SessionBundle(
+                    session_id=session_id,
+                    messages=messages,
+                    score=result.score,
+                    complete=True,
+                    anchor_ids=[result.memory.id] if result.memory.id else [],
+                ))
+                continue
+
+            segments: list[list[Memory]] = []
+            segment: list[Memory] = []
+            segment_chars = 0
+            for message in messages:
+                message_chars = len(message.content)
+                if segment and (
+                    len(segment) >= segment_max_messages
+                    or segment_chars + message_chars > segment_max_chars
+                ):
+                    segments.append(segment)
+                    segment = []
+                    segment_chars = 0
+                segment.append(message)
+                segment_chars += message_chars
+            if segment:
+                segments.append(segment)
+
+            anchor_index = next(
+                (
+                    index for index, candidate in enumerate(segments)
+                    if any(message.id == result.memory.id for message in candidate)
+                ),
+                0,
+            )
+            selected_indexes = sorted({0, anchor_index})
+            selected = [
+                message
+                for index in selected_indexes
+                for message in segments[index]
+            ]
+            bundles.append(SessionBundle(
+                session_id=session_id,
+                messages=selected,
+                score=result.score,
+                complete=len(selected_indexes) == len(segments),
+                anchor_ids=[result.memory.id] if result.memory.id else [],
+            ))
+
+        if not bundles or max_context_chars <= 0:
+            return []
+        per_bundle_budget = max_context_chars // len(bundles)
+        budgeted: list[SessionBundle] = []
+        for bundle in bundles:
+            if sum(len(message.content) for message in bundle.messages) <= per_bundle_budget:
+                budgeted.append(bundle)
+                continue
+            position = {message.id: index for index, message in enumerate(bundle.messages)}
+            priority_ids = []
+            if bundle.messages:
+                priority_ids.append(bundle.messages[0].id)
+            priority_ids.extend(bundle.anchor_ids)
+            priority_ids.extend(message.id for message in bundle.messages)
+            selected: list[Memory] = []
+            selected_ids: set[str] = set()
+            used_chars = 0
+            by_id = {message.id: message for message in bundle.messages}
+            for message_id in priority_ids:
+                if message_id in selected_ids or message_id not in by_id:
+                    continue
+                message = by_id[message_id]
+                message_chars = len(message.content)
+                if used_chars + message_chars > per_bundle_budget:
+                    continue
+                selected.append(message)
+                selected_ids.add(message_id)
+                used_chars += message_chars
+            selected.sort(key=lambda message: position[message.id])
+            budgeted.append(SessionBundle(
+                session_id=bundle.session_id,
+                messages=selected,
+                score=bundle.score,
+                complete=bundle.complete and len(selected) == len(bundle.messages),
+                anchor_ids=bundle.anchor_ids,
+            ))
+        return budgeted
 
     def fetch(
         self,
@@ -645,3 +806,377 @@ class MemoryCore:
 
     def search_journal(self, query: str, limit: int = 5) -> list[SearchHit]:
         return self._agent_journal_search.search(query, limit=limit)
+
+    # ── Context-Retrieval methods (PoC) ─────────────────────────
+
+    def _store_journal_record(self, session_id: str, content: str) -> None:
+        record_id = session_id
+        self._db.raw_query(
+            """INSERT OR REPLACE INTO journal_records (id, session_id, content, compiled_at)
+               VALUES (?, ?, ?, ?)""",
+            (record_id, session_id, content, datetime.now(UTC).isoformat()),
+        )
+
+    def search_with_context(
+        self, query: str,
+        k_sessions: int = 5,
+        k_messages: int = 20,
+        context_window: int = 1,
+    ) -> list[SearchResult]:
+        if k_sessions <= 0 or k_messages <= 0:
+            return []
+        context_window = max(0, context_window)
+        journal_rows = self._db.search("journal_records", "content", query, limit=k_sessions)
+        if not journal_rows:
+            return []
+        max_score = max((r.get("_score", r.get("score", 0)) for r in journal_rows), default=1.0) or 1.0
+        session_weight: dict[str, float] = {}
+        for r in journal_rows:
+            sid = r.get("session_id", "")
+            if sid:
+                session_weight[sid] = (r.get("_score", r.get("score", 0)) or 0.0) / max_score
+        if not session_weight:
+            return []
+
+        per_session_limit = max(1, (k_messages + len(session_weight) - 1) // len(session_weight))
+        selected: dict[str, SearchResult] = {}
+        for session_id, weight in session_weight.items():
+            rows = self._db.raw_query(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC",
+                (session_id,),
+            )
+            scored: list[tuple[int, SearchResult]] = []
+            for index, row in enumerate(rows):
+                mem = _row_to_memory(row)
+                score = SearchHeuristics.apply_all(
+                    query=query,
+                    content=mem.content,
+                    score=weight,
+                    ts=mem.ts.isoformat() if mem.ts else row.get("ts"),
+                )
+                scored.append((index, SearchResult(memory=mem, score=score)))
+            scored.sort(key=lambda item: item[1].score, reverse=True)
+
+            for index, result in scored[:per_session_limit]:
+                if result.memory.id:
+                    selected[result.memory.id] = result
+                for neighbor_index in range(
+                    max(0, index - context_window),
+                    min(len(rows), index + context_window + 1),
+                ):
+                    if neighbor_index == index:
+                        continue
+                    neighbor = _row_to_memory(rows[neighbor_index])
+                    if not neighbor.id:
+                        continue
+                    neighbor_score = result.score * 0.75
+                    existing = selected.get(neighbor.id)
+                    if existing is None or existing.score < neighbor_score:
+                        selected[neighbor.id] = SearchResult(memory=neighbor, score=neighbor_score)
+
+        results = list(selected.values())
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:k_messages]
+
+    def search_with_traversal(
+        self,
+        query: str,
+        limit: int = 5,
+        seed_limit: int = 20,
+        beam_width: int = 20,
+        max_rounds: int = 2,
+        neighbors_per_direction: int = 1,
+        max_per_session: int = 2,
+    ) -> list[SearchResult]:
+        if limit <= 0 or seed_limit <= 0:
+            return []
+
+        seeds = self.search_messages(query, limit=max(limit, seed_limit))
+        if not seeds:
+            return []
+
+        raw_scores = [seed.score for seed in seeds]
+        low, high = min(raw_scores), max(raw_scores)
+        if high > low:
+            normalized = [(score - low) / (high - low) for score in raw_scores]
+        else:
+            normalized = [1.0 / rank for rank in range(1, len(seeds) + 1)]
+
+        normalized_seeds = [
+            SearchResult(memory=seed.memory, score=score)
+            for seed, score in zip(seeds, normalized)
+        ]
+        baseline = normalized_seeds[:limit]
+        if max_rounds <= 0 or beam_width <= 0 or neighbors_per_direction <= 0:
+            return baseline
+
+        frontier: list[tuple[SearchResult, int]] = []
+        session_counts: dict[str, int] = {}
+        for seed in normalized_seeds:
+            sid = seed.memory.session_id or ""
+            if session_counts.get(sid, 0) >= max_per_session:
+                continue
+            session_counts[sid] = session_counts.get(sid, 0) + 1
+            frontier.append((seed, 0))
+            if len(frontier) >= beam_width:
+                break
+
+        expanded: set[str] = set()
+        best_candidates: dict[str, SearchResult] = {}
+        session_rows: dict[str, list[dict[str, Any]]] = {}
+        session_indexes: dict[str, dict[str, int]] = {}
+
+        for hop in range(1, max_rounds + 1):
+            candidates: dict[str, dict[str, Any]] = {}
+            for parent, _ in frontier:
+                parent_id = parent.memory.id or ""
+                session_id = parent.memory.session_id or ""
+                if not parent_id or not session_id:
+                    continue
+                expanded.add(parent_id)
+                if session_id not in session_rows:
+                    rows = self._db.raw_query(
+                        "SELECT * FROM messages WHERE session_id = ? "
+                        "ORDER BY ts ASC, rowid ASC",
+                        (session_id,),
+                    )
+                    session_rows[session_id] = rows
+                    session_indexes[session_id] = {
+                        str(row.get("id", "")): index for index, row in enumerate(rows)
+                    }
+                rows = session_rows[session_id]
+                index = session_indexes[session_id].get(parent_id)
+                if index is None:
+                    continue
+                for neighbor_index in range(
+                    max(0, index - neighbors_per_direction),
+                    min(len(rows), index + neighbors_per_direction + 1),
+                ):
+                    if neighbor_index == index:
+                        continue
+                    memory = _row_to_memory(rows[neighbor_index])
+                    memory_id = memory.id or ""
+                    if not memory_id or memory_id in expanded:
+                        continue
+                    candidate = candidates.setdefault(
+                        memory_id,
+                        {"memory": memory, "parents": set(), "parent_score": 0.0},
+                    )
+                    candidate["parents"].add(parent_id)
+                    candidate["parent_score"] = max(candidate["parent_score"], parent.score)
+
+            if not candidates:
+                break
+
+            round_results: list[SearchResult] = []
+            for memory_id, candidate in candidates.items():
+                memory = candidate["memory"]
+                boosted = SearchHeuristics.keyword_overlap(
+                    query=query, content=memory.content, score=1.0,
+                )
+                relevance = max(0.0, boosted - 1.0)
+                relevance = relevance / (1.0 + relevance)
+                confirmation = min(len(candidate["parents"]) - 1, 2) / 2
+                if relevance == 0.0 and confirmation == 0.0:
+                    continue
+                score = (
+                    0.60 * relevance
+                    + 0.30 * candidate["parent_score"] * (0.7 ** hop)
+                    + 0.10 * confirmation
+                )
+                result = SearchResult(memory=memory, score=score)
+                round_results.append(result)
+                existing = best_candidates.get(memory_id)
+                if existing is None or result.score > existing.score:
+                    best_candidates[memory_id] = result
+
+            round_results.sort(key=lambda result: result.score, reverse=True)
+            next_frontier: list[tuple[SearchResult, int]] = []
+            session_counts = {}
+            for result in round_results:
+                sid = result.memory.session_id or ""
+                if session_counts.get(sid, 0) >= max_per_session:
+                    continue
+                session_counts[sid] = session_counts.get(sid, 0) + 1
+                next_frontier.append((result, hop))
+                if len(next_frontier) >= beam_width:
+                    break
+            if not next_frontier:
+                break
+            frontier = next_frontier
+
+        final_by_id = {result.memory.id: result for result in baseline if result.memory.id}
+        for memory_id, result in best_candidates.items():
+            existing = final_by_id.get(memory_id)
+            if existing is None or result.score > existing.score:
+                final_by_id[memory_id] = result
+        final = list(final_by_id.values())
+        final.sort(key=lambda result: result.score, reverse=True)
+        return final[:limit]
+
+    def recall(
+        self,
+        query: str,
+        strategy: str = "auto",
+        limit: int = 5,
+        use_cross_encoder: bool = False,
+    ) -> list[SearchResult]:
+        if strategy == "direct":
+            return self.search_messages(query, limit=limit)
+
+        if strategy == "llm_expansion":
+            return self.search_messages_llm_expansion(query, limit=limit)
+
+        if strategy in ("episodic", "auto"):
+            q = query.lower()
+
+            # Conversational references — skip episodic
+            is_conversational = any(
+                cue in q
+                for cue in (
+                    "previous conversation", "another trip", "i was going through",
+                    "looking back at", "as we discussed",
+                )
+            )
+
+            # Temporal — check time-unit patterns before generic "how many"
+            is_temporal = any(
+                cue in q
+                for cue in (
+                    "before", "after", "between", "earlier", "later",
+                    "since", "until", "first", "last", "most recent",
+                    "how long", "how much time",
+                    "how many day", "how many week", "how many month", "how many year",
+                    "how long ago", "which happened",
+                )
+            ) and not is_conversational
+
+            # Knowledge update
+            is_knowledge_update = any(
+                cue in q
+                for cue in (
+                    "current", "currently", "latest", "most recent",
+                    "now", "still", "changed", "updated", "replaced",
+                    "what did i eventually", "what is my",
+                    "what day of the week",
+                )
+            ) and not is_temporal and not is_conversational
+
+            # Aggregation — check after temporal so "how many weeks" doesn't match here
+            is_aggregation = any(
+                cue in q
+                for cue in (
+                    "how many", "in total", "total", "all",
+                    "what percentage", "sum", "combined", "altogether",
+                    "most money", "most time", "most distance",
+                )
+            ) and not is_temporal and not is_knowledge_update and not is_conversational
+
+            if strategy == "auto" and not is_temporal and not is_knowledge_update and not is_aggregation:
+                return self.search_messages(query, limit=limit)
+
+            if strategy == "auto" and is_aggregation and use_cross_encoder:
+                primary = self.search_messages_decomposed(
+                    query, limit=limit, per_query_limit=max(20, limit * 4),
+                    use_cross_encoder=True,
+                )
+            else:
+                primary = self.search_messages_decomposed(
+                    query, limit=limit, per_query_limit=max(20, limit * 4),
+                )
+
+            budget = 4_000 if strategy == "auto" else 16_000
+            bundles = self.reconstruct_sessions(
+                query, session_limit=limit, max_context_chars=budget,
+                primary_results=primary,
+            )
+            bundle_ids = {message.id for bundle in bundles for message in bundle.messages if message.id}
+            seen: set[str] = set()
+            results: list[SearchResult] = []
+            for result in primary:
+                if result.memory.id and result.memory.id not in seen:
+                    seen.add(result.memory.id)
+                    results.append(result)
+            for bundle in bundles:
+                for message in bundle.messages:
+                    if message.id and message.id not in seen:
+                        seen.add(message.id)
+                        results.append(SearchResult(memory=message, score=0.0))
+            return results[:limit]
+
+        raise ValueError(f"unknown strategy: {strategy}")
+
+    def search_with_session_reranking(
+        self,
+        query: str,
+        limit: int = 5,
+        per_query_limit: int = 20,
+        session_limit: int = 5,
+    ) -> list[SearchResult]:
+        if limit <= 0:
+            return []
+
+        # Step 1: ER to find top sessions
+        er_results = self.search_messages_decomposed(
+            query, limit=session_limit, per_query_limit=per_query_limit,
+            use_cross_encoder=True,
+        )
+        top_sessions = list(dict.fromkeys(
+            r.memory.session_id for r in er_results if r.memory.session_id
+        ))
+        if not top_sessions:
+            return self.search_messages(query, limit=limit)
+
+        # Step 2: MC scoped to each top session
+        seen_ids: set[str] = set()
+        results: list[SearchResult] = []
+        for session_id in top_sessions:
+            session_results = self.search_messages(
+                query, limit=per_query_limit, session_id=session_id,
+            )
+            for r in session_results:
+                if r.memory.id and r.memory.id not in seen_ids:
+                    seen_ids.add(r.memory.id)
+                    results.append(r)
+            if len(results) >= limit:
+                break
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
+
+    def search_with_fusion(
+        self,
+        query: str,
+        limit: int = 5,
+        per_query_limit: int = 20,
+    ) -> list[SearchResult]:
+        if limit <= 0:
+            return []
+
+        mc_results = self.search_messages(query, limit=per_query_limit)
+        er_results = self.search_messages_decomposed(
+            query, limit=per_query_limit, per_query_limit=per_query_limit,
+            use_cross_encoder=True,
+        )
+
+        fused: dict[str, tuple[Memory, float]] = {}
+        for rank, result in enumerate(mc_results, start=1):
+            memory_id = result.memory.id or ""
+            if not memory_id:
+                continue
+            memory, score = fused.get(memory_id, (result.memory, 0.0))
+            fused[memory_id] = (memory, score + 1.0 / (60 + rank))
+
+        for rank, result in enumerate(er_results, start=1):
+            memory_id = result.memory.id or ""
+            if not memory_id:
+                continue
+            memory, score = fused.get(memory_id, (result.memory, 0.0))
+            fused[memory_id] = (memory, score + 1.0 / (60 + rank))
+
+        ranked = [
+            SearchResult(memory=memory, score=score)
+            for memory, score in fused.values()
+        ]
+        ranked.sort(key=lambda r: r.score, reverse=True)
+        return ranked[:limit]

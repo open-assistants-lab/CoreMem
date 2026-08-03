@@ -4,7 +4,7 @@
 Modes:
   raw_bm25           BM25 over in-memory messages (original baseline)
   memorycore         ingest via MemoryCore, search_messages()
-  memorycore_deep    ingest via MemoryCore, search_messages_deep()
+  memorycore_llm_expansion    ingest via MemoryCore, search_messages_llm_expansion()
   memorycore_journal ingest + compile journal, search_journal()
 """
 
@@ -32,7 +32,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_decomposed", "memorycore_episodic", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_session_reranking", "memorycore_fusion", "memorycore_auto", "memorycore_journal", "memorycore_context", "memorycore_traversal")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -180,9 +180,10 @@ def build_memorycore(
     instances: Sequence[PreparedInstance],
     *,
     journal_reranker: CrossEncoderReranker | None = None,
+    llm_provider: Any = None,
 ) -> MemoryCore:
     """Build a MemoryCore with the provided LongMemEval haystack messages."""
-    core = MemoryCore(path=str(root / "hybrid"))
+    core = MemoryCore(path=str(root / "hybrid"), llm_provider=llm_provider)
     if journal_reranker is not None:
         core._reranker = journal_reranker  # noqa: SLF001 - eval harness reuses the loaded model across questions.
         core._agent_journal_search._reranker = journal_reranker  # noqa: SLF001
@@ -209,7 +210,7 @@ def compile_eval_journal(
     *,
     llm_model: str,
 ) -> dict[str, Any]:
-    """Compile sessions via LLM and write daily journal pages."""
+    """Compile sessions via LLM, write daily journal pages, and store journal records for two-step retrieval."""
     core._journal_compiler = AgentJournalLLMCompiler(  # noqa: SLF001
         core._agent_journal_bundle,  # noqa: SLF001
         model=llm_model,
@@ -217,11 +218,56 @@ def compile_eval_journal(
     summary = asyncio.run(core.compile_uncompiled_turns(limit=max(1, len(instance.sessions))))
     compiled = summary.get("compiled", [])
     errors = summary.get("errors", [])
+    cache_dir = core._agent_journal_bundle.root / ".llm_cache"  # noqa: SLF001
+    processed_sessions: set[str] = set()
+    for session in instance.sessions:
+        if session.session_id in processed_sessions:
+            continue
+        turn_id = session.turn_id
+        cache_path = cache_dir / f"{turn_id}.json"
+        if cache_path.exists():
+            try:
+                entry = json.loads(cache_path.read_text(encoding="utf-8"))
+                plan = entry.get("plan", {})
+                pages = plan.get("pages", [])
+                if pages:
+                    page = pages[0]
+                    summary_text = page.get("summary", "")
+                    claims = page.get("current_state", [])
+                    claim_texts = []
+                    for c in claims:
+                        ct = c.get("claim", "")
+                        if ct:
+                            claim_texts.append(ct)
+                    content = f"# Session Summary\n\n{summary_text}\n"
+                    if claim_texts:
+                        content += "\n## Claims\n" + "\n".join(f"- {t}" for t in claim_texts)
+                    core._store_journal_record(session.session_id, content)  # noqa: SLF001
+                    processed_sessions.add(session.session_id)
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
     return {"compiler": "llm", "llm_model": llm_model, "pages": len(compiled), "errors": errors}
 
 
 def _search_messages_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
     results = core.search_messages(query, limit=k)
+    return [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
+                session_id=r.memory.session_id or "",
+                message_id=r.memory.id or "",
+                role=r.memory.role,
+                content=r.memory.content,
+            ),
+            score=r.score,
+        )
+        for r in results
+    ]
+
+
+def _search_messages_llm_expansion_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_messages_llm_expansion(query, limit=k)
     return [
         RawSearchHit(
             message=ReferenceMessage(
@@ -237,12 +283,12 @@ def _search_messages_mode(core: MemoryCore, query: str, k: int) -> list[RawSearc
     ]
 
 
-def _search_messages_deep_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
-    results = core.search_messages_deep(query, limit=k)
+def _search_messages_decomposed_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_messages_decomposed(query, limit=k, per_query_limit=max(20, k * 4))
     return [
         RawSearchHit(
             message=ReferenceMessage(
-                turn_id=r.memory.id or "",
+                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
                 session_id=r.memory.session_id or "",
                 message_id=r.memory.id or "",
                 role=r.memory.role,
@@ -319,11 +365,11 @@ def run_eval(
     # ── MemoryCore modes: canonical LongMemEval per-question haystack injection ──
     active_modes = MODES if mode == "all" else (mode,)
     active_modes = tuple(m for m in active_modes if m != "raw_bm25")
-    if "memorycore_journal" in active_modes and not journal_llm_model:
-        raise ValueError("--journal-llm-model is required when memorycore_journal is in modes")
+    if ("memorycore_journal" in active_modes or "memorycore_context" in active_modes) and not journal_llm_model:
+        raise ValueError("--journal-llm-model is required when memorycore_journal or memorycore_context is in modes")
     mode_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in active_modes}
     completed_question_ids: set[str] = set()
-    journal_reranker = CrossEncoderReranker() if "memorycore_journal" in active_modes else None
+    journal_reranker = CrossEncoderReranker() if ("memorycore_journal" in active_modes or "memorycore_context" in active_modes) else None
 
     if resume:
         if resume_path is None:
@@ -366,6 +412,7 @@ def run_eval(
                 limit=limit,
                 journal_llm_model=journal_llm_model,
                 journal_reranker=journal_reranker,
+                llm_provider=llm_provider,
                 mode_rows=mode_rows,
                 completed_question_ids=completed_question_ids,
                 cleanup_instances=cleanup_instances,
@@ -393,9 +440,10 @@ def run_eval(
                     instance_root,
                     instances=(instance,),
                     journal_reranker=journal_reranker,
+                    llm_provider=llm_provider,
                 )
                 journal_summary: dict[str, Any] | None = None
-                if "memorycore_journal" in active_modes:
+                if "memorycore_journal" in active_modes or "memorycore_context" in active_modes:
                     journal_summary = compile_eval_journal(
                         core,
                         instance,
@@ -465,12 +513,36 @@ def _score_question(
     for m in active_modes:
         if m == "memorycore":
             new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=False)
-        elif m == "memorycore_deep":
+        elif m == "memorycore_llm_expansion":
             new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
+        elif m == "memorycore_decomposed":
+            new_rows[m] = _score_instance_decomposed(core, instance, truth, k=k)
+        elif m == "memorycore_episodic":
+            new_rows[m] = _score_instance_episodic(core, instance, truth, k=k)
+        elif m == "memorycore_episodic_reranked":
+            new_rows[m] = _score_instance_episodic(
+                core, instance, truth, k=k, use_cross_encoder=True,
+            )
+        elif m == "memorycore_episodic_reranked_4k":
+            new_rows[m] = _score_instance_episodic(
+                core, instance, truth, k=k, use_cross_encoder=True, max_context_chars=4_000,
+            )
+        elif m == "memorycore_auto":
+            new_rows[m] = _score_instance_auto(core, instance, truth, k=k)
+        elif m == "memorycore_session_reranking":
+            new_rows[m] = _score_instance_session_reranking(core, instance, truth, k=k)
+        elif m == "memorycore_fusion":
+            new_rows[m] = _score_instance_fusion(core, instance, truth, k=k)
         elif m == "memorycore_journal":
             row = _score_instance_journal(core, instance, truth, k=k)
             row["journal_compile"] = journal_summary or {"compiler": "llm", "pages": 0, "errors": []}
             new_rows[m] = row
+        elif m == "memorycore_context":
+            row = _score_instance_context(core, instance, truth, k=k)
+            row["journal_compile"] = journal_summary or {"compiler": "llm_context", "pages": 0, "errors": []}
+            new_rows[m] = row
+        elif m == "memorycore_traversal":
+            new_rows[m] = _score_instance_traversal(core, instance, truth, k=k)
     return new_rows
 
 
@@ -484,6 +556,7 @@ def _run_streaming(
     limit: int | None,
     journal_llm_model: str | None,
     journal_reranker: CrossEncoderReranker | None,
+    llm_provider: Any,
     mode_rows: dict[str, list[dict[str, Any]]],
     completed_question_ids: set[str],
     cleanup_instances: bool,
@@ -528,9 +601,10 @@ def _run_streaming(
             instance_root,
             instances=(instance,),
             journal_reranker=journal_reranker,
+            llm_provider=llm_provider,
         )
         journal_summary: dict[str, Any] | None = None
-        if "memorycore_journal" in active_modes:
+        if "memorycore_journal" in active_modes or "memorycore_context" in active_modes:
             journal_summary = compile_eval_journal(
                 core,
                 instance,
@@ -734,12 +808,92 @@ def _score_instance_memorycore(
     k: int,
     deep: bool = False,
 ) -> dict[str, Any]:
-    mode = "memorycore_deep" if deep else "memorycore"
+    mode = "memorycore_llm_expansion" if deep else "memorycore"
     if truth.abstention_expected:
         return _empty_score(instance, truth, mode=mode)
-    search_fn = _search_messages_deep_mode if deep else _search_messages_mode
+    search_fn = _search_messages_llm_expansion_mode if deep else _search_messages_mode
     hits = search_fn(core, instance.query, k)
     return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_decomposed(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_decomposed"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    hits = _search_messages_decomposed_mode(core, instance.query, k)
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_episodic(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+    use_cross_encoder: bool = False,
+    max_context_chars: int = 16_000,
+) -> dict[str, Any]:
+    mode = "memorycore_episodic_reranked_4k" if use_cross_encoder and max_context_chars == 4_000 else "memorycore_episodic_reranked" if use_cross_encoder else "memorycore_episodic"
+    if truth.abstention_expected:
+        row = _empty_score(instance, truth, mode=mode)
+        row.update({
+            "bundle_session_ids": [],
+            "bundle_message_ids": [],
+            "bundle_count": 0,
+            "bundle_context_chars": 0,
+            "bundle_message_recall": 0.0,
+            "bundle_message_hit": False,
+        })
+        return row
+
+    primary = core.search_messages_decomposed(
+        instance.query,
+        limit=k,
+        per_query_limit=max(20, k * 4),
+        use_cross_encoder=use_cross_encoder,
+    )
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in primary
+    ]
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    bundles = core.reconstruct_sessions(
+        instance.query,
+        session_limit=k,
+        max_context_chars=max_context_chars,
+        primary_results=primary,
+    )
+    bundle_message_ids = [
+        message.id for bundle in bundles for message in bundle.messages if message.id
+    ]
+    row.update({
+        "bundle_session_ids": [bundle.session_id for bundle in bundles],
+        "bundle_message_ids": bundle_message_ids,
+        "bundle_count": len(bundles),
+        "bundle_context_chars": sum(
+            len(message.content) for bundle in bundles for message in bundle.messages
+        ),
+        "bundle_message_recall": _fractional_recall(
+            bundle_message_ids, truth.expected_message_ids,
+        ),
+        "bundle_message_hit": bool(set(bundle_message_ids) & set(truth.expected_message_ids)),
+    })
+    return row
 
 
 def _score_instance_journal(
@@ -783,6 +937,151 @@ def _score_instance_journal(
     row["journal_hit_count"] = len(page_hits)
     row["journal_top_score"] = page_hits[0].score if page_hits else 0.0
     return row
+
+
+def _search_messages_context_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_with_context(query, k_sessions=k, k_messages=k)
+    return [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=r.memory.id or "",
+                session_id=r.memory.session_id or "",
+                message_id=r.memory.id or "",
+                role=r.memory.role,
+                content=r.memory.content,
+            ),
+            score=r.score,
+        )
+        for r in results
+    ]
+
+
+def _search_messages_traversal_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
+    results = core.search_with_traversal(query, limit=k)
+    return [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
+                session_id=r.memory.session_id or "",
+                message_id=r.memory.id or "",
+                role=r.memory.role,
+                content=r.memory.content,
+            ),
+            score=r.score,
+        )
+        for r in results
+    ]
+
+
+def _score_instance_context(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_context"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    hits = _search_messages_context_mode(core, instance.query, k)
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    row["journal_compile"] = {"compiler": "llm_context", "pages": None, "errors": []}
+    return row
+
+
+def _score_instance_traversal(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_traversal"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    hits = _search_messages_traversal_mode(core, instance.query, k)
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_auto(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_auto"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    results = core.recall(instance.query, strategy="auto", limit=k)
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in results
+    ]
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_session_reranking(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_session_reranking"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    results = core.search_with_session_reranking(instance.query, limit=k)
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in results
+    ]
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
+
+
+def _score_instance_fusion(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    mode = "memorycore_fusion"
+    if truth.abstention_expected:
+        return _empty_score(instance, truth, mode=mode)
+    results = core.search_with_fusion(instance.query, limit=k)
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in results
+    ]
+    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
 
 
 def _build_scored_row(
@@ -979,7 +1278,7 @@ def _aggregate_metrics(rows: Sequence[Mapping[str, Any]], *, k: int) -> dict[str
     message_scored = [row for row in scoring_rows if row["expected_message_ids"]]
     abstention_rows = [row for row in scoring_rows if row["abstention_expected"]]
     context_chars = [int(row["context_chars"]) for row in rows]
-    return {
+    metrics = {
         "question_count": len(rows),
         "answerable_question_count": len([row for row in scoring_rows if not row["abstention_expected"]]),
         "abstention_question_count": len(abstention_rows),
@@ -1001,6 +1300,24 @@ def _aggregate_metrics(rows: Sequence[Mapping[str, Any]], *, k: int) -> dict[str
         "context_chars_total": sum(context_chars),
         "by_question_type": _breakdown_by_question_type(rows, k=k),
     }
+    bundle_rows = [row for row in rows if "bundle_message_recall" in row]
+    if bundle_rows:
+        metrics.update({
+            "bundle_message_recall": _mean([
+                float(row["bundle_message_recall"]) for row in bundle_rows
+                if isinstance(row.get("scoring"), Mapping)
+                and row["scoring"]["expected_message_ids"]
+            ]),
+            "bundle_message_hit": _rate(
+                row["bundle_message_hit"] for row in bundle_rows
+                if isinstance(row.get("scoring"), Mapping)
+                and row["scoring"]["expected_message_ids"]
+            ),
+            "bundle_context_chars_mean": _mean([
+                float(row["bundle_context_chars"]) for row in bundle_rows
+            ]),
+        })
+    return metrics
 
 
 def _build_mode_result(
@@ -1371,7 +1688,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_deep", "memorycore_journal", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_decomposed", "memorycore_episodic", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_session_reranking", "memorycore_fusion", "memorycore_auto", "memorycore_journal", "memorycore_context", "memorycore_traversal", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")

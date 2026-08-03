@@ -44,6 +44,36 @@ def expand_queries(
     return _regex_expand_queries(query)
 
 
+def decompose_queries(query: str) -> list[str]:
+    """Split multi-cue relational questions into independent search cues."""
+    variants = _regex_expand_queries(query)
+
+    quoted = re.findall(r"['\"]([^'\"]+)['\"]", query)
+    variants.extend(quoted)
+
+    patterns = (
+        r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:\?|$)",
+        r"\bbefore\s+(.+?)\s+did\s+i\s+(.+?)(?:\?|$)",
+        r"\bbefore\s+(.+?)\s+did\s+(.+?)(?:\?|$)",
+        r"\bfirst,\s*(.+?)\s+or\s+(.+?)(?:\?|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            variants.extend(part.strip(" '‘’\"") for part in match.groups())
+            break
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for variant in variants:
+        cleaned = variant.strip().rstrip("?.").strip()
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+    return result[:8]
+
+
 def _regex_expand_queries(query: str) -> list[str]:
     """Fallback regex-based query expansion."""
     queries = [query]
