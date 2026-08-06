@@ -41,7 +41,7 @@ def recall(
     strategy: str = "episodic",   # "direct" | "episodic" | "expanded" | "fusion"
     limit: int = 5,
     bundles: bool = False,         # return SessionBundle list instead of SearchResult list
-    # filter params (passed through to direct/episodic/expanded)
+    # filter params (passed through to direct/episodic/expanded; ignored by fusion)
     role: str | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
@@ -51,6 +51,12 @@ def recall(
     metadata: dict[str, Any] | None = None,
 ) -> list[SearchResult] | list[SessionBundle]:
 ```
+
+**Filter params and fusion:** The `fusion` strategy ignores filter params
+because it combines `direct` + `episodic`, and applying filters to only one
+side would skew the fusion. If filtered fusion is needed, the caller can
+use `recall(query, strategy="direct", ...)` and `recall(query, strategy="episodic", ...)`
+separately and combine results.
 
 ### Usage
 
@@ -83,6 +89,16 @@ results = core.recall(query, limit=10)
 | `expanded` | `_search_messages_llm_expansion` | 1 | LLM query rephrasing + BM25 |
 | `fusion` | `_search_with_fusion` | 0 | RRF fusion of direct + episodic |
 
+### Behavior change: episodic now always uses cross-encoder
+
+The current `recall(strategy="episodic")` does NOT use cross-encoder — only
+`strategy="auto"` with aggregation queries enables it. The new design makes
+`strategy="episodic"` always use cross-encoder, matching the eval's
+`memorycore_episodic_reranked` mode (the recommended default). This is a
+behavior change, not just a rename. The old non-reranked episodic behavior
+is dropped since the reranked version is strictly better (m@5: 0.867 vs 0.472
+on oracle).
+
 ### Bundle mode (`bundles=True`)
 
 When `bundles=True`, `recall()` runs the `episodic` strategy to get primary
@@ -93,6 +109,14 @@ The `max_context_chars` budget for bundle reconstruction defaults to 16,000.
 This is not exposed as a parameter — it's an internal constant. If a caller
 needs a different budget, they can use the internal `_reconstruct_sessions()`
 method directly.
+
+### Filter params implementation note
+
+`_search_messages` and `_search_messages_llm_expansion` already accept filter
+params (role, session_id, etc.). However, `_search_messages_decomposed` does
+NOT — it only takes `query, limit, per_query_limit, use_cross_encoder`. The
+implementation must add filter params to `_search_messages_decomposed` and
+pass them through to the underlying `_search_messages` calls inside it.
 
 ## What's Removed
 
@@ -115,7 +139,7 @@ method directly.
 ### Tests removed
 
 - `test_search_with_context_adds_temporal_neighbors` — tests removed `search_with_context`
-- `test_core_store_journal_record_and_search_with_context` — rewritten to use `recall()` instead of `search_with_context` (tests `_store_journal_record` which stays)
+- `test_core_store_journal_record_and_search_with_context` — rewritten as `test_core_store_journal_record_and_recall`: uses `recall()` instead of `search_with_context` to verify journal records are searchable (tests `_store_journal_record` which stays)
 - `test_search_with_traversal_discovers_temporal_neighbor`
 - `test_search_with_traversal_keeps_strong_seed_over_irrelevant_neighbor`
 - `test_search_with_traversal_preserves_session_diversity`
@@ -126,10 +150,10 @@ method directly.
 
 ### Tests updated
 
-- `test_recall_direct` — calls `recall(query, strategy="direct")`
-- `test_recall_auto` — renamed to `test_recall_default`, calls `recall(query)` with no strategy arg
-- `test_recall_auto_temporal` — renamed to `test_recall_episodic_temporal`, calls `recall(query, strategy="episodic")`
-- `test_recall_invalid_strategy` — still tests `recall("hello", strategy="invalid")`
+- `test_recall_direct_returns_memorycore_results` — calls `recall(query, strategy="direct")` (already correct)
+- `test_recall_auto_routes_direct_query` — renamed to `test_recall_default_returns_results`, calls `recall(query)` with no strategy arg
+- `test_recall_auto_routes_temporal_query` — renamed to `test_recall_episodic_temporal`, calls `recall(query, strategy="episodic")`
+- `test_recall_unknown_strategy_raises` — still tests `recall("hello", strategy="invalid")` (already correct)
 
 ## Eval Script Impact
 
@@ -163,16 +187,23 @@ existing result files.
 
 - `memorycore_decomposed` — was an ablation (episodic without cross-encoder).
   Removed from `MODES` tuple since the reranked version is strictly better.
-- `memorycore_episodic` — kept in `MODES` as an alias for
-  `memorycore_episodic_reranked` for backwards-compatible result comparison.
+
+### Eval modes collapsed
+
+`memorycore_episodic` and `memorycore_episodic_reranked` now produce identical
+results (both use `strategy="episodic"` with cross-encoder). For `--mode all`
+runs, `memorycore_episodic` is removed from the default `MODES` tuple to avoid
+duplicate computation. It can still be run explicitly via `--mode memorycore_episodic`
+for backwards comparison, where it aliases to `strategy="episodic"`.
 
 ### Eval modes needing internal access
 
 - `memorycore_episodic_reranked_4k` — uses `max_context_chars=4_000` which is
   not exposed on `recall()`. The eval script's `_score_instance_episodic`
-  function continues to call `_search_messages_decomposed()` and
-  `_reconstruct_sessions()` directly with the 4k budget parameter. This is
-  acceptable — the eval harness is internal tooling.
+  function continues to call `core._search_messages_decomposed()` and
+  `core._reconstruct_sessions()` directly with the 4k budget parameter. This is
+  acceptable — the eval harness is internal tooling and can use `_`-prefixed
+  methods.
 
 ## Public Exports
 
