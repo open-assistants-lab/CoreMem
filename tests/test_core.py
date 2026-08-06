@@ -9,7 +9,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from coremem import MemoryCore
+from coremem import MemoryCore, SessionBundle
 from coremem.agent_journal import AgentJournalCompileResult, AgentJournalError
 from coremem.types import Memory, SearchResult
 
@@ -590,16 +590,6 @@ def test_recall_direct_returns_memorycore_results():
         core._test_cleanup()
 
 
-def test_recall_default_strategy_returns_results():
-    core = _tmp_core()
-    try:
-        core.ingest("user", "hello world", session_id="s1")
-        results = core.recall("hello", limit=5)
-        assert len(results) > 0
-    finally:
-        core._test_cleanup()
-
-
 def test_recall_episodic_routes_temporal_query():
     core = _tmp_core()
     try:
@@ -629,7 +619,6 @@ def test_recall_bundles_returns_session_bundles():
         core.ingest("user", "What about skiing?", session_id="s2")
         bundles = core.recall("hiking Yosemite", bundles=True)
         assert len(bundles) > 0
-        from coremem import SessionBundle
         assert isinstance(bundles[0], SessionBundle)
     finally:
         core._test_cleanup()
@@ -638,9 +627,12 @@ def test_recall_bundles_returns_session_bundles():
 def test_recall_default_is_episodic():
     core = _tmp_core()
     try:
-        core.ingest("user", "hello world", session_id="s1")
-        results = core.recall("hello", limit=5)
-        assert len(results) > 0
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
+        core.ingest("user", "What about skiing?", session_id="s2")
+        default_results = core.recall("hiking Yosemite", limit=5)
+        episodic_results = core.recall("hiking Yosemite", strategy="episodic", limit=5)
+        assert [r.memory.id for r in default_results] == [r.memory.id for r in episodic_results]
     finally:
         core._test_cleanup()
 
