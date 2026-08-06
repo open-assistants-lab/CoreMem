@@ -357,6 +357,13 @@ class MemoryCore:
         limit: int = 5,
         per_query_limit: int = 20,
         use_cross_encoder: bool = False,
+        role: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        ts_after: str | None = None,
+        ts_before: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
         if limit <= 0 or per_query_limit <= 0:
             return []
@@ -365,7 +372,12 @@ class MemoryCore:
         for query_index, variant in enumerate(decompose_queries(query)):
             weight = 2.0 if query_index == 0 else 1.0
             for rank, result in enumerate(
-                self.search_messages(variant, limit=per_query_limit), start=1,
+                self.search_messages(
+                    variant, limit=per_query_limit,
+                    role=role, session_id=session_id, user_id=user_id,
+                    agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+                    metadata=metadata,
+                ), start=1,
             ):
                 memory_id = result.memory.id or ""
                 if not memory_id:

@@ -659,3 +659,15 @@ def test_search_with_session_reranking_empty():
         assert results == []
     finally:
         core._test_cleanup()
+
+
+def test_search_messages_decomposed_with_session_filter():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("user", "I love hiking in Tahoe", session_id="s2")
+        results = core.search_messages_decomposed("hiking", limit=5, session_id="s1")
+        assert len(results) > 0
+        assert all(r.memory.session_id == "s1" for r in results)
+    finally:
+        core._test_cleanup()
