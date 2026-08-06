@@ -114,7 +114,12 @@ method directly.
 
 ### Tests removed
 
-- `test_search_with_traversal_returns_results`
+- `test_search_with_context_adds_temporal_neighbors` — tests removed `search_with_context`
+- `test_core_store_journal_record_and_search_with_context` — rewritten to use `recall()` instead of `search_with_context` (tests `_store_journal_record` which stays)
+- `test_search_with_traversal_discovers_temporal_neighbor`
+- `test_search_with_traversal_keeps_strong_seed_over_irrelevant_neighbor`
+- `test_search_with_traversal_preserves_session_diversity`
+- `test_search_with_traversal_is_bounded_and_deterministic`
 - `test_search_with_traversal_empty`
 - `test_search_with_session_reranking_returns_results`
 - `test_search_with_session_reranking_empty`
@@ -129,7 +134,9 @@ method directly.
 ## Eval Script Impact
 
 The eval script's `_score_question` dispatch changes from calling individual
-methods to calling `recall()` with different strategies:
+public methods to calling `recall()` for the standard modes, with the 4k
+variant using internal methods directly (since `max_context_chars` is not
+exposed on `recall()`):
 
 ```python
 for m in active_modes:
@@ -137,12 +144,12 @@ for m in active_modes:
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="direct")
     elif m == "memorycore_llm_expansion":
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="expanded")
-    elif m == "memorycore_episodic":
-        new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="episodic")
-    elif m == "memorycore_episodic_reranked":
+    elif m in ("memorycore_episodic", "memorycore_episodic_reranked"):
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="episodic")
     elif m == "memorycore_episodic_reranked_4k":
-        new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="episodic")
+        # 4k budget requires internal access — not exposed on recall()
+        new_rows[m] = _score_instance_episodic(core, instance, truth, k=k,
+                                               use_cross_encoder=True, max_context_chars=4_000)
     elif m == "memorycore_fusion":
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="fusion")
 ```
@@ -158,6 +165,14 @@ existing result files.
   Removed from `MODES` tuple since the reranked version is strictly better.
 - `memorycore_episodic` — kept in `MODES` as an alias for
   `memorycore_episodic_reranked` for backwards-compatible result comparison.
+
+### Eval modes needing internal access
+
+- `memorycore_episodic_reranked_4k` — uses `max_context_chars=4_000` which is
+  not exposed on `recall()`. The eval script's `_score_instance_episodic`
+  function continues to call `_search_messages_decomposed()` and
+  `_reconstruct_sessions()` directly with the 4k budget parameter. This is
+  acceptable — the eval harness is internal tooling.
 
 ## Public Exports
 
@@ -184,6 +199,13 @@ __all__ = [
 
 ## Verification
 
-- All remaining tests pass (117 after removing 4 deprecated tests)
+- All remaining tests pass (113 after removing 8 deprecated tests, plus 1 rewritten)
 - Eval script imports correctly
 - `recall()` with each strategy produces same results as the individual methods did
+
+## Docstrings to Update
+
+- `coremem/__init__.py` module docstring — `core.search_messages(...)` → `core.recall(...)`
+- `coremem/core.py` `MemoryCore` class docstring — references `search_messages` and `search_journal`
+- `README.md` — references `search_journal()` in result tables and descriptions
+- `CHANGELOG.md` — historical references to `search_journal()` (leave as-is; historical record)
