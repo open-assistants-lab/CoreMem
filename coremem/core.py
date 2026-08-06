@@ -134,7 +134,6 @@ class MemoryCore:
         core.ingest("assistant", "Great!", session_id="s1")
         await core.compile_turn(turn_id=tid)
         results = core.recall("coffee")
-        hits = core.search_journal("coffee")
     """
 
     def __init__(
