@@ -1,6 +1,6 @@
 # CoreMem
 
-> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **95.1% R@5 on LongMemEval Oracle (500 questions)** with `search_messages_deep`, **93.8%** with the zero-LLM `search_messages()` path.
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **95.1% R@5 on LongMemEval Oracle (500 questions)** with `recall(strategy="expanded")`, **93.8%** with the zero-LLM `recall(strategy="direct")` path.
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
@@ -40,11 +40,10 @@ CoreMem solves all three:
 
 | Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
 |------|-------------|-------------------|-------------------|------------------|
-| `search_messages()` | 0 | 93.8% | 75.4% | 6.0% |
-| `search_messages_deep()` | 1 | **95.1%** | **85.4%** | **6.0%** |
-| `search_journal()` | 1 | 66.6% | 60.0% | 28.0% |
+| `recall(strategy="direct")` | 0 | 93.8% | 75.4% | 6.0% |
+| `recall(strategy="expanded")` | 1 | **95.1%** | **85.4%** | **6.0%** |
 
-`search_messages_deep` is the best overall — highest on every message-level metric, uses 20% less context. `search_messages` (zero-LLM) achieves 93.8% session recall with no API calls. `search_journal` is a supplementary fast-path for human/agent skimming — 79% hit rate in healthy batches, empty_retrieval inflated by a 429-damaged eval batch.
+`recall(strategy="expanded")` is the best overall — highest on every message-level metric, uses 20% less context. `recall(strategy="direct")` (zero-LLM) achieves 93.8% session recall with no API calls.
 
 All three modes abstain correctly on unanswerable questions (0% false positive rate).
 
@@ -54,11 +53,10 @@ Results: `eval_output/lme-oracle/results.json`
 
 | Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
 |------|-------------|-------------------|-------------------|------------------|
-| `search_messages()` | 0 | **86.5%** | 67.0% | 6.0% |
-| `search_messages_deep()` | 1 | *not yet run* | *not yet run* | — |
-| `search_journal()` | 1 | *not yet run* | *not yet run* | — |
+| `recall(strategy="direct")` | 0 | **86.5%** | 67.0% | 6.0% |
+| `recall(strategy="expanded")` | 1 | *not yet run* | *not yet run* | — |
 
-Zero-LLM `search_messages` holds at 86.5% session recall even with ~48 sessions to search through (vs ~2 in oracle). Near-perfect on single-session types (0.97–1.0), harder on multi-session and temporal-reasoning (0.78–0.80).
+Zero-LLM `recall(strategy="direct")` holds at 86.5% session recall even with ~48 sessions to search through (vs ~2 in oracle). Near-perfect on single-session types (0.97–1.0), harder on multi-session and temporal-reasoning (0.78–0.80).
 
 | Question type | session_recall@5 | message_recall@5 | n |
 |---------------|-------------------|-------------------|---|

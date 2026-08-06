@@ -84,20 +84,22 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 ## Public API
 
 ```python
-from coremem import MemoryCore, SessionBundle, decompose_queries
+from coremem import MemoryCore, SessionBundle
 
-# Direct retrieval (zero LLM)
-results = core.search_messages(query, limit=5)
+# Default: episodic reranking (zero LLM, local cross-encoder)
+results = core.recall(query)
 
-# LLM query expansion (1 LLM call)
-results = core.search_messages_llm_expansion(query, limit=5)
+# Strategies
+results = core.recall(query, strategy="direct")      # BM25+hybrid, zero LLM
+results = core.recall(query, strategy="episodic")     # decomposed + cross-encoder (default)
+results = core.recall(query, strategy="expanded")     # 1 LLM call for query rephrasing
+results = core.recall(query, strategy="fusion")       # RRF of direct + episodic
 
-# Episodic reconstruction (zero LLM, local cross-encoder)
-primary = core.search_messages_decomposed(query, limit=5, use_cross_encoder=True)
-bundles = core.reconstruct_sessions(query, primary_results=primary, max_context_chars=4_000)
+# Session bundles
+bundles = core.recall(query, bundles=True)
 
-# Unified entry point
-results = core.recall(query, strategy="auto")
+# With filter params
+results = core.recall(query, role="user", session_id="abc", ts_after="2024-01-01")
 ```
 
 ## Key Design Decisions
