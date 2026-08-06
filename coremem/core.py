@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,8 @@ from coremem.agent_journal import (
 from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import LLMProvider, decompose_queries, expand_queries
-from coremem.rerank import get_cross_encoder, rerank
-from coremem.types import Memory, SearchQuery, SearchResult, SessionBundle
+from coremem.rerank import rerank
+from coremem.types import Memory, SearchResult, SessionBundle
 
 _DEFAULT_SEARCH_DEPTH = 5
 
@@ -847,6 +847,17 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult] | list[SessionBundle]:
+        """Retrieve memories by query strategy.
+
+        Strategies:
+            - "episodic" (default): query decomposition + cross-encoder reranking, zero LLM
+            - "direct": BM25+hybrid search, zero LLM
+            - "expanded": LLM query rephrasing, 1 LLM call
+            - "fusion": RRF fusion of direct + episodic, zero LLM
+
+        Set bundles=True to return SessionBundle objects with surrounding context.
+        Filter params (role, session_id, etc.) apply to direct/episodic/expanded.
+        """
         if strategy == "direct":
             results = self._search_messages(
                 query, limit=limit, role=role, session_id=session_id,
