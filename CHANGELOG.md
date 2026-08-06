@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.11.0] — Unified `recall()` API
+
+### Changed
+- **Unified all retrieval under `recall()`** — single method with `strategy` parameter (`direct`, `episodic` (default), `expanded`, `fusion`), `bundles` flag, and filter params (role, session_id, user_id, agent_id, ts_after, ts_before, metadata).
+- **Default strategy is `episodic`** (query decomposition + cross-encoder reranking, zero LLM) — the strongest zero-LLM-retrieval mode across both oracle and S evaluations.
+- **`search_messages` → `_search_messages`** (internal), `search_messages_decomposed` → `_search_messages_decomposed`, `search_messages_llm_expansion` → `_search_messages_llm_expansion`, `reconstruct_sessions` → `_reconstruct_sessions`, `search_with_fusion` → `_search_with_fusion`.
+- **Episodic strategy always uses cross-encoder** — the non-reranked episodic variant is dropped (m@5: 0.867 vs 0.472 on oracle).
+- **Eval script MODES** — removed `memorycore_decomposed` and `memorycore_episodic` (collapsed into `memorycore_episodic_reranked`).
+- **`pyproject.toml` version** bumped to 0.11.0.
+
+### Removed
+- **`search_with_traversal`** — graph traversal, below baseline on every metric.
+- **`search_with_context`** — context mode, below baseline.
+- **`search_with_session_reranking`** — session reranking, session recall collapsed to 0.623.
+- **`search_journal`** — journal search removed from eval.
+- **Deterministic classifier in `recall(strategy="auto")`** — 78% accuracy on S, falsified as unreliable for production.
+- **`SearchHit` import** in core.py — only used by removed `search_journal`.
+- **8 deprecated tests** — traversal, context, session_reranking.
+
+### Added
+- **Filter params on `search_messages_decomposed`** — role, session_id, user_id, agent_id, ts_after, ts_before, metadata now pass through to underlying `search_messages` calls.
+- **`bundles` flag on `recall()`** — returns `list[SessionBundle]` with surrounding context.
+- **`recall()` docstring** — documents all 4 strategies, bundles flag, and filter params.
+
 ## [Unreleased] — LongMemEval Oracle + S eval, 429 retry, quote sanitization, streaming loader, S dup-session fix
 
 ### Added
