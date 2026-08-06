@@ -27,7 +27,7 @@ def test_core_ingest_and_search_messages():
         core.ingest("user", "I built a Spitfire model kit")
         core.ingest("assistant", "That sounds fun!")
         assert core.count() == 2
-        results = core.search_messages("model kits", limit=10)
+        results = core._search_messages("model kits", limit=10)
         assert len(results) > 0
         assert any("model" in r.memory.content.lower() for r in results)
     finally:
@@ -39,7 +39,7 @@ def test_core_search_messages_llm_expansion():
     try:
         core.ingest("user", "I built a Spitfire model kit")
         core.ingest("assistant", "That sounds fun!")
-        results = core.search_messages_llm_expansion("model kits", limit=10)
+        results = core._search_messages_llm_expansion("model kits", limit=10)
         assert len(results) > 0
         assert any("model" in r.memory.content.lower() for r in results)
     finally:
@@ -52,11 +52,11 @@ def test_core_search_messages_filters_session_when_provided():
         core.ingest("user", "coffee preference from session one", session_id="s1")
         core.ingest("user", "coffee preference from session two", session_id="s2")
 
-        scoped = core.search_messages("coffee preference", session_id="s1", limit=10)
+        scoped = core._search_messages("coffee preference", session_id="s1", limit=10)
         assert scoped
         assert all(result.memory.session_id == "s1" for result in scoped)
 
-        global_results = core.search_messages("coffee preference", limit=10)
+        global_results = core._search_messages("coffee preference", limit=10)
         assert {result.memory.session_id for result in global_results} >= {"s1", "s2"}
     finally:
         core._test_cleanup()
@@ -423,11 +423,11 @@ def test_reconstruct_sessions_returns_complete_short_session():
     try:
         for mid, content in (("m1", "opening"), ("m2", "answer"), ("m3", "ending")):
             _insert_traversal_message(core, mid, content, "s1")
-        core.search_messages_decomposed = lambda query, limit=5: [
+        core._search_messages_decomposed = lambda query, limit=5: [
             _seed("m2", "answer", "s1", 1.0),
         ]
 
-        bundles = core.reconstruct_sessions("answer")
+        bundles = core._reconstruct_sessions("answer")
 
         assert len(bundles) == 1
         assert bundles[0].complete is True
@@ -441,11 +441,11 @@ def test_reconstruct_sessions_combines_opening_and_anchor_segments():
     try:
         for index in range(8):
             _insert_traversal_message(core, f"m{index}", f"message {index} " + "x" * 500, "s1")
-        core.search_messages_decomposed = lambda query, limit=5: [
+        core._search_messages_decomposed = lambda query, limit=5: [
             _seed("m6", "answer", "s1", 1.0),
         ]
 
-        bundles = core.reconstruct_sessions(
+        bundles = core._reconstruct_sessions(
             "answer",
             short_max_chars=1_000,
             segment_max_messages=2,
@@ -475,7 +475,7 @@ def test_reconstruct_sessions_respects_global_budget_across_sessions():
             _seed("s2-m1", "answer two", "s2", 0.9),
         ]
 
-        bundles = core.reconstruct_sessions(
+        bundles = core._reconstruct_sessions(
             "answer",
             session_limit=2,
             max_context_chars=3_000,
@@ -496,7 +496,7 @@ def test_search_with_traversal_discovers_temporal_neighbor():
     try:
         _insert_traversal_message(core, "m1", "Yosemite trip overview", "s1")
         _insert_traversal_message(core, "m2", "The Yosemite permit is the answer", "s1")
-        core.search_messages = lambda query, limit=10: [
+        core._search_messages = lambda query, limit=10: [
             _seed("m1", "Yosemite trip overview", "s1", 1.0),
         ]
 
@@ -512,7 +512,7 @@ def test_search_with_traversal_keeps_strong_seed_over_irrelevant_neighbor():
     try:
         _insert_traversal_message(core, "m1", "Yosemite permit details", "s1")
         _insert_traversal_message(core, "m2", "Unrelated pasta recipe", "s1")
-        core.search_messages = lambda query, limit=10: [
+        core._search_messages = lambda query, limit=10: [
             _seed("m1", "Yosemite permit details", "s1", 1.0),
         ]
 
@@ -534,7 +534,7 @@ def test_search_with_traversal_preserves_session_diversity():
             ("b2", "beta answer", "b"),
         ):
             _insert_traversal_message(core, mid, content, sid)
-        core.search_messages = lambda query, limit=10: [
+        core._search_messages = lambda query, limit=10: [
             _seed("a1", "alpha one", "a", 1.0),
             _seed("a2", "alpha two", "a", 0.9),
             _seed("a3", "alpha three", "a", 0.8),
@@ -555,7 +555,7 @@ def test_search_with_traversal_is_bounded_and_deterministic():
     try:
         for index in range(5):
             _insert_traversal_message(core, f"m{index}", f"topic {index}", "s1")
-        core.search_messages = lambda query, limit=10: [
+        core._search_messages = lambda query, limit=10: [
             _seed("m2", "topic 2", "s1", 1.0),
         ]
 
@@ -653,7 +653,7 @@ def test_search_with_fusion_returns_results():
     try:
         core.ingest("user", "I love hiking in Yosemite", session_id="s1")
         core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
-        results = core.search_with_fusion("hiking Yosemite", limit=5)
+        results = core._search_with_fusion("hiking Yosemite", limit=5)
         assert len(results) > 0
     finally:
         core._test_cleanup()
@@ -662,7 +662,7 @@ def test_search_with_fusion_returns_results():
 def test_search_with_fusion_empty():
     core = _tmp_core()
     try:
-        results = core.search_with_fusion("nonexistent query", limit=5)
+        results = core._search_with_fusion("nonexistent query", limit=5)
         assert results == []
     finally:
         core._test_cleanup()
@@ -693,7 +693,7 @@ def test_search_messages_decomposed_with_session_filter():
     try:
         core.ingest("user", "I love hiking in Yosemite", session_id="s1")
         core.ingest("user", "I love hiking in Tahoe", session_id="s2")
-        results = core.search_messages_decomposed("hiking", limit=5, session_id="s1")
+        results = core._search_messages_decomposed("hiking", limit=5, session_id="s1")
         assert len(results) > 0
         assert all(r.memory.session_id == "s1" for r in results)
     finally:

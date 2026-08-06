@@ -46,9 +46,9 @@ def test_decomposed_search_fuses_independent_cues():
                 return [beta]
             return [alpha]
 
-        core.search_messages = search
+        core._search_messages = search
 
-        results = core.search_messages_decomposed(
+        results = core._search_messages_decomposed(
             "Which happened first, 'Alpha' or 'Beta'?", limit=2,
         )
 
@@ -69,10 +69,10 @@ def test_decomposed_search_optionally_uses_cross_encoder(monkeypatch):
             memory=Memory(id="b", content="second", role="user", session_id="b"),
             score=0.5,
         )
-        core.search_messages = lambda query, limit=10, **kwargs: [first, second]
+        core._search_messages = lambda query, limit=10, **kwargs: [first, second]
         monkeypatch.setattr("coremem.core.rerank", lambda query, results: list(reversed(results)))
 
-        results = core.search_messages_decomposed(
+        results = core._search_messages_decomposed(
             "camera lens", limit=2, use_cross_encoder=True,
         )
 

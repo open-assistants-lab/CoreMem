@@ -159,17 +159,17 @@ def run(
         retrieval_seconds: dict[str, float] = {}
 
         started = time.perf_counter()
-        basic = core.search_messages(instance.query, limit=5)
+        basic = core._search_messages(instance.query, limit=5)
         retrieval_seconds["memorycore"] = time.perf_counter() - started
         contexts["memorycore"] = _format_messages([result.memory for result in basic])
 
         started = time.perf_counter()
-        primary = core.search_messages_decomposed(instance.query, limit=5, per_query_limit=20)
+        primary = core._search_messages_decomposed(instance.query, limit=5, per_query_limit=20)
         retrieval_seconds["decomposition_only"] = time.perf_counter() - started
         contexts["decomposition_only"] = _format_messages([result.memory for result in primary])
 
         started = time.perf_counter()
-        basic_bundles = core.reconstruct_sessions(
+        basic_bundles = core._reconstruct_sessions(
             instance.query,
             session_limit=5,
             max_context_chars=16_000,
@@ -179,7 +179,7 @@ def run(
         contexts["reconstruction_only"] = _format_bundles(basic_bundles)
 
         started = time.perf_counter()
-        bundles = core.reconstruct_sessions(
+        bundles = core._reconstruct_sessions(
             instance.query,
             session_limit=5,
             max_context_chars=16_000,
@@ -192,7 +192,7 @@ def run(
         contexts["memorycore_episodic"] = _format_bundles(bundles)
 
         started = time.perf_counter()
-        small_bundles = core.reconstruct_sessions(
+        small_bundles = core._reconstruct_sessions(
             instance.query,
             session_limit=5,
             max_context_chars=4_000,
@@ -202,13 +202,13 @@ def run(
         contexts["episodic_4k"] = _format_bundles(small_bundles)
 
         started = time.perf_counter()
-        reranked_primary = core.search_messages_decomposed(
+        reranked_primary = core._search_messages_decomposed(
             instance.query,
             limit=5,
             per_query_limit=20,
             use_cross_encoder=True,
         )
-        reranked_bundles = core.reconstruct_sessions(
+        reranked_bundles = core._reconstruct_sessions(
             instance.query,
             session_limit=5,
             max_context_chars=4_000,
@@ -218,7 +218,7 @@ def run(
         contexts["episodic_4k_reranked"] = _format_bundles(reranked_bundles)
 
         started = time.perf_counter()
-        deep = core.search_messages_llm_expansion(instance.query, limit=5)
+        deep = core._search_messages_llm_expansion(instance.query, limit=5)
         retrieval_seconds["memorycore_llm_expansion"] = time.perf_counter() - started
         contexts["memorycore_llm_expansion"] = _format_messages([result.memory for result in deep])
 

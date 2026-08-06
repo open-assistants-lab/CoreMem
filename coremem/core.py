@@ -134,7 +134,7 @@ class MemoryCore:
         tid = core.ingest("user", "I like coffee", session_id="s1")
         core.ingest("assistant", "Great!", session_id="s1")
         await core.compile_turn(turn_id=tid)
-        results = core.search_messages("coffee")
+        results = core.recall("coffee")
         hits = core.search_journal("coffee")
     """
 
@@ -249,7 +249,7 @@ class MemoryCore:
             )
         return tid
 
-    def search_messages(
+    def _search_messages(
         self, query: str, limit: int = 10,
         role: str | None = None,
         session_id: str | None = None,
@@ -287,7 +287,7 @@ class MemoryCore:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_messages_llm_expansion(
+    def _search_messages_llm_expansion(
         self,
         query: str,
         limit: int = 5,
@@ -351,7 +351,7 @@ class MemoryCore:
         all_results = rerank(query, all_results)
         return all_results[:limit]
 
-    def search_messages_decomposed(
+    def _search_messages_decomposed(
         self,
         query: str,
         limit: int = 5,
@@ -372,7 +372,7 @@ class MemoryCore:
         for query_index, variant in enumerate(decompose_queries(query)):
             weight = 2.0 if query_index == 0 else 1.0
             for rank, result in enumerate(
-                self.search_messages(
+                self._search_messages(
                     variant, limit=per_query_limit,
                     role=role, session_id=session_id, user_id=user_id,
                     agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
@@ -394,7 +394,7 @@ class MemoryCore:
             ranked = rerank(query, ranked)
         return _mmr_diversify(ranked, limit)
 
-    def reconstruct_sessions(
+    def _reconstruct_sessions(
         self,
         query: str,
         session_limit: int = 5,
@@ -408,7 +408,7 @@ class MemoryCore:
         primary = (
             primary_results
             if primary_results is not None
-            else self.search_messages_decomposed(query, limit=session_limit)
+            else self._search_messages_decomposed(query, limit=session_limit)
         )
         bundles: list[SessionBundle] = []
         seen_sessions: set[str] = set()
@@ -915,7 +915,7 @@ class MemoryCore:
         if limit <= 0 or seed_limit <= 0:
             return []
 
-        seeds = self.search_messages(query, limit=max(limit, seed_limit))
+        seeds = self._search_messages(query, limit=max(limit, seed_limit))
         if not seeds:
             return []
 
@@ -1054,39 +1054,39 @@ class MemoryCore:
         metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult] | list[SessionBundle]:
         if strategy == "direct":
-            results = self.search_messages(
+            results = self._search_messages(
                 query, limit=limit, role=role, session_id=session_id,
                 user_id=user_id, agent_id=agent_id, ts_after=ts_after,
                 ts_before=ts_before, metadata=metadata,
             )
             if bundles:
-                return self.reconstruct_sessions(
+                return self._reconstruct_sessions(
                     query, session_limit=limit, primary_results=results,
                 )
             return results
 
         if strategy == "expanded":
-            results = self.search_messages_llm_expansion(
+            results = self._search_messages_llm_expansion(
                 query, limit=limit, role=role, session_id=session_id,
                 user_id=user_id, agent_id=agent_id, ts_after=ts_after,
                 ts_before=ts_before, metadata=metadata,
             )
             if bundles:
-                return self.reconstruct_sessions(
+                return self._reconstruct_sessions(
                     query, session_limit=limit, primary_results=results,
                 )
             return results
 
         if strategy == "fusion":
-            results = self.search_with_fusion(query, limit=limit)
+            results = self._search_with_fusion(query, limit=limit)
             if bundles:
-                return self.reconstruct_sessions(
+                return self._reconstruct_sessions(
                     query, session_limit=limit, primary_results=results,
                 )
             return results
 
         if strategy == "episodic":
-            primary = self.search_messages_decomposed(
+            primary = self._search_messages_decomposed(
                 query, limit=limit, per_query_limit=max(20, limit * 4),
                 use_cross_encoder=True,
                 role=role, session_id=session_id, user_id=user_id,
@@ -1094,7 +1094,7 @@ class MemoryCore:
                 metadata=metadata,
             )
             if bundles:
-                return self.reconstruct_sessions(
+                return self._reconstruct_sessions(
                     query, session_limit=limit, primary_results=primary,
                 )
             return primary
@@ -1114,7 +1114,7 @@ class MemoryCore:
             return []
 
         # Step 1: ER to find top sessions
-        er_results = self.search_messages_decomposed(
+        er_results = self._search_messages_decomposed(
             query, limit=session_limit, per_query_limit=per_query_limit,
             use_cross_encoder=True,
         )
@@ -1122,13 +1122,13 @@ class MemoryCore:
             r.memory.session_id for r in er_results if r.memory.session_id
         ))
         if not top_sessions:
-            return self.search_messages(query, limit=limit)
+            return self._search_messages(query, limit=limit)
 
         # Step 2: MC scoped to each top session
         seen_ids: set[str] = set()
         results: list[SearchResult] = []
         for session_id in top_sessions:
-            session_results = self.search_messages(
+            session_results = self._search_messages(
                 query, limit=per_query_limit, session_id=session_id,
             )
             for r in session_results:
@@ -1141,7 +1141,7 @@ class MemoryCore:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_with_fusion(
+    def _search_with_fusion(
         self,
         query: str,
         limit: int = 5,
@@ -1150,8 +1150,8 @@ class MemoryCore:
         if limit <= 0:
             return []
 
-        mc_results = self.search_messages(query, limit=per_query_limit)
-        er_results = self.search_messages_decomposed(
+        mc_results = self._search_messages(query, limit=per_query_limit)
+        er_results = self._search_messages_decomposed(
             query, limit=per_query_limit, per_query_limit=per_query_limit,
             use_cross_encoder=True,
         )
