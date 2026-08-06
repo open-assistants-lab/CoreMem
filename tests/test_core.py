@@ -590,22 +590,22 @@ def test_recall_direct_returns_memorycore_results():
         core._test_cleanup()
 
 
-def test_recall_auto_routes_direct_query():
+def test_recall_default_strategy_returns_results():
     core = _tmp_core()
     try:
         core.ingest("user", "hello world", session_id="s1")
-        results = core.recall("hello", strategy="auto", limit=5)
+        results = core.recall("hello", limit=5)
         assert len(results) > 0
     finally:
         core._test_cleanup()
 
 
-def test_recall_auto_routes_temporal_query():
+def test_recall_episodic_routes_temporal_query():
     core = _tmp_core()
     try:
         core.ingest("user", "event one", session_id="s1")
         core.ingest("user", "event two", session_id="s2")
-        results = core.recall("how many days before event one did event two happen", strategy="auto", limit=5)
+        results = core.recall("how many days before event one did event two happen", strategy="episodic", limit=5)
         assert len(results) > 0
     finally:
         core._test_cleanup()
@@ -617,6 +617,41 @@ def test_recall_unknown_strategy_raises():
         import pytest
         with pytest.raises(ValueError, match="unknown strategy"):
             core.recall("hello", strategy="invalid")
+    finally:
+        core._test_cleanup()
+
+
+def test_recall_bundles_returns_session_bundles():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
+        core.ingest("user", "What about skiing?", session_id="s2")
+        bundles = core.recall("hiking Yosemite", bundles=True)
+        assert len(bundles) > 0
+        from coremem import SessionBundle
+        assert isinstance(bundles[0], SessionBundle)
+    finally:
+        core._test_cleanup()
+
+
+def test_recall_default_is_episodic():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "hello world", session_id="s1")
+        results = core.recall("hello", limit=5)
+        assert len(results) > 0
+    finally:
+        core._test_cleanup()
+
+
+def test_recall_fusion_strategy():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
+        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
+        results = core.recall("hiking Yosemite", strategy="fusion", limit=5)
+        assert len(results) > 0
     finally:
         core._test_cleanup()
 

@@ -1041,93 +1041,63 @@ class MemoryCore:
     def recall(
         self,
         query: str,
-        strategy: str = "auto",
+        *,
+        strategy: str = "episodic",
         limit: int = 5,
-        use_cross_encoder: bool = False,
-    ) -> list[SearchResult]:
+        bundles: bool = False,
+        role: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        ts_after: str | None = None,
+        ts_before: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[SearchResult] | list[SessionBundle]:
         if strategy == "direct":
-            return self.search_messages(query, limit=limit)
-
-        if strategy == "llm_expansion":
-            return self.search_messages_llm_expansion(query, limit=limit)
-
-        if strategy in ("episodic", "auto"):
-            q = query.lower()
-
-            # Conversational references — skip episodic
-            is_conversational = any(
-                cue in q
-                for cue in (
-                    "previous conversation", "another trip", "i was going through",
-                    "looking back at", "as we discussed",
-                )
+            results = self.search_messages(
+                query, limit=limit, role=role, session_id=session_id,
+                user_id=user_id, agent_id=agent_id, ts_after=ts_after,
+                ts_before=ts_before, metadata=metadata,
             )
-
-            # Temporal — check time-unit patterns before generic "how many"
-            is_temporal = any(
-                cue in q
-                for cue in (
-                    "before", "after", "between", "earlier", "later",
-                    "since", "until", "first", "last", "most recent",
-                    "how long", "how much time",
-                    "how many day", "how many week", "how many month", "how many year",
-                    "how long ago", "which happened",
+            if bundles:
+                return self.reconstruct_sessions(
+                    query, session_limit=limit, primary_results=results,
                 )
-            ) and not is_conversational
+            return results
 
-            # Knowledge update
-            is_knowledge_update = any(
-                cue in q
-                for cue in (
-                    "current", "currently", "latest", "most recent",
-                    "now", "still", "changed", "updated", "replaced",
-                    "what did i eventually", "what is my",
-                    "what day of the week",
-                )
-            ) and not is_temporal and not is_conversational
-
-            # Aggregation — check after temporal so "how many weeks" doesn't match here
-            is_aggregation = any(
-                cue in q
-                for cue in (
-                    "how many", "in total", "total", "all",
-                    "what percentage", "sum", "combined", "altogether",
-                    "most money", "most time", "most distance",
-                )
-            ) and not is_temporal and not is_knowledge_update and not is_conversational
-
-            if strategy == "auto" and not is_temporal and not is_knowledge_update and not is_aggregation:
-                return self.search_messages(query, limit=limit)
-
-            if strategy == "auto" and is_aggregation and use_cross_encoder:
-                primary = self.search_messages_decomposed(
-                    query, limit=limit, per_query_limit=max(20, limit * 4),
-                    use_cross_encoder=True,
-                )
-            else:
-                primary = self.search_messages_decomposed(
-                    query, limit=limit, per_query_limit=max(20, limit * 4),
-                )
-
-            budget = 4_000 if strategy == "auto" else 16_000
-            bundles = self.reconstruct_sessions(
-                query, session_limit=limit, max_context_chars=budget,
-                primary_results=primary,
+        if strategy == "expanded":
+            results = self.search_messages_llm_expansion(
+                query, limit=limit, role=role, session_id=session_id,
+                user_id=user_id, agent_id=agent_id, ts_after=ts_after,
+                ts_before=ts_before, metadata=metadata,
             )
-            bundle_ids = {message.id for bundle in bundles for message in bundle.messages if message.id}
-            seen: set[str] = set()
-            results: list[SearchResult] = []
-            for result in primary:
-                if result.memory.id and result.memory.id not in seen:
-                    seen.add(result.memory.id)
-                    results.append(result)
-            for bundle in bundles:
-                for message in bundle.messages:
-                    if message.id and message.id not in seen:
-                        seen.add(message.id)
-                        results.append(SearchResult(memory=message, score=0.0))
-            results.sort(key=lambda r: r.score, reverse=True)
-            return results[:limit]
+            if bundles:
+                return self.reconstruct_sessions(
+                    query, session_limit=limit, primary_results=results,
+                )
+            return results
+
+        if strategy == "fusion":
+            results = self.search_with_fusion(query, limit=limit)
+            if bundles:
+                return self.reconstruct_sessions(
+                    query, session_limit=limit, primary_results=results,
+                )
+            return results
+
+        if strategy == "episodic":
+            primary = self.search_messages_decomposed(
+                query, limit=limit, per_query_limit=max(20, limit * 4),
+                use_cross_encoder=True,
+                role=role, session_id=session_id, user_id=user_id,
+                agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+                metadata=metadata,
+            )
+            if bundles:
+                return self.reconstruct_sessions(
+                    query, session_limit=limit, primary_results=primary,
+                )
+            return primary
 
         raise ValueError(f"unknown strategy: {strategy}")
 
