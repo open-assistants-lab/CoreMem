@@ -21,7 +21,6 @@ from coremem.agent_journal import (
     AgentJournalLLMCompiler,
     AgentJournalSearch,
     CrossEncoderReranker,
-    SearchHit,
     dream,
     rebuild_index,
 )
@@ -824,9 +823,6 @@ class MemoryCore:
     def rebuild_index(self) -> dict:
         return rebuild_index(self._agent_journal_bundle.root)
 
-    def search_journal(self, query: str, limit: int = 5) -> list[SearchHit]:
-        return self._agent_journal_search.search(query, limit=limit)
-
     # ── Context-Retrieval methods (PoC) ─────────────────────────
 
     def _store_journal_record(self, session_id: str, content: str) -> None:
@@ -836,207 +832,6 @@ class MemoryCore:
                VALUES (?, ?, ?, ?)""",
             (record_id, session_id, content, datetime.now(UTC).isoformat()),
         )
-
-    def search_with_context(
-        self, query: str,
-        k_sessions: int = 5,
-        k_messages: int = 20,
-        context_window: int = 1,
-    ) -> list[SearchResult]:
-        import warnings
-        warnings.warn("search_with_context is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
-        if k_sessions <= 0 or k_messages <= 0:
-            return []
-        context_window = max(0, context_window)
-        journal_rows = self._db.search("journal_records", "content", query, limit=k_sessions)
-        if not journal_rows:
-            return []
-        max_score = max((r.get("_score", r.get("score", 0)) for r in journal_rows), default=1.0) or 1.0
-        session_weight: dict[str, float] = {}
-        for r in journal_rows:
-            sid = r.get("session_id", "")
-            if sid:
-                session_weight[sid] = (r.get("_score", r.get("score", 0)) or 0.0) / max_score
-        if not session_weight:
-            return []
-
-        per_session_limit = max(1, (k_messages + len(session_weight) - 1) // len(session_weight))
-        selected: dict[str, SearchResult] = {}
-        for session_id, weight in session_weight.items():
-            rows = self._db.raw_query(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC",
-                (session_id,),
-            )
-            scored: list[tuple[int, SearchResult]] = []
-            for index, row in enumerate(rows):
-                mem = _row_to_memory(row)
-                score = SearchHeuristics.apply_all(
-                    query=query,
-                    content=mem.content,
-                    score=weight,
-                    ts=mem.ts.isoformat() if mem.ts else row.get("ts"),
-                )
-                scored.append((index, SearchResult(memory=mem, score=score)))
-            scored.sort(key=lambda item: item[1].score, reverse=True)
-
-            for index, result in scored[:per_session_limit]:
-                if result.memory.id:
-                    selected[result.memory.id] = result
-                for neighbor_index in range(
-                    max(0, index - context_window),
-                    min(len(rows), index + context_window + 1),
-                ):
-                    if neighbor_index == index:
-                        continue
-                    neighbor = _row_to_memory(rows[neighbor_index])
-                    if not neighbor.id:
-                        continue
-                    neighbor_score = result.score * 0.75
-                    existing = selected.get(neighbor.id)
-                    if existing is None or existing.score < neighbor_score:
-                        selected[neighbor.id] = SearchResult(memory=neighbor, score=neighbor_score)
-
-        results = list(selected.values())
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:k_messages]
-
-    def search_with_traversal(
-        self,
-        query: str,
-        limit: int = 5,
-        seed_limit: int = 20,
-        beam_width: int = 20,
-        max_rounds: int = 2,
-        neighbors_per_direction: int = 1,
-        max_per_session: int = 2,
-    ) -> list[SearchResult]:
-        import warnings
-        warnings.warn("search_with_traversal is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
-        if limit <= 0 or seed_limit <= 0:
-            return []
-
-        seeds = self._search_messages(query, limit=max(limit, seed_limit))
-        if not seeds:
-            return []
-
-        raw_scores = [seed.score for seed in seeds]
-        low, high = min(raw_scores), max(raw_scores)
-        if high > low:
-            normalized = [(score - low) / (high - low) for score in raw_scores]
-        else:
-            normalized = [1.0 / rank for rank in range(1, len(seeds) + 1)]
-
-        normalized_seeds = [
-            SearchResult(memory=seed.memory, score=score)
-            for seed, score in zip(seeds, normalized)
-        ]
-        baseline = normalized_seeds[:limit]
-        if max_rounds <= 0 or beam_width <= 0 or neighbors_per_direction <= 0:
-            return baseline
-
-        frontier: list[tuple[SearchResult, int]] = []
-        session_counts: dict[str, int] = {}
-        for seed in normalized_seeds:
-            sid = seed.memory.session_id or ""
-            if session_counts.get(sid, 0) >= max_per_session:
-                continue
-            session_counts[sid] = session_counts.get(sid, 0) + 1
-            frontier.append((seed, 0))
-            if len(frontier) >= beam_width:
-                break
-
-        expanded: set[str] = set()
-        best_candidates: dict[str, SearchResult] = {}
-        session_rows: dict[str, list[dict[str, Any]]] = {}
-        session_indexes: dict[str, dict[str, int]] = {}
-
-        for hop in range(1, max_rounds + 1):
-            candidates: dict[str, dict[str, Any]] = {}
-            for parent, _ in frontier:
-                parent_id = parent.memory.id or ""
-                session_id = parent.memory.session_id or ""
-                if not parent_id or not session_id:
-                    continue
-                expanded.add(parent_id)
-                if session_id not in session_rows:
-                    rows = self._db.raw_query(
-                        "SELECT * FROM messages WHERE session_id = ? "
-                        "ORDER BY ts ASC, rowid ASC",
-                        (session_id,),
-                    )
-                    session_rows[session_id] = rows
-                    session_indexes[session_id] = {
-                        str(row.get("id", "")): index for index, row in enumerate(rows)
-                    }
-                rows = session_rows[session_id]
-                index = session_indexes[session_id].get(parent_id)
-                if index is None:
-                    continue
-                for neighbor_index in range(
-                    max(0, index - neighbors_per_direction),
-                    min(len(rows), index + neighbors_per_direction + 1),
-                ):
-                    if neighbor_index == index:
-                        continue
-                    memory = _row_to_memory(rows[neighbor_index])
-                    memory_id = memory.id or ""
-                    if not memory_id or memory_id in expanded:
-                        continue
-                    candidate = candidates.setdefault(
-                        memory_id,
-                        {"memory": memory, "parents": set(), "parent_score": 0.0},
-                    )
-                    candidate["parents"].add(parent_id)
-                    candidate["parent_score"] = max(candidate["parent_score"], parent.score)
-
-            if not candidates:
-                break
-
-            round_results: list[SearchResult] = []
-            for memory_id, candidate in candidates.items():
-                memory = candidate["memory"]
-                boosted = SearchHeuristics.keyword_overlap(
-                    query=query, content=memory.content, score=1.0,
-                )
-                relevance = max(0.0, boosted - 1.0)
-                relevance = relevance / (1.0 + relevance)
-                confirmation = min(len(candidate["parents"]) - 1, 2) / 2
-                if relevance == 0.0 and confirmation == 0.0:
-                    continue
-                score = (
-                    0.60 * relevance
-                    + 0.30 * candidate["parent_score"] * (0.7 ** hop)
-                    + 0.10 * confirmation
-                )
-                result = SearchResult(memory=memory, score=score)
-                round_results.append(result)
-                existing = best_candidates.get(memory_id)
-                if existing is None or result.score > existing.score:
-                    best_candidates[memory_id] = result
-
-            round_results.sort(key=lambda result: result.score, reverse=True)
-            next_frontier: list[tuple[SearchResult, int]] = []
-            session_counts = {}
-            for result in round_results:
-                sid = result.memory.session_id or ""
-                if session_counts.get(sid, 0) >= max_per_session:
-                    continue
-                session_counts[sid] = session_counts.get(sid, 0) + 1
-                next_frontier.append((result, hop))
-                if len(next_frontier) >= beam_width:
-                    break
-            if not next_frontier:
-                break
-            frontier = next_frontier
-
-        final_by_id = {result.memory.id: result for result in baseline if result.memory.id}
-        for memory_id, result in best_candidates.items():
-            existing = final_by_id.get(memory_id)
-            if existing is None or result.score > existing.score:
-                final_by_id[memory_id] = result
-        final = list(final_by_id.values())
-        final.sort(key=lambda result: result.score, reverse=True)
-        return final[:limit]
 
     def recall(
         self,
@@ -1100,46 +895,6 @@ class MemoryCore:
             return primary
 
         raise ValueError(f"unknown strategy: {strategy}")
-
-    def search_with_session_reranking(
-        self,
-        query: str,
-        limit: int = 5,
-        per_query_limit: int = 20,
-        session_limit: int = 5,
-    ) -> list[SearchResult]:
-        import warnings
-        warnings.warn("search_with_session_reranking is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
-        if limit <= 0:
-            return []
-
-        # Step 1: ER to find top sessions
-        er_results = self._search_messages_decomposed(
-            query, limit=session_limit, per_query_limit=per_query_limit,
-            use_cross_encoder=True,
-        )
-        top_sessions = list(dict.fromkeys(
-            r.memory.session_id for r in er_results if r.memory.session_id
-        ))
-        if not top_sessions:
-            return self._search_messages(query, limit=limit)
-
-        # Step 2: MC scoped to each top session
-        seen_ids: set[str] = set()
-        results: list[SearchResult] = []
-        for session_id in top_sessions:
-            session_results = self._search_messages(
-                query, limit=per_query_limit, session_id=session_id,
-            )
-            for r in session_results:
-                if r.memory.id and r.memory.id not in seen_ids:
-                    seen_ids.add(r.memory.id)
-                    results.append(r)
-            if len(results) >= limit:
-                break
-
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:limit]
 
     def _search_with_fusion(
         self,

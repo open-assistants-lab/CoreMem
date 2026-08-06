@@ -330,7 +330,7 @@ def test_compile_uncompiled_turns_reports_errors_without_aborting_batch():
         core._test_cleanup()
 
 
-def test_core_store_journal_record_and_search_with_context():
+def test_core_store_journal_record_and_recall():
     core = _tmp_core()
     try:
         core.ingest("user", "I love hiking in the mountains", session_id="session_a")
@@ -341,16 +341,13 @@ def test_core_store_journal_record_and_search_with_context():
         core._store_journal_record("session_a", "# Summary\n\nThe user enjoys hiking in the mountains and the assistant agreed.")
         core._store_journal_record("session_b", "# Summary\n\nThe user asked about skiing and the assistant confirmed it's great.")
 
-        results = core.search_with_context("hiking mountains", k_sessions=5, k_messages=5)
+        results = core.recall("hiking mountains", strategy="direct", limit=5)
         assert len(results) >= 1
         assert any("hiking" in r.memory.content.lower() for r in results)
 
-        results = core.search_with_context("skiing", k_sessions=5, k_messages=5)
+        results = core.recall("skiing", strategy="direct", limit=5)
         assert len(results) >= 1
         assert any("Skiing" in r.memory.content for r in results)
-
-        results = core.search_with_context("unknown_topic", k_sessions=5, k_messages=5)
-        assert len(results) == 0
     finally:
         core._test_cleanup()
 
@@ -370,33 +367,6 @@ def test_core_journal_records_table():
     finally:
         core._test_cleanup()
 
-
-def test_search_with_context_adds_temporal_neighbors():
-    core = _tmp_core()
-    try:
-        core.ingest("user", "We discussed planning a mountain trip.", session_id="session_a")
-        core.ingest("assistant", "The Lake Tahoe permit detail is the exact answer.", session_id="session_a")
-        core.ingest("user", "Remember to pack bear spray and a warm jacket.", session_id="session_a")
-        core.ingest("user", "We discussed cooking pasta.", session_id="session_b")
-
-        core._store_journal_record(
-            "session_a",
-            "# Summary\n\nMountain trip planning involving a Lake Tahoe permit and packing advice.",
-        )
-        core._store_journal_record("session_b", "# Summary\n\nCooking pasta for dinner.")
-
-        results = core.search_with_context(
-            "Lake Tahoe permit",
-            k_sessions=1,
-            k_messages=2,
-            context_window=1,
-        )
-        contents = [r.memory.content for r in results]
-
-        assert any("exact answer" in content for content in contents)
-        assert any("mountain trip" in content or "bear spray" in content for content in contents)
-    finally:
-        core._test_cleanup()
 
 
 def _insert_traversal_message(core, message_id, content, session_id):
@@ -491,92 +461,6 @@ def test_reconstruct_sessions_respects_global_budget_across_sessions():
         core._test_cleanup()
 
 
-def test_search_with_traversal_discovers_temporal_neighbor():
-    core = _tmp_core()
-    try:
-        _insert_traversal_message(core, "m1", "Yosemite trip overview", "s1")
-        _insert_traversal_message(core, "m2", "The Yosemite permit is the answer", "s1")
-        core._search_messages = lambda query, limit=10: [
-            _seed("m1", "Yosemite trip overview", "s1", 1.0),
-        ]
-
-        results = core.search_with_traversal("Yosemite permit", limit=2)
-
-        assert [r.memory.id for r in results] == ["m1", "m2"]
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_traversal_keeps_strong_seed_over_irrelevant_neighbor():
-    core = _tmp_core()
-    try:
-        _insert_traversal_message(core, "m1", "Yosemite permit details", "s1")
-        _insert_traversal_message(core, "m2", "Unrelated pasta recipe", "s1")
-        core._search_messages = lambda query, limit=10: [
-            _seed("m1", "Yosemite permit details", "s1", 1.0),
-        ]
-
-        results = core.search_with_traversal("Yosemite permit", limit=2)
-
-        assert [r.memory.id for r in results] == ["m1"]
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_traversal_preserves_session_diversity():
-    core = _tmp_core()
-    try:
-        for mid, content, sid in (
-            ("a1", "alpha one", "a"),
-            ("a2", "alpha two", "a"),
-            ("a3", "alpha three", "a"),
-            ("b1", "beta starting point", "b"),
-            ("b2", "beta answer", "b"),
-        ):
-            _insert_traversal_message(core, mid, content, sid)
-        core._search_messages = lambda query, limit=10: [
-            _seed("a1", "alpha one", "a", 1.0),
-            _seed("a2", "alpha two", "a", 0.9),
-            _seed("a3", "alpha three", "a", 0.8),
-            _seed("b1", "beta starting point", "b", 0.7),
-        ]
-
-        results = core.search_with_traversal(
-            "beta answer", limit=5, beam_width=3, max_per_session=2,
-        )
-
-        assert "b2" in [r.memory.id for r in results]
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_traversal_is_bounded_and_deterministic():
-    core = _tmp_core()
-    try:
-        for index in range(5):
-            _insert_traversal_message(core, f"m{index}", f"topic {index}", "s1")
-        core._search_messages = lambda query, limit=10: [
-            _seed("m2", "topic 2", "s1", 1.0),
-        ]
-
-        first = core.search_with_traversal("topic", limit=3)
-        second = core.search_with_traversal("topic", limit=3)
-
-        assert len(first) <= 3
-        assert [(r.memory.id, r.score) for r in first] == [
-            (r.memory.id, r.score) for r in second
-        ]
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_traversal_empty():
-    core = _tmp_core()
-    try:
-        results = core.search_with_traversal("nonexistent query", limit=5)
-        assert results == []
-    finally:
-        core._test_cleanup()
 
 
 def test_recall_direct_returns_memorycore_results():
@@ -637,7 +521,7 @@ def test_recall_default_is_episodic():
         core._test_cleanup()
 
 
-def test_recall_fusion_strategy():
+def test_recall_fusion_returns_results():
     core = _tmp_core()
     try:
         core.ingest("user", "I love hiking in Yosemite", session_id="s1")
@@ -648,41 +532,10 @@ def test_recall_fusion_strategy():
         core._test_cleanup()
 
 
-def test_search_with_fusion_returns_results():
+def test_recall_fusion_empty():
     core = _tmp_core()
     try:
-        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
-        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
-        results = core._search_with_fusion("hiking Yosemite", limit=5)
-        assert len(results) > 0
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_fusion_empty():
-    core = _tmp_core()
-    try:
-        results = core._search_with_fusion("nonexistent query", limit=5)
-        assert results == []
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_session_reranking_returns_results():
-    core = _tmp_core()
-    try:
-        core.ingest("user", "I love hiking in Yosemite", session_id="s1")
-        core.ingest("assistant", "Yosemite is beautiful in spring", session_id="s1")
-        results = core.search_with_session_reranking("hiking Yosemite", limit=5)
-        assert len(results) > 0
-    finally:
-        core._test_cleanup()
-
-
-def test_search_with_session_reranking_empty():
-    core = _tmp_core()
-    try:
-        results = core.search_with_session_reranking("nonexistent query", limit=5)
+        results = core.recall("nonexistent query", strategy="fusion", limit=5)
         assert results == []
     finally:
         core._test_cleanup()
