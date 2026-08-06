@@ -3,13 +3,11 @@
 
 Modes:
   raw_bm25                        BM25 over in-memory messages (baseline)
-  memorycore                      search_messages()
-  memorycore_llm_expansion        search_messages_llm_expansion() (1 LLM call)
-  memorycore_decomposed           search_messages_decomposed() (query decomposition)
-  memorycore_episodic             search_messages_decomposed() + reconstruct_sessions()
-  memorycore_episodic_reranked    + cross-encoder reranking (default)
-  memorycore_episodic_reranked_4k + reranking, 4k context budget
-  memorycore_fusion               RRF fusion of memorycore + episodic_reranked
+  memorycore                      recall(strategy="direct")
+  memorycore_llm_expansion        recall(strategy="expanded") (1 LLM call)
+  memorycore_episodic_reranked    recall(strategy="episodic") (default)
+  memorycore_episodic_reranked_4k episodic with 4k context budget
+  memorycore_fusion               recall(strategy="fusion") RRF
 """
 
 from __future__ import annotations

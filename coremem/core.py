@@ -844,7 +844,7 @@ class MemoryCore:
         context_window: int = 1,
     ) -> list[SearchResult]:
         import warnings
-        warnings.warn("search_with_context is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
+        warnings.warn("search_with_context is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
         if k_sessions <= 0 or k_messages <= 0:
             return []
         context_window = max(0, context_window)
@@ -911,7 +911,7 @@ class MemoryCore:
         max_per_session: int = 2,
     ) -> list[SearchResult]:
         import warnings
-        warnings.warn("search_with_traversal is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
+        warnings.warn("search_with_traversal is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
         if limit <= 0 or seed_limit <= 0:
             return []
 
@@ -1109,7 +1109,7 @@ class MemoryCore:
         session_limit: int = 5,
     ) -> list[SearchResult]:
         import warnings
-        warnings.warn("search_with_session_reranking is deprecated and below baseline. Use search_messages or search_messages_decomposed instead.", DeprecationWarning, stacklevel=2)
+        warnings.warn("search_with_session_reranking is deprecated and below baseline. Use recall() instead.", DeprecationWarning, stacklevel=2)
         if limit <= 0:
             return []
 

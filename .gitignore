@@ -10,6 +10,11 @@ vectors/
 
 # Benchmark results
 results/
+eval_output/
+
+# Large eval datasets
+data/longmemeval_s_*.json
+data/longmemeval_m_*.json
 
 # Git worktrees
 .worktrees/
