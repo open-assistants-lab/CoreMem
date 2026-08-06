@@ -34,7 +34,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_decomposed", "memorycore_episodic", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -236,22 +236,6 @@ def _search_messages_llm_expansion_mode(core: MemoryCore, query: str, k: int) ->
     ]
 
 
-def _search_messages_decomposed_mode(core: MemoryCore, query: str, k: int) -> list[RawSearchHit]:
-    results = core._search_messages_decomposed(query, limit=k, per_query_limit=max(20, k * 4))
-    return [
-        RawSearchHit(
-            message=ReferenceMessage(
-                turn_id=str((r.memory.metadata or {}).get("turn_id") or r.memory.id or ""),
-                session_id=r.memory.session_id or "",
-                message_id=r.memory.id or "",
-                role=r.memory.role,
-                content=r.memory.content,
-            ),
-            score=r.score,
-        )
-        for r in results
-    ]
-
 
 def run_eval(
     data_path: str | Path,
@@ -449,10 +433,6 @@ def _score_question(
             new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=False)
         elif m == "memorycore_llm_expansion":
             new_rows[m] = _score_instance_memorycore(core, instance, truth, k=k, deep=True)
-        elif m == "memorycore_decomposed":
-            new_rows[m] = _score_instance_decomposed(core, instance, truth, k=k)
-        elif m == "memorycore_episodic":
-            new_rows[m] = _score_instance_episodic(core, instance, truth, k=k)
         elif m == "memorycore_episodic_reranked":
             new_rows[m] = _score_instance_episodic(
                 core, instance, truth, k=k, use_cross_encoder=True,
@@ -723,20 +703,6 @@ def _score_instance_memorycore(
     return _build_scored_row(instance, truth, hits, mode=mode, k=k)
 
 
-def _score_instance_decomposed(
-    core: MemoryCore,
-    instance: PreparedInstance,
-    truth: QuestionTruth,
-    *,
-    k: int,
-) -> dict[str, Any]:
-    mode = "memorycore_decomposed"
-    if truth.abstention_expected:
-        return _empty_score(instance, truth, mode=mode)
-    hits = _search_messages_decomposed_mode(core, instance.query, k)
-    return _build_scored_row(instance, truth, hits, mode=mode, k=k)
-
-
 def _score_instance_episodic(
     core: MemoryCore,
     instance: PreparedInstance,
@@ -746,7 +712,7 @@ def _score_instance_episodic(
     use_cross_encoder: bool = False,
     max_context_chars: int = 16_000,
 ) -> dict[str, Any]:
-    mode = "memorycore_episodic_reranked_4k" if use_cross_encoder and max_context_chars == 4_000 else "memorycore_episodic_reranked" if use_cross_encoder else "memorycore_episodic"
+    mode = "memorycore_episodic_reranked_4k" if max_context_chars == 4_000 else "memorycore_episodic_reranked"
     if truth.abstention_expected:
         row = _empty_score(instance, truth, mode=mode)
         row.update({
@@ -1427,7 +1393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_decomposed", "memorycore_episodic", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
