@@ -168,7 +168,7 @@ for m in active_modes:
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="direct")
     elif m == "memorycore_llm_expansion":
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="expanded")
-    elif m in ("memorycore_episodic", "memorycore_episodic_reranked"):
+    elif m == "memorycore_episodic_reranked":
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="episodic")
     elif m == "memorycore_episodic_reranked_4k":
         # 4k budget requires internal access — not exposed on recall()
@@ -178,23 +178,24 @@ for m in active_modes:
         new_rows[m] = _score_instance_recall(core, instance, truth, k=k, strategy="fusion")
 ```
 
-Note: `memorycore_episodic` and `memorycore_episodic_reranked` both map to
-`strategy="episodic"` since the cross-encoder is now always on for the episodic
-strategy. The eval mode names stay the same for backwards compatibility with
-existing result files.
+Note: `memorycore_episodic_reranked` maps to `strategy="episodic"`
+since the cross-encoder is now always on. `memorycore_episodic` is removed
+from `MODES` (see Eval modes collapsed below).
 
 ### Eval modes removed
 
 - `memorycore_decomposed` — was an ablation (episodic without cross-encoder).
   Removed from `MODES` tuple since the reranked version is strictly better.
+  The `_score_instance_decomposed` function and `_search_messages_decomposed_mode`
+  helper are removed from the eval script.
 
 ### Eval modes collapsed
 
 `memorycore_episodic` and `memorycore_episodic_reranked` now produce identical
-results (both use `strategy="episodic"` with cross-encoder). For `--mode all`
-runs, `memorycore_episodic` is removed from the default `MODES` tuple to avoid
-duplicate computation. It can still be run explicitly via `--mode memorycore_episodic`
-for backwards comparison, where it aliases to `strategy="episodic"`.
+results (both use `strategy="episodic"` with cross-encoder). `memorycore_episodic`
+is removed from the `MODES` tuple to avoid duplicate computation in `--mode all`
+runs. Users wanting the episodic reranked result should use
+`--mode memorycore_episodic_reranked`.
 
 ### Eval modes needing internal access
 
@@ -228,6 +229,15 @@ __all__ = [
 
 `__version__` goes from `0.10.0` to `0.11.0` (breaking change: method renames).
 
+## Other Scripts Updated
+
+- `scripts/eval_answer_longmemeval.py` — has its own `MODES` tuple with different
+  mode names (`decomposition_only`, `reconstruction_only`, etc.). It calls
+  `core.search_messages`, `core.search_messages_decomposed`,
+  `core.reconstruct_sessions`, and `core.search_messages_llm_expansion` directly.
+  These calls must be updated to use `core.recall()` or the `_`-prefixed internal
+  methods. The script's own `MODES` and dispatch logic are not otherwise changed.
+
 ## Verification
 
 - All remaining tests pass (113 after removing 8 deprecated tests, plus 1 rewritten)
@@ -238,5 +248,6 @@ __all__ = [
 
 - `coremem/__init__.py` module docstring — `core.search_messages(...)` → `core.recall(...)`
 - `coremem/core.py` `MemoryCore` class docstring — references `search_messages` and `search_journal`
+- `scripts/eval_agent_journal_longmemeval.py` module docstring — references removed `memorycore_decomposed` mode
 - `README.md` — references `search_journal()` in result tables and descriptions
 - `CHANGELOG.md` — historical references to `search_journal()` (leave as-is; historical record)
