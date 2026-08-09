@@ -20,5 +20,19 @@ __version__ = "0.11.0"
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SessionBundle",
     "SearchHeuristics", "decompose_queries", "expand_queries", "rerank",
-    "create_provider",
+    "create_provider", "get_core",
 ]
+
+
+def get_core(path: str | None = None) -> MemoryCore:
+    """Create a MemoryCore from path/env/default.
+
+    Resolution: path arg > COREMEM_PATH env > ~/.coremem/hybrid
+    """
+    import os
+    resolved = path or os.environ.get("COREMEM_PATH") or os.path.expanduser("~/.coremem/hybrid")
+    model_string = os.environ.get("COREMEM_LLM_MODEL")
+    llm_provider = None
+    if model_string:
+        llm_provider = create_provider(model_string)
+    return MemoryCore(path=resolved, llm_provider=llm_provider)

@@ -550,3 +550,20 @@ def test_search_messages_decomposed_with_session_filter():
         assert all(r.memory.session_id == "s1" for r in results)
     finally:
         core._test_cleanup()
+
+
+def test_get_core_creates_memorycore_with_defaults(tmp_path):
+    import os
+    old_path = os.environ.get("COREMEM_PATH")
+    os.environ["COREMEM_PATH"] = str(tmp_path / "coremem-test")
+    try:
+        from coremem import get_core
+        core = get_core()
+        assert core is not None
+        assert hasattr(core, "recall")
+        assert hasattr(core, "ingest")
+    finally:
+        if old_path is None:
+            del os.environ["COREMEM_PATH"]
+        else:
+            os.environ["COREMEM_PATH"] = old_path
