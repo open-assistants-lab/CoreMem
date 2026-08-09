@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "coremem hook user_prompt_submit", "timeout": 8 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "coremem hook stop", "timeout": 30, "async": true }] }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "coremem hook pre_compact", "timeout": 30 }] }
+    ]
+  }
+}
