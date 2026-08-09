@@ -27,9 +27,13 @@ dependencies = [
     "ijson>=3.5.0",
 ]
 
+[project.scripts]
+coremem = "coremem.__main__:main"
+
 [project.optional-dependencies]
 observer = ["httpx>=0.25.0"]
-all = ["coremem[observer]"]
+mcp = ["mcp>=2.0.0"]
+all = ["coremem[observer]", "coremem[mcp]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
