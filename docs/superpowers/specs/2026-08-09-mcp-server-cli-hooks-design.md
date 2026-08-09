@@ -115,7 +115,7 @@ JSON, exit codes). A single Python handler serves both platforms.
 
 | Event | Type | What it does |
 |---|---|---|
-| `UserPromptSubmit` | Sync (8s timeout) | **Capture + retrieval injection.** Read user's prompt from stdin `prompt` field, call `ingest("user", prompt)`, then `recall(strategy="direct")`, output results as `additionalContext`. Uses `strategy="direct"` (no cross-encoder) for speed — hook processes are ephemeral and can't afford the ~500MB model load. |
+| `UserPromptSubmit` | Sync (8s timeout) | **Capture + retrieval injection.** Read user's prompt from stdin `prompt` field, call `recall(strategy="direct")` first (before ingest to avoid self-match), then `ingest("user", prompt)`, output recall results as `additionalContext`. Uses `strategy="direct"` (no cross-encoder) for speed — hook processes are ephemeral and can't afford the ~500MB model load. |
 | `Stop` | Async (30s timeout) | **Capture.** Read `last_assistant_message` from stdin, call `ingest("assistant", response, session_id)`. The user prompt was already captured by UserPromptSubmit. |
 | `PreCompact` | Sync (30s timeout) | **No-op in v1.** PreCompact stdin does not include `last_assistant_message` (only `trigger` and `custom_instructions`). Capturing would require transcript parsing, which we're avoiding in v1. Stop already captures every assistant response. PreCompact is listed in the config for forward-compatibility — the handler reads stdin and exits 0 without doing anything. |
 
@@ -178,6 +178,18 @@ This reads JSON from stdin, dispatches to the handler, and outputs JSON to stdou
 
 ```python
 # coremem/hooks/handler.py
+def _format_recall_results(results: list) -> str:
+    if not results:
+        return ""
+    lines = ["## Relevant memories"]
+    for r in results:
+        role = r.memory.role
+        content = r.memory.content[:200]
+        score = r.score
+        lines.append(f"[{role}] {content} (score: {score:.2f})")
+    return "\n".join(lines)
+
+
 def handle_user_prompt_submit(data: dict, core: MemoryCore) -> dict:
     prompt = data.get("prompt", "")
     session_id = data.get("session_id", "")
@@ -200,6 +212,10 @@ def handle_stop(data: dict, core: MemoryCore) -> dict:
         return {}
     core.ingest("assistant", message, session_id=session_id)
     return {}
+
+
+def handle_pre_compact(data: dict, core: MemoryCore) -> dict:
+    return {}
 ```
 
 ## Prerequisites
@@ -218,14 +234,27 @@ Verify with `coremem --help`.
 ## LLM Provider for `compile` tool
 
 The `compile` tool requires an LLM provider (for daily journal compilation).
-Configure via the `COREMEM_LLM_PROVIDER` env var — one of:
-- `openai` (uses `OPENAI_API_KEY`)
-- `ollama` (uses local Ollama)
-- `ollama-cloud` (uses `OLLAMA_CLOUD_API_KEY`)
+Configure via the `COREMEM_LLM_MODEL` env var — a `provider:model` string:
+
+```bash
+export COREMEM_LLM_MODEL=openai:gpt-4o-mini
+export COREMEM_LLM_MODEL=ollama-cloud:deepseek-v4-flash
+export COREMEM_LLM_MODEL=ollama:llama3.2
+```
+
+The value is passed to `create_provider()` which reads the appropriate API key
+from the environment (e.g., `OPENAI_API_KEY` for `openai:*`).
 
 If not set, `compile` returns `error: no LLM provider configured`. The other
 tools (`recall`, `ingest`, `rebuild_index`, `list_sessions`) work without an
 LLM provider.
+
+```python
+# In mcp_server.py
+model_string = os.environ.get("COREMEM_LLM_MODEL")
+llm_provider = create_provider(model_string) if model_string else None
+core = MemoryCore(path=path, llm_provider=llm_provider)
+```
 
 ## Memory Path
 
@@ -250,6 +279,7 @@ Hooks use only stdlib (json, sys, pathlib) — no extra dependency.
 
 ### Claude Code (`.claude/settings.json`)
 
+If `coremem` is installed on PATH:
 ```json
 {
   "hooks": {
@@ -265,6 +295,23 @@ Hooks use only stdlib (json, sys, pathlib) — no extra dependency.
   },
   "mcpServers": {
     "coremem": { "command": "coremem", "args": ["mcp"] }
+  }
+}
+```
+
+If using `uvx` (no install needed):
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "uvx coremem hook user_prompt_submit", "timeout": 8 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "uvx coremem hook stop", "timeout": 30, "async": true }] }
+    ]
+  },
+  "mcpServers": {
+    "coremem": { "command": "uvx", "args": ["coremem", "mcp"] }
   }
 }
 ```
