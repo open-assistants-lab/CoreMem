@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.0] — MCP server, CLI, hooks
+
+### Added
+- **MCP server** (`coremem mcp`) — stdio transport, 5 tools: `recall`, `ingest`, `compile`, `rebuild_index`, `list_sessions`
+- **CLI** (`coremem`) — subcommands: `recall`, `ingest`, `compile`, `rebuild`, `sessions`, `hook`, `mcp`
+- **Hook handlers** for Claude Code and Codex — `UserPromptSubmit` (capture + retrieval injection), `Stop` (capture), `PreCompact` (no-op)
+- **`get_core()` helper** — creates MemoryCore from `COREMEM_PATH` env var or `~/.coremem/` default
+- **Integration configs** for Claude Code, Codex, and OpenCode in `integrations/`
+- **`mcp` optional dependency** — `pip install coremem[mcp]`
+- **`COREMEM_LLM_MODEL` env var** — configures LLM provider for `compile` tool
+
+### Changed
+- `pyproject.toml` — added `[project.scripts]` entry point, `mcp` extra
+
 ## [0.11.0] — Unified `recall()` API
 
 ### Changed
