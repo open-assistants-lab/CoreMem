@@ -88,7 +88,11 @@ def _cmd_sessions(args, core):
 
 
 def _cmd_hook(args, core):
-    data = json.loads(sys.stdin.read())
+    try:
+        data = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, ValueError):
+        print(json.dumps({}))
+        return
     handler = EVENT_HANDLERS.get(args.event)
     if handler is None:
         print(json.dumps({}))

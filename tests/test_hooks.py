@@ -74,3 +74,25 @@ def test_handle_pre_compact_noop(tmp_path):
     core = _make_core(tmp_path)
     result = handle_pre_compact({"trigger": "auto"}, core)
     assert result == {}
+
+
+def test_handle_stop_skip_when_stop_hook_active(tmp_path):
+    core = _make_core(tmp_path)
+    core.ingest("user", "What about hiking?", session_id="s1")
+    result = handle_stop({
+        "last_assistant_message": "Hiking is great!",
+        "session_id": "s1",
+        "stop_hook_active": True,
+    }, core)
+    assert result == {}
+    results = core.recall("Hiking", strategy="direct", limit=5)
+    assert not any("Hiking is great" in r.memory.content for r in results)
+
+
+def test_handle_stop_null_session_id(tmp_path):
+    core = _make_core(tmp_path)
+    result = handle_stop({
+        "last_assistant_message": "test response",
+        "session_id": None,
+    }, core)
+    assert result == {}

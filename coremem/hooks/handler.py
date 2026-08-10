@@ -39,6 +39,8 @@ def handle_user_prompt_submit(data: dict[str, Any], core: MemoryCore) -> dict[st
 
 
 def handle_stop(data: dict[str, Any], core: MemoryCore) -> dict[str, Any]:
+    if data.get("stop_hook_active"):
+        return {}
     message = data.get("last_assistant_message", "")
     session_id = data.get("session_id", "")
     if not message.strip():
