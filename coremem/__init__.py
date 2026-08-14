@@ -15,7 +15,7 @@ from coremem.rerank import rerank
 from coremem.types import Memory, SearchResult, SessionBundle
 from coremem.providers import create_provider
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SessionBundle",
@@ -33,6 +33,8 @@ def get_core(path: str | None = None) -> MemoryCore:
     resolved = path or os.environ.get("COREMEM_PATH") or os.path.expanduser("~/.coremem/hybrid")
     model_string = os.environ.get("COREMEM_LLM_MODEL")
     llm_provider = None
+    kwargs: dict[str, str] = {}
     if model_string:
         llm_provider = create_provider(model_string)
-    return MemoryCore(path=resolved, llm_provider=llm_provider)
+        kwargs["agent_journal_model"] = model_string
+    return MemoryCore(path=resolved, llm_provider=llm_provider, **kwargs)

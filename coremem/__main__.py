@@ -62,10 +62,11 @@ def _cmd_ingest(args, core):
 
 def _cmd_compile(args, core):
     import asyncio
-    if not core._llm_provider:
-        print("error: no LLM provider configured (set COREMEM_LLM_MODEL env var)")
+    try:
+        result = asyncio.run(core.compile_turn(turn_id=args.turn_id))
+    except Exception as exc:
+        print(f"error: compile failed: {exc}")
         return
-    result = asyncio.run(core.compile_turn(turn_id=args.turn_id))
     if result is None:
         print("compiled: 0 pages (nothing to compile)")
         return

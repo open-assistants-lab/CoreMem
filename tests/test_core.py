@@ -460,6 +460,27 @@ def test_reconstruct_sessions_respects_global_budget_across_sessions():
         core._test_cleanup()
 
 
+def test_reconstruct_sessions_keeps_anchor_when_exceeding_budget():
+    core = _tmp_core()
+    try:
+        for index in range(3):
+            _insert_traversal_message(
+                core, f"m{index}", f"message {index} " + "x" * 600, "s1"
+            )
+        # m1 is the anchor; at 610 chars it alone exceeds the 1000-char budget
+        core._search_messages_decomposed = lambda query, limit=5: [
+            _seed("m1", "answer", "s1", 1.0),
+        ]
+
+        bundles = core._reconstruct_sessions("answer", max_context_chars=1_000)
+
+        assert len(bundles) == 1
+        ids = [message.id for message in bundles[0].messages]
+        assert "m1" in ids, "anchor message must not be dropped by the budget"
+    finally:
+        core._test_cleanup()
+
+
 
 
 def test_recall_direct_returns_memorycore_results():
@@ -567,3 +588,45 @@ def test_get_core_creates_memorycore_with_defaults(tmp_path):
             del os.environ["COREMEM_PATH"]
         else:
             os.environ["COREMEM_PATH"] = old_path
+
+
+def test_get_core_passes_coremem_llm_model_to_journal_compiler(tmp_path):
+    import os
+    old_path = os.environ.get("COREMEM_PATH")
+    old_model = os.environ.get("COREMEM_LLM_MODEL")
+    os.environ["COREMEM_PATH"] = str(tmp_path / "coremem-test")
+    os.environ["COREMEM_LLM_MODEL"] = "ollama:llama3.2"
+    try:
+        from coremem import get_core
+        core = get_core()
+        assert core._journal_compiler.provider._model == "llama3.2"
+    finally:
+        if old_path is None:
+            del os.environ["COREMEM_PATH"]
+        else:
+            os.environ["COREMEM_PATH"] = old_path
+        if old_model is None:
+            del os.environ["COREMEM_LLM_MODEL"]
+        else:
+            os.environ["COREMEM_LLM_MODEL"] = old_model
+
+
+def test_get_core_default_journal_model_when_env_unset(tmp_path):
+    import os
+    old_path = os.environ.get("COREMEM_PATH")
+    old_model = os.environ.get("COREMEM_LLM_MODEL")
+    os.environ["COREMEM_PATH"] = str(tmp_path / "coremem-test")
+    os.environ.pop("COREMEM_LLM_MODEL", None)
+    try:
+        from coremem import get_core
+        core = get_core()
+        assert core._journal_compiler.provider._model == "gpt-4o-mini"
+    finally:
+        if old_path is None:
+            del os.environ["COREMEM_PATH"]
+        else:
+            os.environ["COREMEM_PATH"] = old_path
+        if old_model is None:
+            os.environ.pop("COREMEM_LLM_MODEL", None)
+        else:
+            os.environ["COREMEM_LLM_MODEL"] = old_model

@@ -3,7 +3,9 @@
 All heuristics are zero-LLM, purely pattern-based.
 """
 
+import math
 import re
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -131,9 +133,10 @@ class SearchHeuristics:
             return score
 
         try:
-            from datetime import datetime
             ts = datetime.fromisoformat(content_ts)
-            age_days = (datetime.now() - ts).days
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            age_days = (datetime.now(UTC) - ts).days
             if age_days < 30:
                 return score * (1 + cls.TEMPORAL_BOOST_FACTOR)
         except (ValueError, TypeError):
@@ -152,10 +155,10 @@ class SearchHeuristics:
             return score
 
         try:
-            from datetime import datetime
             ts = datetime.fromisoformat(content_ts)
-            age_days = max(0, (datetime.now() - ts).days)
-            import math
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            age_days = max(0, (datetime.now(UTC) - ts).days)
             factor = cls.RECENCY_DECAY_WEIGHT * math.exp(-age_days / cls.RECENCY_DECAY_HALF_LIFE_DAYS)
             return score * (1 + factor)
         except (ValueError, TypeError):

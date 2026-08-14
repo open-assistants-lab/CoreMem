@@ -486,16 +486,17 @@ class MemoryCore:
             selected_ids: set[str] = set()
             used_chars = 0
             by_id = {message.id: message for message in bundle.messages}
-            for message_id in priority_ids:
+            for index, message_id in enumerate(priority_ids):
                 if message_id in selected_ids or message_id not in by_id:
                     continue
                 message = by_id[message_id]
                 message_chars = len(message.content)
-                if used_chars + message_chars > per_bundle_budget:
-                    continue
-                selected.append(message)
-                selected_ids.add(message_id)
-                used_chars += message_chars
+                if index > 0 or used_chars + message_chars <= per_bundle_budget:
+                    # Anchors (the retrieved evidence) always survive the budget;
+                    # the opening message is best-effort.
+                    selected.append(message)
+                    selected_ids.add(message_id)
+                    used_chars += message_chars
             for message in sorted(bundle.messages, key=lambda m: position.get(m.id, 0)):
                 if message.id in selected_ids:
                     continue

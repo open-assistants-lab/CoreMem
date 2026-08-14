@@ -71,9 +71,10 @@ def run_mcp_server(path: str | None = None) -> None:
     @mcp.tool()
     async def compile(turn_id: str) -> str:
         """Compile a turn into daily journal pages."""
-        if not core._llm_provider:
-            return "error: no LLM provider configured (set COREMEM_LLM_MODEL env var)"
-        result = await core.compile_turn(turn_id=turn_id)
+        try:
+            result = await core.compile_turn(turn_id=turn_id)
+        except Exception as exc:
+            return f"error: compile failed: {exc}"
         pages = len(result.written_pages) if hasattr(result, 'written_pages') else 0
         return f"compiled: {pages} pages"
 

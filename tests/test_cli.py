@@ -72,3 +72,19 @@ def test_cli_hook_reads_stdin(tmp_path):
     assert result.returncode == 0
     output = json.loads(result.stdout)
     assert "hookSpecificOutput" in output
+
+
+def test_cli_compile_reports_failure_without_traceback(capsys):
+    """Compile must not gate on _llm_provider and must fail with a clean message."""
+    import argparse
+
+    from coremem.__main__ import _cmd_compile
+
+    class _FakeCore:
+        async def compile_turn(self, turn_id, **kwargs):
+            raise RuntimeError("provider auth failed")
+
+    _cmd_compile(argparse.Namespace(turn_id="t1"), _FakeCore())
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "Traceback" not in out

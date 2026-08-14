@@ -1,5 +1,7 @@
 """Tests for heuristics layer."""
 
+from datetime import UTC, datetime, timedelta
+
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.types import Memory, SearchResult
 
@@ -76,6 +78,40 @@ def test_apply_all_chains():
         score=0.7,
     )
     assert s > 0.70
+
+
+def test_recency_decay_boosts_recent_aware_timestamp():
+    ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    s = SearchHeuristics.recency_decay(ts, 1.0)
+    assert s > 1.0
+
+
+def test_recency_decay_handles_naive_timestamp():
+    ts = (datetime.now() - timedelta(days=1)).isoformat()
+    s = SearchHeuristics.recency_decay(ts, 1.0)
+    assert s > 1.0
+
+
+def test_recency_decay_old_timestamp_negligible():
+    ts = (datetime.now(UTC) - timedelta(days=3650)).isoformat()
+    s = SearchHeuristics.recency_decay(ts, 1.0)
+    assert s < 1.01
+
+
+def test_temporal_boost_boosts_recent_aware_timestamp():
+    ts = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    s = SearchHeuristics.temporal_boost("latest project", ts, 1.0)
+    assert s > 1.0
+
+
+def test_apply_all_applies_recency_with_aware_timestamp():
+    query = "latest project"
+    content = "I finished the Q3 project report"
+    with_ts = SearchHeuristics.apply_all(
+        query, content, 0.5, ts=(datetime.now(UTC) - timedelta(days=1)).isoformat()
+    )
+    without_ts = SearchHeuristics.apply_all(query, content, 0.5)
+    assert with_ts > without_ts
 
 
 # ── MMR Tests ──
