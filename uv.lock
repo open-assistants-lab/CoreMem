@@ -521,6 +521,7 @@ version = "0.12.2"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
+    { name = "httpx" },
     { name = "hybriddb" },
     { name = "ijson" },
     { name = "numpy" },
@@ -530,7 +531,6 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "httpx" },
     { name = "mcp" },
 ]
 dev = [
@@ -541,17 +541,13 @@ dev = [
 mcp = [
     { name = "mcp" },
 ]
-observer = [
-    { name = "httpx" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "chromadb", specifier = ">=0.5.0,<2.0.0" },
     { name = "coremem", extras = ["mcp"], marker = "extra == 'all'" },
-    { name = "coremem", extras = ["observer"], marker = "extra == 'all'" },
+    { name = "httpx", specifier = ">=0.25.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "httpx", marker = "extra == 'observer'", specifier = ">=0.25.0" },
     { name = "hybriddb", specifier = ">=0.5.3" },
     { name = "ijson", specifier = ">=3.5.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
@@ -561,7 +557,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "sentence-transformers", specifier = ">=2.0.0,<6.0.0" },
 ]
-provides-extras = ["observer", "mcp", "all", "dev"]
+provides-extras = ["mcp", "all", "dev"]
 
 [[package]]
 name = "cryptography"
