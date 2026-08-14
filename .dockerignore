@@ -1,0 +1,17 @@
+# Docker build context exclusions — keeps the AML image small and prevents
+# eval datasets / results from being shipped to the platform.
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+dist
+data
+eval_output
+results
+.firecrawl
+.claude
+.worktrees
