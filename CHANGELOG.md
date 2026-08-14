@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.2] — Metadata filters, expanded score normalization, dream cursor, writer conflicts
+
+### Fixed
+- **`fetch()` metadata filter crashed on keys with quotes** — `json_extract(metadata, '$.{k}')` interpolated the key unescaped; a key containing `'` raised `OperationalError`, a key with a space silently returned zero rows. The JSON path is now a bind parameter with backslash-escaped quoted segments (`$."my key"`), which is injection-safe and handles spaces, quotes, and backslashes.
+- **`delete()` silently ignored its `metadata` parameter** — the parameter existed in the signature but was never applied, so `delete(metadata=...)` deleted every row. The metadata filter now applies, matching `fetch()`.
+- **Score normalization in `expanded` strategy was dead code** — `_search_messages_llm_expansion` computed max/min from `r.get("score", 0)` but HybridDB returns `_score`, so `score_range` was always 0 and per-variant normalization never ran. Variants with systematically lower raw scores now compete fairly.
+- **`dream()` cursor advanced past failed chunks** — the cursor was written to the last pending date even when a chunk failed (LLM error / invalid output), so failed dates were never retried. The cursor now only advances past successfully processed dates; dates that already have dream entries still advance.
+- **`MEMORY.md` and `index.md` had conflicting writers** — `dream()` appended promoted facts to `MEMORY.md` (compiler-owned, regenerated on every compile) and `rebuild_index()` wrote month navigation to the root `index.md` (compiler-owned page index). Promoted facts now live in `DREAMS.md`; month navigation lives in `monthly/index.md`.
+
+### Tests
+- 6 new regression tests (metadata filters with special chars, delete metadata, score normalization, dream cursor retry, dream promotion destination, rebuild index location). Suite: 148 pass.
+
 ## [0.12.1] — Bug fixes: recency heuristics, COREMEM_LLM_MODEL wiring, bundle anchor budget
 
 ### Fixed

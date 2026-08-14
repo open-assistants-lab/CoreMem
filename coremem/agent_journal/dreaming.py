@@ -78,7 +78,9 @@ async def dream(
     """Run dreaming consolidation on unprocessed daily pages.
 
     Reads daily pages since last cursor, sends narrative summaries to the LLM,
-    appends analysis to DREAMS.md, and promotes facts to MEMORY.md.
+    appends analysis and promoted facts to DREAMS.md. The cursor only advances
+    past dates that were actually processed, so failed chunks are retried on
+    the next run. MEMORY.md is compiler-owned and is never written here.
     """
     cursor = _read_cursor(bundle.root)
     daily_dir = bundle.root / "daily"
@@ -94,9 +96,9 @@ async def dream(
 
     provider = create_provider(model)
     dreams_path = bundle.root / "DREAMS.md"
-    mem_path = bundle.root / "MEMORY.md"
     errors: list[str] = []
     promoted_count = 0
+    last_processed: str | None = None
 
     for chunk_start in range(0, len(pending), _MAX_DAYS_PER_CALL):
         chunk = pending[chunk_start:chunk_start + _MAX_DAYS_PER_CALL]
@@ -108,6 +110,8 @@ async def dream(
             narratives.append(f"## {date}\n\n{_narrative_text(text)}")
 
         if not narratives:
+            # Every date in this chunk already has a dream entry — it is done.
+            last_processed = chunk[-1]
             continue
 
         user_prompt = "Analyze these daily journal entries:\n\n" + "\n---\n".join(narratives)
@@ -143,13 +147,15 @@ async def dream(
         )
         if promoted:
             facts = re.findall(r"^- (.+)$", promoted[0], re.MULTILINE)
-            with open(str(mem_path), "a", encoding="utf-8") as f:
+            with open(str(dreams_path), "a", encoding="utf-8") as f:
                 for fact in facts:
                     f.write(f"- [{chunk[0]}] {fact}\n")
                     promoted_count += 1
 
-    if pending:
-        _write_cursor(bundle.root, pending[-1])
+        last_processed = chunk[-1]
+
+    if last_processed is not None:
+        _write_cursor(bundle.root, last_processed)
 
     return {
         "processed": len(pending),

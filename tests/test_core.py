@@ -45,6 +45,45 @@ def test_core_search_messages_llm_expansion():
         core._test_cleanup()
 
 
+def test_search_messages_llm_expansion_normalizes_scores(monkeypatch):
+    """Per-variant scores must be normalized before merging, so a variant with
+    systematically lower raw scores still competes fairly."""
+    import coremem.core as coremod
+
+    core = _tmp_core()
+    try:
+        def _row(mid: str, content: str, score: float) -> dict:
+            return {
+                "id": mid, "content": content, "role": "user", "session_id": "s1",
+                "ts": "2026-01-01T00:00:00+00:00", "metadata": "{}", "turn_id": "",
+                "_score": score,
+            }
+
+        def fake_search(table, col, q, limit=10):
+            if q == "coffee creamer sugar milk honey":
+                return [_row("a", "alpha content", 0.9), _row("c", "charlie content", 0.8)]
+            return [_row("b", "bravo content", 0.2), _row("a", "alpha content", 0.1)]
+
+        core._db.search = fake_search
+        # Isolate the normalization: strip heuristics/diversity/rerank to identity
+        monkeypatch.setattr(coremod.SearchHeuristics, "apply_all",
+                            lambda query, content, score, ts=None: score)
+        monkeypatch.setattr(coremod, "_mmr_diversify", lambda results, k: results)
+        monkeypatch.setattr(coremod, "rerank", lambda query, results: results)
+
+        results = core._search_messages_llm_expansion(
+            "coffee creamer sugar milk honey", limit=10
+        )
+
+        # "b" only appears in the low-scale variant (raw 0.2 vs 0.9/0.8).
+        # Without normalization it would rank last with score ~0.2.
+        b = next(r for r in results if r.memory.id == "b")
+        assert b.score > 0.5
+        assert results[0].memory.id in ("a", "b")
+    finally:
+        core._test_cleanup()
+
+
 def test_core_search_messages_filters_session_when_provided():
     core = _tmp_core()
     try:
@@ -95,6 +134,43 @@ def test_core_fetch():
         core.ingest("user", "msg2", session_id="s1")
         msgs = core.fetch(session_id="s1")
         assert len(msgs) == 2
+    finally:
+        core._test_cleanup()
+
+
+def test_core_fetch_metadata_filter_with_special_chars():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "msg with key", session_id="s1", metadata={"my key": "x"})
+        core.ingest("user", "msg without", session_id="s1", metadata={"other": "y"})
+        core.ingest("user", "msg quoted", session_id="s1", metadata={"it's": "v"})
+
+        # key with a space must match, not silently return nothing
+        rows = core.fetch(metadata={"my key": "x"})
+        assert [r.content for r in rows] == ["msg with key"]
+
+        # key with a quote must not crash the query
+        rows2 = core.fetch(metadata={"it's": "v"})
+        assert [r.content for r in rows2] == ["msg quoted"]
+
+        # non-matching value still filters correctly
+        rows3 = core.fetch(metadata={"my key": "nope"})
+        assert rows3 == []
+    finally:
+        core._test_cleanup()
+
+
+def test_core_delete_metadata_filter():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "keep me", session_id="s1", metadata={"kind": "keep"})
+        core.ingest("user", "delete me", session_id="s1", metadata={"kind": "drop"})
+
+        deleted = core.delete(metadata={"kind": "drop"})
+
+        assert deleted == 1
+        assert core.count() == 1
+        assert core.fetch_all()[0].content == "keep me"
     finally:
         core._test_cleanup()
 

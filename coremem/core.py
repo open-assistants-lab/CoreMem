@@ -313,8 +313,8 @@ class MemoryCore:
         for q in queries:
             rows = self._db.search("messages", "content", q, limit=effective_limit)
             if rows:
-                max_score = max(r.get("score", 0) for r in rows)
-                min_score = min(r.get("score", 0) for r in rows)
+                max_score = max(r.get("_score", r.get("score", 0.0)) for r in rows)
+                min_score = min(r.get("_score", r.get("score", 0.0)) for r in rows)
                 score_range = max_score - min_score
                 for row in rows:
                     mem = _row_to_memory(row)
@@ -550,7 +550,9 @@ class MemoryCore:
             params.append(ts_before)
         if metadata:
             for k, v in metadata.items():
-                where_parts.append(f"json_extract(metadata, '$.{k}') = ?")
+                escaped = k.replace("\\", "\\\\").replace('"', '\\"')
+                where_parts.append("json_extract(metadata, ?) = ?")
+                params.append(f'$."{escaped}"')
                 params.append(v)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         rows = self._db.raw_query(
@@ -627,6 +629,12 @@ class MemoryCore:
         if ts_before:
             where_parts.append("ts < ?")
             params.append(ts_before)
+        if metadata:
+            for k, v in metadata.items():
+                escaped = k.replace("\\", "\\\\").replace('"', '\\"')
+                where_parts.append("json_extract(metadata, ?) = ?")
+                params.append(f'$."{escaped}"')
+                params.append(v)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         before = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
         self._db.raw_query(f"DELETE FROM messages WHERE {where}", tuple(params))

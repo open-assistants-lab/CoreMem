@@ -72,9 +72,11 @@ def rebuild_index(root: str | Path) -> dict[str, int]:
 
     index_lines = ["# AgentJournal Index", ""]
     for month_key in sorted(by_month):
-        index_lines.append(f"- [{month_key}](monthly/{month_key}.md)")
+        index_lines.append(f"- [{month_key}]({month_key}.md)")
     index_lines.append("")
-    (root / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
+    # Month navigation lives in monthly/index.md; the root index.md is
+    # compiler-owned (page index) and must not be clobbered.
+    (monthly_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
 
     return {"weekly": weekly_count, "monthly": monthly_count, "index": 1}
 

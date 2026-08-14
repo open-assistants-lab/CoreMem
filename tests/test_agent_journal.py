@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,6 +70,94 @@ def test_bundle_initialization_creates_required_files(tmp_path):
     assert (root / "index.md").exists()
     assert (root / "log.md").exists()
     assert (root / "SCHEMA.md").exists()
+
+
+# ── dream() cursor and promotion destination ────────────────────────────────
+
+
+def _daily_page(date: str) -> str:
+    return (
+        f"---\ndate: {date}\nagent_journal_version: \"0.1\"\n---\n\n"
+        f"# {date}\n\n## 10:00 - Test\n\nSome content for {date}\n"
+    )
+
+
+class _FakeDreamProvider:
+    def __init__(self, fail: bool, output: str = "### Events\n- something happened\n"):
+        self.fail = fail
+        self.output = output
+
+    async def chat(self, messages):
+        if self.fail:
+            raise RuntimeError("llm down")
+        return SimpleNamespace(content=self.output)
+
+
+def _seed_daily_pages(root, dates):
+    daily = root / "daily"
+    daily.mkdir(parents=True, exist_ok=True)
+    for date in dates:
+        (daily / f"{date}.md").write_text(_daily_page(date), encoding="utf-8")
+
+
+def test_dream_cursor_does_not_advance_past_failed_chunks(monkeypatch, tmp_path):
+    from coremem.agent_journal import dreaming
+
+    root = tmp_path / "bundle"
+    bundle = AgentJournalBundle(root)
+    bundle.initialize()
+    _seed_daily_pages(root, ("2026-08-01", "2026-08-02", "2026-08-03"))
+    cursor = root / ".dreaming_cursor"
+
+    # First run: LLM fails for every chunk. Cursor must NOT advance.
+    monkeypatch.setattr(dreaming, "create_provider", lambda model: _FakeDreamProvider(fail=True))
+    result = asyncio.run(dreaming.dream(bundle))
+    assert result["errors"]
+    assert not cursor.exists(), "cursor must not advance past failed chunks"
+
+    # Second run: LLM recovers. All dates processed, cursor advances to the end.
+    monkeypatch.setattr(dreaming, "create_provider", lambda model: _FakeDreamProvider(fail=False))
+    result2 = asyncio.run(dreaming.dream(bundle))
+    assert result2["errors"] == []
+    assert cursor.read_text().strip() == "2026-08-03"
+
+
+def test_dream_promoted_facts_go_to_dreams_not_memory(monkeypatch, tmp_path):
+    from coremem.agent_journal import dreaming
+
+    root = tmp_path / "bundle"
+    bundle = AgentJournalBundle(root)
+    bundle.initialize()
+    _seed_daily_pages(root, ("2026-08-01",))
+    output = "### Events\n- something happened\n\n### Promoted Facts\n- user likes coffee\n- user hikes\n"
+    monkeypatch.setattr(dreaming, "create_provider", lambda model: _FakeDreamProvider(fail=False, output=output))
+
+    asyncio.run(dreaming.dream(bundle))
+
+    dreams = (root / "DREAMS.md").read_text(encoding="utf-8")
+    memory = (root / "MEMORY.md").read_text(encoding="utf-8")
+    assert "user likes coffee" in dreams
+    assert "user hikes" in dreams
+    assert "user likes coffee" not in memory, "MEMORY.md is compiler-owned; dream must not write to it"
+
+
+def test_rebuild_index_writes_month_index_to_monthly(tmp_path):
+    from coremem.agent_journal.rebuild_index import rebuild_index
+
+    root = tmp_path / "bundle"
+    bundle = AgentJournalBundle(root)
+    bundle.initialize()
+    _seed_daily_pages(root, ("2026-08-01", "2026-08-02", "2026-08-15"))
+    # Simulate a compiler-written page index at the root
+    (root / "index.md").write_text("# AgentJournal Index\n\n- [Page](pages/foo.md)\n", encoding="utf-8")
+
+    result = rebuild_index(root)
+
+    assert result["monthly"] == 1
+    month_index = root / "monthly" / "2026-08.md"
+    assert month_index.exists()
+    # Root index.md must not be clobbered by month navigation
+    assert "pages/foo.md" in (root / "index.md").read_text(encoding="utf-8")
     assert (root / "daily").is_dir()
     assert (root / "agent_context" / "manifest.json").exists()
 
