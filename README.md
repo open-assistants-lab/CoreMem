@@ -1,10 +1,10 @@
 # CoreMem
 
-> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. Scores **95.1% R@5 on LongMemEval Oracle (500 questions)** with `recall(strategy="expanded")`, **93.8%** with the zero-LLM `recall(strategy="direct")` path.
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. The default `recall(strategy="episodic")` path scores **99.9% session recall@5 on LongMemEval Oracle (500 questions)** and **95.0% on LongMemEval S (500 questions, ~48 sessions each)** with zero LLM calls.
 
-> **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with ChromaDB or HybridDB + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
+> **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with HybridDB (SQLite + FTS5 + ChromaDB) + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
-**Single-backend architecture.** HybridDB (SQLite + FTS5 + ChromaDB) is the only backend since v0.6.0. Ranking pipeline: FTS5 + vector retrieval → deterministic heuristics → MMR session diversity → recency-aware rescoring → session-deduplicated retrieval.
+**Single-backend architecture.** HybridDB (SQLite + FTS5 + ChromaDB) is the only backend since v0.6.0. Retrieval pipeline: FTS5 + vector search → deterministic heuristics → query decomposition → cross-encoder reranking → MMR session diversity → session-deduplicated retrieval.
 
 ```python
 from coremem import MemoryCore
@@ -12,12 +12,12 @@ from coremem import MemoryCore
 core = MemoryCore(path="./memory")
 
 # Ingest conversation turns
-core.ingest("user", "I visited the Museum of Modern Art today")
-core.ingest("assistant", "That sounds wonderful! How was it?")
-core.ingest("user", "I went to an Ancient Civilizations exhibition at the Natural History Museum")
+core.ingest("user", "I visited the Museum of Modern Art today", session_id="conv_001")
+core.ingest("assistant", "That sounds wonderful! How was it?", session_id="conv_001")
+core.ingest("user", "I went to an Ancient Civilizations exhibition at the Natural History Museum", session_id="conv_001")
 
-# Search with deterministic heuristic reranking
-results = core.search("When did I visit art museums?")
+# Retrieve with the default episodic strategy (zero LLM)
+results = core.recall("When did I visit art museums?")
 
 for r in results:
     print(f"[{r.memory.ts}] [{r.memory.role}] {r.memory.content}")
@@ -31,43 +31,39 @@ CoreMem solves all three:
 
 | Component | What it does |
 |-----------|-------------|
-| **Semantic search** | Embedding similarity via ChromaDB or HybridDB |
-| **Deterministic heuristics** | Keyword overlap (fuzzy + bigram), temporal recency, person-name boost, quoted-phrase matching |
+| **HybridDB retrieval** | FTS5 keyword + embedding similarity via a single SQLite-backed store |
+| **Deterministic heuristics** | Keyword overlap (exact + fuzzy + bigram), temporal recency, person-name boost, quoted-phrase matching |
+| **Query decomposition** | Splits multi-cue relational questions ("before X did I Y") into independent search cues |
+| **Cross-encoder reranking** | `ms-marco-MiniLM-L-6-v2` reranks candidates — the single biggest recall win (m@5 0.472 → 0.867 on oracle) |
 | **MMR session diversity** | One result per session, preventing cross-encoder overfit |
-| **Score normalization** | Per-sub-query normalization in enhanced search for balanced merging |
 
-## LongMemEval Oracle Results (500 questions, ~2 sessions each, k=5)
+## LongMemEval Results
 
-| Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
-|------|-------------|-------------------|-------------------|------------------|
-| `recall(strategy="direct")` | 0 | 93.8% | 75.4% | 6.0% |
-| `recall(strategy="expanded")` | 1 | **95.1%** | **85.4%** | **6.0%** |
+### Oracle (500 questions, ~2 sessions each, k=5)
 
-`recall(strategy="expanded")` is the best overall — highest on every message-level metric, uses 20% less context. `recall(strategy="direct")` (zero-LLM) achieves 93.8% session recall with no API calls.
+| Metric | `direct` | `expanded` | `episodic` (default) |
+|---|---:|---:|---:|
+| session_recall@5 | 0.938 | 0.951 | **0.999** |
+| message_recall@5 | 0.754 | 0.854 | **0.867** |
+| session_hit@5 | 0.972 | 0.972 | **1.000** |
+| message_hit@5 | 0.904 | 0.951 | **0.947** |
+| context_chars_mean | 4,937 | 3,928 | **4,540** |
 
-All three modes abstain correctly on unanswerable questions (0% false positive rate).
+### S (500 questions, ~48 sessions each, k=5)
 
-Results: `eval_output/lme-oracle/results.json`
+| Metric | `direct` | `episodic` (default) |
+|---|---:|---:|
+| session_recall@5 | 0.865 | **0.950** |
+| message_recall@5 | **0.670** | 0.617 |
+| session_hit@5 | 0.968 | **0.981** |
+| message_hit@5 | **0.768** | **0.768** |
+| context_chars_mean | — | **3,991** |
 
-## LongMemEval S Results (500 questions, ~48 sessions each, k=5, memorycore only)
+**Recommendation: use `recall(strategy="episodic")` (the default).** It is the strongest zero-LLM mode on both evaluations — best session recall, competitive message recall, and no retrieval LLM calls. Use `direct` for single-session factual questions (best message precision), `expanded` when highest precision is needed (1 LLM call for query rephrasing), and `fusion` when session diversity is critical (2× compute).
 
-| Mode | LLM calls/q | session_recall@5 | message_recall@5 | empty_retrieval |
-|------|-------------|-------------------|-------------------|------------------|
-| `recall(strategy="direct")` | 0 | **86.5%** | 67.0% | 6.0% |
-| `recall(strategy="expanded")` | 1 | *not yet run* | *not yet run* | — |
+All modes abstain correctly on unanswerable questions (0% false positive rate).
 
-Zero-LLM `recall(strategy="direct")` holds at 86.5% session recall even with ~48 sessions to search through (vs ~2 in oracle). Near-perfect on single-session types (0.97–1.0), harder on multi-session and temporal-reasoning (0.78–0.80).
-
-| Question type | session_recall@5 | message_recall@5 | n |
-|---------------|-------------------|-------------------|---|
-| single-session-assistant | **100.0%** | 85.7% | 56 |
-| single-session-user | 96.9% | 89.8% | 70 |
-| knowledge-update | 93.1% | 73.8% | 78 |
-| single-session-preference | 86.7% | 54.4% | 30 |
-| temporal-reasoning | 79.6% | 58.8% | 133 |
-| multi-session | 77.9% | 53.9% | 133 |
-
-Results: `eval_output/lme-s/results.json`, `eval_output/lme-s/results.jsonl`
+Results: `eval_output/lme-oracle/results.json`, `eval_output/lme-s/results.json`
 
 ## Installation
 
@@ -75,19 +71,16 @@ Results: `eval_output/lme-s/results.json`, `eval_output/lme-s/results.jsonl`
 pip install coremem
 ```
 
-HybridBackend (HybridDB — SQLite + FTS5 + ChromaDB) is the default since 0.5.0:
+Optional extras:
 
-> **Note on model downloads.** ChromaDB downloads a bundled MiniLM embedding model (~80MB) on first `PersistentClient()` init. The cross-encoder downloads `cross-encoder/ms-marco-MiniLM-L-6-v2` (~500MB) on first `search_enhanced()` call. Both cache locally after download. Call `core.warmup()` at startup to pre-load models predictably.
+```bash
+pip install "coremem[mcp]"    # MCP server
+pip install "coremem[all]"     # all extras
+```
+
+> **Note on model downloads.** ChromaDB downloads a bundled MiniLM embedding model (~80MB) on first `PersistentClient()` init. The cross-encoder downloads `cross-encoder/ms-marco-MiniLM-L-6-v2` (~500MB) on first `recall(strategy="episodic")` call. Both cache locally after download. Run one recall at startup to pre-load models predictably.
 
 ## Core Concepts
-
-### Backend
-
-Since v0.6.0, CoreMem uses HybridDB internally (SQLite + FTS5 + ChromaDB). No backend selection needed:
-
-```python
-core = MemoryCore(path="./data")
-```
 
 ### Ingestion
 
@@ -95,24 +88,37 @@ core = MemoryCore(path="./data")
 # Simple ingestion
 core.ingest("user", "I built a Spitfire model kit", session_id="conv_001")
 
-# Batch ingestion
-core.ingest_many([
+# Batch ingestion (one turn = one turn_id)
+core.ingest_turn([
     {"role": "user", "content": "What's the weather today?"},
     {"role": "assistant", "content": "Sunny with a high of 72°F"},
 ], session_id="conv_001")
 ```
 
-### Search
+### Recall
+
+`recall()` is the single retrieval entry point, with four strategies:
+
+| Strategy | LLM calls | Pipeline |
+|----------|-----------|----------|
+| `episodic` (default) | 0 | Query decomposition → hybrid search per variant → RRF fusion → cross-encoder rerank → MMR diversity |
+| `direct` | 0 | Single hybrid search + deterministic heuristics |
+| `expanded` | 1 | LLM query rephrasing, then the direct pipeline per variant |
+| `fusion` | 0 | RRF fusion of `direct` + `episodic` |
 
 ```python
-# Basic search — fast path with deterministic heuristics
-results = core.search("How many model kits?", limit=10)
+results = core.recall("How many model kits?", limit=10)
+results = core.recall("What did I build recently?", strategy="direct")
 
-# Enhanced search — multi-query expansion + cross-encoder reranking
-results = core.search_enhanced("What did I build recently?", limit=10)
+# Session bundles — surrounding context around each hit
+bundles = core.recall("model kits", bundles=True)
+for b in bundles:
+    print(f"## Session {b.session_id} (complete={b.complete})")
+    for m in b.messages:
+        print(f"  [{m.role}] {m.content}")
 
-# Cross-encoder loads on first use (~500MB download).
-# Disable with DISABLE_CROSS_ENCODER=1 for eval scripts.
+# Filter params
+results = core.recall("coffee", role="user", session_id="conv_001", ts_after="2024-01-01")
 ```
 
 ### Heuristics
@@ -139,54 +145,59 @@ score = SearchHeuristics.apply_all(
 )
 ```
 
-### Enhanced Search
-
-`search_enhanced()` adds multi-query expansion and cross-encoder reranking:
+### Memory lifecycle
 
 ```python
-results = core.search_enhanced("model kits", limit=10)
+core.fetch(session_id="conv_001")          # query with filters
+core.fetch_all()                            # everything (limit 10k)
+core.store([Memory(id="m1", content="...")])
+core.count()
+core.delete(session_id="conv_001")
+core.clear()
 ```
 
-**Multi-query expansion.** Generates search variants for better recall. Regex expansion always active. LLM-based expansion is opt-in — pass an `llm_provider` to `MemoryCore`:
+### AgentJournal
+
+The AgentJournal subsystem compiles conversation turns into dense, retrieval-optimized daily journal pages (markdown + frontmatter), with deterministic validation of every claim against its source:
 
 ```python
-core = MemoryCore(backend=..., llm_provider=my_chat_model)
+# Compile a turn into daily/YYYY-MM-DD.md (1 LLM call per turn)
+await core.compile_turn(turn_id=tid)
+await core.compile_latest_turn(session_id="conv_001")
+await core.compile_uncompiled_turns()
+
+# Dreaming consolidation — LLM analysis of daily pages, promoted facts to MEMORY.md
+await core.dream()
+
+# Rebuild weekly/monthly/index navigation files from daily pages
+core.rebuild_index()
 ```
 
-Or set `MEMORY_EXPANSION_MODEL=ollama:llama3.2` in your environment when using MemoryCore from this project's ecosystem.
+The LLM compiler (`openai:gpt-4o-mini` by default) produces a structured plan that the deterministic compiler validates — every claim is checked against source messages (exact quote substrings, role/evidence-type compatibility) before it is written. Set `COREMEM_LLM_MODEL` (e.g. `ollama:llama3.2`) to change the model.
 
-**Cross-encoder reranking.** A `cross-encoder/ms-marco-MiniLM-L-6-v2` model reranks the top results for better relevance. Loads lazily on first `search_enhanced()` call (~500MB download). Pre-load at startup with `core.warmup()` to avoid the delay during first search. Disable with:
+### CLI, MCP, and hooks
 
 ```bash
-DISABLE_CROSS_ENCODER=1 python my_script.py
+coremem recall "model kits" --strategy direct
+coremem ingest user "I built a Spitfire model kit" --session-id conv_001
+coremem compile <turn_id>
+coremem rebuild
+coremem sessions
+coremem mcp   # MCP stdio server (also the default command)
 ```
 
-### Observer Pipeline
+- **MCP server** — 5 tools: `recall`, `ingest`, `compile`, `rebuild_index`, `list_sessions`
+- **Hooks** — Claude Code and Codex: `UserPromptSubmit` (capture + retrieval injection), `Stop` (capture), `PreCompact` (no-op)
+- **Integration configs** in `integrations/` for Claude Code, Codex, and OpenCode
 
-The `ObserverPipeline` (v0.5.0+) extracts structured observations from conversations — identity facts, events, preferences, plans, stances — and stores them with **source-quote alignment** guaranteeing 0% hallucination:
+### Environment variables
 
-```python
-from coremem.memory_store import MemoryStore
-from coremem.observer import ObserverPipeline
-
-store = MemoryStore(path="./memory")
-pipeline = ObserverPipeline(
-    core=core, store=store, session_id="main",
-    token_threshold=100, min_turns=1,
-    enable_classification=True,
-    enable_dedup=True,
-)
-await pipeline.after_turn()
-```
-
-**7 labeling functions (LF) in parallel** extract entities, actions, preferences, temporal facts, sentiment, possessions, and stances. All LFs are LLM-based — a deliberate choice:
-
-| Approach | Cost | Languages | Recall | Hallucination gate |
-|----------|------|-----------|--------|-------------------|
-| **LLM LFs** (current) | ~7 API calls/turn | **Any language** | 97.5% | ✅ Source-quote verified |
-| Non-LLM (spaCy/VADER) | ~free | English only | ~95% (unverified) | ❌ None |
-
-Non-LLM approaches like OpenIE dependency parsing can replace entities, temporal, possessions, and actions LFs with zero API cost, but are restricted to the languages the NLP model supports (primarily English). LLM LFs handle any language out of the box — Mandarin, Arabic, Spanish, code-switching — without model swaps or quality degradation. The 2.5% miss rate (third-party events, contextual asides) is the measured cost of the hallucination gate.
+| Variable | Purpose |
+|----------|---------|
+| `COREMEM_PATH` | Memory storage path (default `~/.coremem/hybrid`) |
+| `COREMEM_LLM_MODEL` | LLM model for journal compilation (e.g. `openai:gpt-4o-mini`, `ollama:llama3.2`) |
+| `DISABLE_CROSS_ENCODER` | Set to `1` to skip cross-encoder reranking (eval scripts) |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OLLAMA_API_KEY` | Provider keys for LLM-backed features |
 
 ## License
 

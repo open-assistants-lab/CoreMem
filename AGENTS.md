@@ -132,5 +132,5 @@ uv run scripts/eval_agent_journal_longmemeval.py data/longmemeval_s_20_subset.js
 ## Tests
 
 ```bash
-uv run python3 -m pytest tests/ -q   # 47 pass
+uv run python3 -m pytest tests/ -q   # 142 pass
 ```
