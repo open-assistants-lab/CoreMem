@@ -21,3 +21,6 @@ data/longmemeval_m_*.json
 worktrees/
 .worktrees
 .DS_Store
+
+# Local agent config
+.claude/
