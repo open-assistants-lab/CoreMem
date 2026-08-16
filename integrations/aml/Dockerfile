@@ -12,6 +12,12 @@ RUN pip install --no-cache-dir . \
 # The AML adapter entrypoint (copied to the app root for a flat import path)
 COPY integrations/aml/server.py /app/aml_server.py
 
+# Pre-download the embedding + cross-encoder models at build time so the
+# container starts instantly and the first Search never stalls on a download.
+# A dummy message is ingested first: HybridDB initializes the embedding
+# client lazily, so an empty database would skip the ChromaDB model download.
+RUN python -c "from coremem import MemoryCore; import tempfile; core = MemoryCore(path=tempfile.mkdtemp()); core.ingest('user', 'warmup message to trigger model downloads', session_id='warmup'); core.recall('warmup', strategy='episodic', limit=1)"
+
 ENV COREMEM_PATH=/data/memory
 ENV AML_STRATEGY=episodic
 ENV AML_TOP_K=100
