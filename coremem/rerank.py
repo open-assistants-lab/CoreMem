@@ -9,20 +9,24 @@ scripts running inside asyncio threads to avoid PyTorch deadlocks).
 """
 
 import os
+import threading
 from typing import Any
 
 _cross_encoder: Any = None
+_cross_encoder_lock = threading.Lock()
 
 
 def get_cross_encoder() -> Any:
-    """Lazy-load the cross-encoder reranker model."""
+    """Lazy-load the cross-encoder reranker model (thread-safe)."""
     global _cross_encoder
     if _cross_encoder is None:
-        try:
-            from sentence_transformers import CrossEncoder
-            _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        except Exception:
-            return None
+        with _cross_encoder_lock:
+            if _cross_encoder is None:
+                try:
+                    from sentence_transformers import CrossEncoder
+                    _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                except Exception:
+                    return None
     return _cross_encoder
 
 
