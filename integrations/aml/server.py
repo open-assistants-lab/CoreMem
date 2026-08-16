@@ -33,7 +33,9 @@ Environment:
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -41,6 +43,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from coremem import MemoryCore
+
+logger = logging.getLogger(__name__)
 
 MEMORY_PATH = os.environ.get("COREMEM_PATH", "/data/memory")
 AML_STRATEGY = os.environ.get("AML_STRATEGY", "episodic")
@@ -50,6 +54,11 @@ AML_API_KEY = os.environ.get("AML_API_KEY", "")
 SCOPE_METADATA_KEY = "aml_scope"
 
 core = MemoryCore(path=MEMORY_PATH)
+
+# The AML platform runs Add/Search workers concurrently (64 Add workers by
+# default). HybridDB's SQLite + ChromaDB are not safe for concurrent writes,
+# so all ingest() calls are serialized through this lock.
+_add_lock = threading.Lock()
 
 
 # ── Startup warmup ─────────────────────────────────────────────────────────
@@ -64,7 +73,7 @@ def _warmup() -> None:
     try:
         core.recall("warmup", strategy=AML_STRATEGY, limit=1)
     except Exception:
-        pass  # warmup is best-effort; Search will load lazily if it fails
+        logger.warning("AML warmup failed; models will load lazily on first Search", exc_info=True)
 
 
 @asynccontextmanager
@@ -139,15 +148,16 @@ def health() -> dict[str, str]:
 def add(payload: AddRequest, request: Request) -> AddResponse:
     """Store a chunk of conversation messages under the request's scope."""
     _check_auth(request)
-    for msg in payload.messages:
-        ts = datetime.fromtimestamp(msg.ts / 1000, tz=UTC) if msg.ts else None
-        core.ingest(
-            msg.role,
-            msg.content,
-            session_id=payload.conversation_id,
-            ts=ts,
-            metadata={SCOPE_METADATA_KEY: payload.scope},
-        )
+    with _add_lock:
+        for msg in payload.messages:
+            ts = datetime.fromtimestamp(msg.ts / 1000, tz=UTC) if msg.ts else None
+            core.ingest(
+                msg.role,
+                msg.content,
+                session_id=payload.conversation_id,
+                ts=ts,
+                metadata={SCOPE_METADATA_KEY: payload.scope},
+            )
     # ingest() is synchronous: messages are committed and searchable
     # before this response is returned (contract requirement).
     return AddResponse(request_id=payload.request_id)

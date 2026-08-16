@@ -23,6 +23,29 @@ AML contract onto `core.ingest()` / `core.recall()`.
 | `POST /v1/memories/search` | `{query, scope, options?, top_k?}` | `{results: [{id, text, ts}]}` ordered most-relevant first; `[]` when nothing relevant |
 | `GET /health` | — | `{status: "ok"}` |
 
+### Verified vs assumed
+
+The api-guide page is client-rendered; this contract was extracted from the
+platform's JS bundle (i18n strings describing every field). Confirmed by the
+bundle text:
+
+- Add: one request per memory chunk; `request_id` echoed exactly in the
+  response; response sent only after messages are fully stored and
+  searchable; `scope` stored exactly and used for retrieval isolation;
+  `conversation_id` for grouping only; message `role` is `user` or
+  `assistant`; `ts` in Unix milliseconds.
+- Search: one request per benchmark question; `query` unchanged; `options`
+  carried separately for choice questions (answer-side, not retrieval cues);
+  results ordered most-relevant first and preserved by the platform's answer
+  pipeline; empty array when nothing relevant; result fields are a stable
+  `id`, `text`, and a source/persistence `ts`.
+- Smoke suite runs with Top K 90; production retrieval `top_k` is 100.
+
+**Assumed (verify against the live api-guide before submitting):** the JSON
+field names (`request_id`, `scope`, `conversation_id`, `top_k`, `results`),
+the Search response envelope (`{results: [...]}` vs a bare array), and the
+`ts` unit in Search results (Unix ms, matching Add).
+
 Contract details honored:
 
 - **Scope isolation** — `scope` is stored exactly and used to isolate searches
@@ -33,7 +56,13 @@ Contract details honored:
 - **Relevance gate** — CoreMem's recall always returns top-k; the adapter
   drops results below `AML_MIN_SCORE` (default `0.0`, applied to the
   cross-encoder logit) so the contract's "empty array when nothing relevant"
-  holds. Verified: relevant pairs score ~+7, irrelevant ~−11.
+  holds. Verified: relevant pairs score ~+7, irrelevant ~−11. Note: for
+  non-episodic strategies the gate falls back to the result score, which has
+  no absolute meaning — use the default `episodic` strategy.
+- **Concurrency** — the platform runs 64 Add workers concurrently; all
+  writes are serialized through a lock (HybridDB's SQLite + ChromaDB are not
+  safe for concurrent writes). Verified: 32 concurrent Add requests hang
+  without the lock, complete cleanly with it.
 - **Zero-LLM compliance** — AML requires any model used during Add/Search to
   be `gpt-4o-mini`. CoreMem uses **no model** in either operation (the
   default `episodic` strategy is fully local: BM25 + embeddings + a local
