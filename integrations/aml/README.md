@@ -17,42 +17,23 @@ AML contract onto `core.ingest()` / `core.recall()`.
 
 ## Contract implemented
 
+Verified against the live page https://agentmemories.ai/api-guide (rendered
+via browser automation).
+
 | Endpoint | Request | Response |
 |---|---|---|
-| `POST /v1/memories/add` | `{request_id, scope, conversation_id, messages: [{role, content, ts?}]}` | `{request_id, status: "ok"}` — sent only after messages are stored and searchable |
-| `POST /v1/memories/search` | `{query, scope, options?, top_k?}` | `{results: [{id, text, ts}]}` ordered most-relevant first; `[]` when nothing relevant |
-| `GET /health` | — | `{status: "ok"}` |
-
-### Verified vs assumed
-
-The api-guide page is client-rendered; this contract was extracted from the
-platform's JS bundle (i18n strings describing every field). Confirmed by the
-bundle text:
-
-- Add: one request per memory chunk; `request_id` echoed exactly in the
-  response; response sent only after messages are fully stored and
-  searchable; `scope` stored exactly and used for retrieval isolation;
-  `conversation_id` for grouping only; message `role` is `user` or
-  `assistant`; `ts` in Unix milliseconds.
-- Search: one request per benchmark question; `query` unchanged; `options`
-  carried separately for choice questions (answer-side, not retrieval cues);
-  results ordered most-relevant first and preserved by the platform's answer
-  pipeline; empty array when nothing relevant; result fields are a stable
-  `id`, `text`, and a source/persistence `ts`.
-- Smoke suite runs with Top K 90; production retrieval `top_k` is 100.
-
-**Assumed (verify against the live api-guide before submitting):** the JSON
-field names (`request_id`, `scope`, `conversation_id`, `top_k`, `results`),
-the Search response envelope (`{results: [...]}` vs a bare array), and the
-`ts` unit in Search results (Unix ms, matching Add).
+| `POST /v1/memories/add` | `{request_id, user_id, session_id, messages: [{role, content, timestamp?}]}` | `{success: true, request_id, user_id, session_id}` — HTTP 200 only after messages are stored and searchable |
+| `POST /v1/memories/search` | `{query, user_id, top_k, options?}` | `{data: [{id, content, score?, created_at?}]}` ordered most-relevant first; `[]` when nothing relevant |
+| `GET /health` | — | any 2xx = healthy (unauthenticated) |
 
 Contract details honored:
 
-- **Scope isolation** — `scope` is stored exactly and used to isolate searches
-  (stored in message metadata, filtered on every recall). `conversation_id`
-  maps to CoreMem's `session_id` (grouping only).
-- **Timestamps** — Unix milliseconds are converted to UTC datetimes, so
-  temporal questions keep their ordering.
+- **Isolation boundary** — `user_id` is stored exactly and used identically
+  for Add and Search (the docs require "the identical isolation boundary").
+  `session_id` maps to CoreMem's `session_id` (grouping only).
+- **Timestamps** — message `timestamp` (Unix ms) is converted to a UTC
+  datetime, so temporal questions keep their ordering. `created_at` in
+  search results is an ISO timestamp.
 - **Relevance gate** — CoreMem's recall always returns top-k; the adapter
   drops results below `AML_MIN_SCORE` (default `0.0`, applied to the
   cross-encoder logit) so the contract's "empty array when nothing relevant"
@@ -79,10 +60,10 @@ Smoke it:
 
 ```bash
 curl -X POST localhost:8000/v1/memories/add -H 'Content-Type: application/json' -d '{
-  "request_id": "r1", "scope": "s1", "conversation_id": "c1",
+  "request_id": "r1", "user_id": "u1", "session_id": "c1",
   "messages": [{"role": "user", "content": "I love hiking in Yosemite"}]}'
 curl -X POST localhost:8000/v1/memories/search -H 'Content-Type: application/json' -d '{
-  "query": "hiking Yosemite", "scope": "s1", "top_k": 5}'
+  "query": "hiking Yosemite", "user_id": "u1", "top_k": 5}'
 ```
 
 ## Submit (academic route)
