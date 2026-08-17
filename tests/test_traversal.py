@@ -60,21 +60,19 @@ def test_traversal_caps_candidates_per_session():
     core = _tmp_core()
     try:
         core.ingest("user", "I love hiking in Yosemite", session_id="s1")
-        core.ingest("user", "Yosemite has great trails", session_id="s1")
-        core.ingest("user", "Yosemite is beautiful in spring", session_id="s1")
         core.ingest("user", "I love hiking in Tahoe", session_id="s2")
-        core.ingest("user", "Tahoe has great trails", session_id="s2")
+        # three cross-session candidates from a new session (topic edges)
+        core.ingest("user", "Yosemite has great trails", session_id="s3")
+        core.ingest("user", "Yosemite is beautiful in spring", session_id="s3")
+        core.ingest("user", "Yosemite is my favorite park", session_id="s3")
 
         results = search_messages_traversal(
-            core, "hiking Yosemite", limit=5, max_per_session=1,
+            core, "hiking Yosemite", limit=5, seed_limit=2, max_per_session=1,
         )
 
-        # at most one candidate from s1's neighbors beyond the seed
-        s1_candidates = [
-            r for r in results
-            if r.memory.session_id == "s1" and "trails" in r.memory.content
-        ]
-        assert len(s1_candidates) <= 1
+        # at most one candidate from s3 (the new session) beyond the seeds
+        s3_candidates = [r for r in results if r.memory.session_id == "s3"]
+        assert len(s3_candidates) <= 1
     finally:
         core._test_cleanup()
 

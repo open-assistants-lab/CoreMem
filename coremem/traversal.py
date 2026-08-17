@@ -29,9 +29,55 @@ from coremem.types import Memory, SearchResult
 TEMPORAL_EDGE = "temporal_next"
 SESSION_EDGE = "same_session"
 TOPIC_EDGE = "topic"
+TURN_QA_EDGE = "turn_qa"
+UPDATE_EDGE = "update"
+CAUSAL_EDGE = "causal"
+SELF_REF_EDGE = "self_reference"
+EMOTIONAL_EDGE = "emotional"
+ENTITY_EDGE = "entity"
+SEMANTIC_EDGE = "semantic"
 HOP_DECAY = 0.7
 CONFIRMATION_BOOST = 0.5
 MAX_TOPIC_EDGES_PER_MESSAGE = 10
+MAX_SEMANTIC_EDGES_PER_MESSAGE = 10
+SEMANTIC_SIM_THRESHOLD = 0.55
+
+# Edge weights encode human-memory association strength (see
+# docs/graph-edges-design.md): temporal 1.0, causal 0.9, entity 0.8,
+# update 0.8, turn_qa 0.7, emotional 0.6, self_reference 0.6,
+# semantic 0.5, topic 0.5+.
+_EDGE_WEIGHTS = {
+    TURN_QA_EDGE: 0.7,
+    UPDATE_EDGE: 0.8,
+    CAUSAL_EDGE: 0.9,
+    SELF_REF_EDGE: 0.6,
+    EMOTIONAL_EDGE: 0.6,
+    ENTITY_EDGE: 0.8,
+    SEMANTIC_EDGE: 0.5,
+}
+
+# Pattern-based extractors (zero-LLM, consistent with CoreMem's ethos)
+_UPDATE_RE = re.compile(
+    r"\b(changed|switched|no longer|used to|instead of|moved to|upgraded|"
+    r"downgraded|replaced|quit|stopped|gave up|now (?:use|prefer|live|work|take))\b",
+    re.IGNORECASE,
+)
+_CAUSAL_RE = re.compile(
+    r"\b(because|therefore|as a result|which is why|due to|thanks to|that's why|so that)\b",
+    re.IGNORECASE,
+)
+_SELF_RE = re.compile(r"\b(i|me|my|mine|we|our|ours)\b", re.IGNORECASE)
+_POSITIVE_WORDS = {
+    "love", "loved", "great", "amazing", "wonderful", "excellent", "happy",
+    "excited", "enjoy", "enjoyed", "best", "beautiful", "fantastic",
+    "awesome", "perfect", "delicious", "fun", "glad", "thrilled", "proud",
+}
+_NEGATIVE_WORDS = {
+    "hate", "hated", "terrible", "awful", "horrible", "sad", "angry",
+    "frustrated", "disappointed", "worried", "stressed", "annoyed",
+    "boring", "waste", "regret", "regretted", "scared", "upset", "bad",
+}
+_ENTITY_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b")
 _STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "have",
     "has", "had", "do", "does", "did", "will", "would", "could", "should",
@@ -67,12 +113,73 @@ def _significant_keywords(content: str) -> set[str]:
     }
 
 
-def _build_message_graph(db: Any, messages: list[Memory]) -> None:
-    """Materialize the message graph: nodes + temporal/session/topic edges.
+def _sentiment(content: str) -> float:
+    """Lexicon sentiment in [-1, 1]; 0 when neutral."""
+    words = {w.lower() for w in re.findall(r"\w+", content)}
+    pos = len(words & _POSITIVE_WORDS)
+    neg = len(words & _NEGATIVE_WORDS)
+    if pos == 0 and neg == 0:
+        return 0.0
+    return (pos - neg) / (pos + neg)
 
-    Topic edges connect messages in different sessions that share
-    significant keywords — the cross-session links that let traversal
-    discover new episodes (the SPEC's deferred Stage 2 edge type).
+
+_ENTITY_EXCLUSIONS = {
+    "i", "the", "a", "an", "it", "we", "they", "he", "she", "my", "me",
+    "you", "your", "our", "this", "that", "these", "those", "there",
+    "here", "so", "but", "and", "or", "for", "with", "from", "what",
+    "how", "when", "where", "why", "who", "let", "one", "two", "three",
+    "great", "good", "yeah", "well", "just", "actually", "really",
+    "very", "also", "then", "now", "today", "tomorrow", "yesterday",
+    "last", "next", "first", "second", "new", "old", "big", "small",
+    "best", "worst", "more", "most", "some", "any", "every", "all",
+    "both", "each", "few", "many", "much", "no", "yes", "ok", "okay",
+    "thanks", "thank", "please", "sorry", "hi", "hello", "hey", "wait",
+    "look", "listen", "sure", "right", "fine", "nice", "cool", "done",
+    "ready", "free", "busy", "tired", "happy", "sad", "angry", "back",
+    "home", "work", "school", "week", "month", "year", "day", "time",
+    "thing", "things", "way", "lot", "bit", "kind", "sort", "stuff",
+}
+
+
+def _entities(content: str) -> set[str]:
+    """Pattern NER: capitalized words/sequences, minus noise."""
+    found: set[str] = set()
+    for match in _ENTITY_RE.finditer(content):
+        name = match.group(1)
+        words = name.split()
+        if any(w.lower() in _ENTITY_EXCLUSIONS for w in words):
+            continue
+        if len(words) == 1 and len(words[0]) < 3:
+            continue
+        found.add(name.lower())
+    return found
+
+
+def _batch_embeddings(texts: list[str]) -> list[list[float]]:
+    """Batched embeddings via ChromaDB's default function (ONNX, cached)."""
+    from chromadb.utils import embedding_functions
+    ef = embedding_functions.DefaultEmbeddingFunction()
+    return ef(texts)
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    import math
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return dot / (na * nb)
+
+
+def _build_message_graph(db: Any, messages: list[Memory]) -> None:
+    """Materialize the message graph.
+
+    Edge types (see docs/graph-edges-design.md):
+      within-session: temporal_next, same_session, turn_qa
+      cross-session:  topic, update, causal, self_reference, emotional,
+                      entity, semantic
+    Each message pair gets ONE edge — the strongest applicable association
+    (causal 0.9 > entity/update 0.8 > turn_qa 0.7 > emotional/self_ref 0.6
+    > semantic/topic 0.5) — so traversal path counts stay honest.
     """
     db.add_nodes([
         {
@@ -91,6 +198,8 @@ def _build_message_graph(db: Any, messages: list[Memory]) -> None:
     for message in messages:
         by_session.setdefault(message.session_id or "", []).append(message)
     edges: list[dict[str, Any]] = []
+
+    # ── Within-session edges ──────────────────────────────────────────────
     for session_messages in by_session.values():
         session_messages.sort(
             key=lambda m: m.ts or datetime.min.replace(tzinfo=UTC)
@@ -106,31 +215,146 @@ def _build_message_graph(db: Any, messages: list[Memory]) -> None:
                     "source_id": a.id, "target_id": b.id,
                     "type": SESSION_EDGE, "weight": 0.5,
                 })
-    # Cross-session topic edges: shared significant keywords, capped per
-    # message to keep the graph sparse.
-    session_lists = list(by_session.values())
+        # turn_qa: user ↔ assistant within the same turn
+        by_turn: dict[str, list[Memory]] = {}
+        for message in session_messages:
+            turn_id = (message.metadata or {}).get("turn_id") or ""
+            by_turn.setdefault(turn_id, []).append(message)
+        for turn_messages in by_turn.values():
+            roles = {m.role for m in turn_messages}
+            if len(turn_messages) >= 2 and {"user", "assistant"} <= roles:
+                for i, a in enumerate(turn_messages):
+                    for b in turn_messages[i + 1:]:
+                        if a.role != b.role:
+                            edges.append({
+                                "source_id": a.id, "target_id": b.id,
+                                "type": TURN_QA_EDGE, "weight": 0.7,
+                            })
+
+    # ── Cross-session edges ───────────────────────────────────────────────
+    # Embeddings are computed once (batched) and similarities vectorized
+    # with numpy. Keyword/entity pairs are found via inverted indexes so
+    # each message pair is evaluated exactly once.
+    ordered = [m for m in messages if m.id]
+    embeddings = _batch_embeddings([m.content for m in ordered])
+    import numpy as np
+    emb_matrix = np.array(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+    emb_matrix = emb_matrix / np.maximum(norms, 1e-9)
+    sim_matrix = emb_matrix @ emb_matrix.T
+    emb_index = {m.id: i for i, m in enumerate(ordered)}
+
+    features = {
+        m.id: {
+            "keywords": _significant_keywords(m.content),
+            "entities": _entities(m.content),
+            "update": bool(_UPDATE_RE.search(m.content)),
+            "causal": bool(_CAUSAL_RE.search(m.content)),
+            "self_ref": bool(_SELF_RE.search(m.content)),
+            "sentiment": _sentiment(m.content),
+            "session_id": m.session_id or "",
+        }
+        for m in messages
+        if m.id
+    }
+
+    def _cross_session_pairs(index: dict[str, list[str]]) -> dict[tuple[str, str], set[str]]:
+        """Map (a, b) message-id pairs (different sessions) to shared keys.
+
+        Keywords appearing in more than 10% of messages are too generic to
+        be distinctive ("going", "think", "want") — they would create a
+        near-complete cross-session graph.
+        """
+        cap = max(10, len(messages) // 10)
+        pairs: dict[tuple[str, str], set[str]] = {}
+        for key, members in index.items():
+            if len(members) > cap:
+                continue
+            by_session: dict[str, list[str]] = {}
+            for mid in members:
+                by_session.setdefault(features[mid]["session_id"], []).append(mid)
+            sessions = list(by_session)
+            for i in range(len(sessions)):
+                for j in range(i + 1, len(sessions)):
+                    for a in by_session[sessions[i]]:
+                        for b in by_session[sessions[j]]:
+                            pair = (a, b) if a < b else (b, a)
+                            pairs.setdefault(pair, set()).add(key)
+        return pairs
+
+    kw_index: dict[str, list[str]] = {}
+    ent_index: dict[str, list[str]] = {}
+    for mid, feat in features.items():
+        for kw in feat["keywords"]:
+            kw_index.setdefault(kw, []).append(mid)
+        for ent in feat["entities"]:
+            ent_index.setdefault(ent, []).append(mid)
+    shared_keywords = _cross_session_pairs(kw_index)
+    shared_entities = _cross_session_pairs(ent_index)
+
+    edges: list[dict[str, Any]] = []
     topic_counts: dict[str, int] = {}
-    for i, msgs_a in enumerate(session_lists):
-        for msgs_b in session_lists[i + 1:]:
-            for a in msgs_a:
-                if topic_counts.get(a.id, 0) >= MAX_TOPIC_EDGES_PER_MESSAGE:
-                    continue
-                keywords_a = _significant_keywords(a.content)
-                if not keywords_a:
-                    continue
-                for b in msgs_b:
-                    if topic_counts.get(b.id, 0) >= MAX_TOPIC_EDGES_PER_MESSAGE:
-                        continue
-                    shared = keywords_a & _significant_keywords(b.content)
-                    if not shared:
-                        continue
-                    edges.append({
-                        "source_id": a.id, "target_id": b.id,
-                        "type": TOPIC_EDGE,
-                        "weight": min(0.5 + 0.1 * len(shared), 1.0),
-                    })
-                    topic_counts[a.id] = topic_counts.get(a.id, 0) + 1
-                    topic_counts[b.id] = topic_counts.get(b.id, 0) + 1
+    semantic_counts: dict[str, int] = {}
+    seen_pairs: set[tuple[str, str]] = set()
+    for pair in shared_keywords:
+        a, b = pair
+        fa, fb = features[a], features[b]
+        best_type: str | None = None
+        best_weight = 0.0
+        if pair in shared_entities:
+            best_type, best_weight = ENTITY_EDGE, _EDGE_WEIGHTS[ENTITY_EDGE]
+        shared = shared_keywords[pair]
+        topic_weight = min(0.5 + 0.1 * len(shared), 1.0)
+        if fa["causal"] or fb["causal"]:
+            best_type, best_weight = CAUSAL_EDGE, _EDGE_WEIGHTS[CAUSAL_EDGE]
+        elif fa["update"] or fb["update"]:
+            best_type, best_weight = UPDATE_EDGE, _EDGE_WEIGHTS[UPDATE_EDGE]
+        elif fa["self_ref"] and fb["self_ref"]:
+            best_type, best_weight = SELF_REF_EDGE, _EDGE_WEIGHTS[SELF_REF_EDGE]
+        elif (
+            fa["sentiment"] and fb["sentiment"]
+            and (fa["sentiment"] * fb["sentiment"]) > 0
+            and min(abs(fa["sentiment"]), abs(fb["sentiment"])) >= 0.5
+        ):
+            best_type, best_weight = EMOTIONAL_EDGE, _EDGE_WEIGHTS[EMOTIONAL_EDGE]
+        elif topic_weight > best_weight:
+            best_type, best_weight = TOPIC_EDGE, topic_weight
+        if best_type is not None:
+            edges.append({
+                "source_id": a, "target_id": b,
+                "type": best_type, "weight": best_weight,
+            })
+            seen_pairs.add(pair)
+            topic_counts[a] = topic_counts.get(a, 0) + 1
+            topic_counts[b] = topic_counts.get(b, 0) + 1
+
+    # Semantic edges: cross-session pairs with high embedding similarity and
+    # no stronger edge — found via the vectorized similarity matrix.
+    ids = list(emb_index)
+    sim_pairs = np.argwhere(sim_matrix >= SEMANTIC_SIM_THRESHOLD)
+    for i, j in sim_pairs:
+        if i >= j:
+            continue
+        a, b = ids[i], ids[j]
+        if features[a]["session_id"] == features[b]["session_id"]:
+            continue
+        pair = (a, b)
+        if pair in seen_pairs:
+            continue
+        if (
+            topic_counts.get(a, 0) >= MAX_TOPIC_EDGES_PER_MESSAGE
+            or topic_counts.get(b, 0) >= MAX_TOPIC_EDGES_PER_MESSAGE
+            or semantic_counts.get(a, 0) >= MAX_SEMANTIC_EDGES_PER_MESSAGE
+            or semantic_counts.get(b, 0) >= MAX_SEMANTIC_EDGES_PER_MESSAGE
+        ):
+            continue
+        edges.append({
+            "source_id": a, "target_id": b,
+            "type": SEMANTIC_EDGE, "weight": _EDGE_WEIGHTS[SEMANTIC_EDGE],
+        })
+        seen_pairs.add(pair)
+        semantic_counts[a] = semantic_counts.get(a, 0) + 1
+        semantic_counts[b] = semantic_counts.get(b, 0) + 1
     db.add_edges(edges)
 
 
@@ -171,7 +395,11 @@ def search_messages_traversal(
     by_id = {m.id: m for m in messages if m.id}
     _build_message_graph(core._db, messages)
 
-    # 3. Expand from every seed through the graph
+    # 3. Expand from every seed through the graph. Only candidates from
+    #    sessions outside the seed set add value: same-session neighbors are
+    #    already covered by the baseline's rerank window and bundle
+    #    reconstruction, and MMR's one-result-per-session cap means a
+    #    same-session candidate can never outrank its own seed.
     seed_sessions = {seed.memory.session_id for seed in seeds}
     candidates: dict[str, dict[str, Any]] = {}
     for seed in seeds:
@@ -182,9 +410,6 @@ def search_messages_traversal(
             node_id = row["node_id"]
             if node_id == seed_id or node_id not in by_id:
                 continue
-            # Only candidates from sessions outside the seed set add value:
-            # same-session neighbors are already covered by the baseline's
-            # rerank window and bundle reconstruction.
             if by_id[node_id].session_id in seed_sessions:
                 continue
             entry = candidates.setdefault(
