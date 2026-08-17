@@ -69,7 +69,7 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 | `fusion` | When session diversity is critical | Best session hit rate (0.952 S) but 2× compute |
 
 **What was falsified:**
-- Graph traversal (PPR, beam search) — below baseline on every metric.
+- Graph traversal (PPR, beam search, query-guided traversal v2) — below baseline on every metric. Re-tested on the fixed HybridDB graph (0.5.5, published 2026-08-17) with a corrected design (seeds = baseline's exact rerank window, candidates restricted to new sessions via cross-session topic edges): **neutral** — identical to baseline on every metric (0.974 session recall on the 20-question subset), never better. The original PPR PoC (0.588/0.333) was measured against buggy graph code (silent empty results, directed-PPR mass loss) and overstated the harm; the corrected verdict is neutral, not harmful. Eval mode `memorycore_traversal_v2` remains available for future edge types.
 - Session-hub nodes — created gravity wells, removed.
 - Deterministic classifier routing — 78% accuracy on S, not reliable enough for production.
 - Session reranking (ER sessions → MC messages) — session recall collapsed to 0.623.
