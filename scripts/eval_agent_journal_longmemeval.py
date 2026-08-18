@@ -29,13 +29,14 @@ from typing import Any
 from coremem import MemoryCore
 from coremem.agent_journal import AgentJournalBundle
 from coremem.providers import create_provider
+from coremem.retrieval import search_messages_confirmed, search_messages_preference_union
 from coremem.traversal import search_messages_traversal
 from coremem.types import Memory
 
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -446,6 +447,10 @@ def _score_question(
             new_rows[m] = _score_instance_fusion(core, instance, truth, k=k)
         elif m == "memorycore_traversal_v2":
             new_rows[m] = _score_instance_traversal(core, instance, truth, k=k)
+        elif m == "memorycore_episodic_reranked_confirmed":
+            new_rows[m] = _score_instance_confirmed(core, instance, truth, k=k)
+        elif m == "memorycore_episodic_reranked_preference_union":
+            new_rows[m] = _score_instance_preference_union(core, instance, truth, k=k)
     return new_rows
 
 
@@ -839,6 +844,96 @@ def _score_instance_traversal(
         "bundle_message_recall": _fractional_recall(
             bundle_message_ids, truth.expected_message_ids,
         ),
+        "bundle_message_hit": bool(set(bundle_message_ids) & set(truth.expected_message_ids)),
+    })
+    return row
+
+
+def _score_instance_confirmed(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    """Episodic reranked + temporal-neighbor confirmation boost."""
+    mode = "memorycore_episodic_reranked_confirmed"
+    if truth.abstention_expected:
+        row = _empty_score(instance, truth, mode=mode)
+        row.update({
+            "bundle_session_ids": [], "bundle_message_ids": [], "bundle_count": 0,
+            "bundle_context_chars": 0, "bundle_message_recall": 0.0, "bundle_message_hit": False,
+        })
+        return row
+
+    primary = search_messages_confirmed(core, instance.query, limit=k, seed_limit=50)
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in primary
+    ]
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    bundles = core._reconstruct_sessions(instance.query, session_limit=k, primary_results=primary)
+    bundle_message_ids = [m.id for b in bundles for m in b.messages if m.id]
+    row.update({
+        "bundle_session_ids": [b.session_id for b in bundles],
+        "bundle_message_ids": bundle_message_ids,
+        "bundle_count": len(bundles),
+        "bundle_context_chars": sum(len(m.content) for b in bundles for m in b.messages),
+        "bundle_message_recall": _fractional_recall(bundle_message_ids, truth.expected_message_ids),
+        "bundle_message_hit": bool(set(bundle_message_ids) & set(truth.expected_message_ids)),
+    })
+    return row
+
+
+def _score_instance_preference_union(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+) -> dict[str, Any]:
+    """Episodic reranked with per-variant union for preference queries."""
+    mode = "memorycore_episodic_reranked_preference_union"
+    if truth.abstention_expected:
+        row = _empty_score(instance, truth, mode=mode)
+        row.update({
+            "bundle_session_ids": [], "bundle_message_ids": [], "bundle_count": 0,
+            "bundle_context_chars": 0, "bundle_message_recall": 0.0, "bundle_message_hit": False,
+        })
+        return row
+
+    primary = search_messages_preference_union(core, instance.query, limit=k, per_variant=40)
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in primary
+    ]
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    bundles = core._reconstruct_sessions(instance.query, session_limit=k, primary_results=primary)
+    bundle_message_ids = [m.id for b in bundles for m in b.messages if m.id]
+    row.update({
+        "bundle_session_ids": [b.session_id for b in bundles],
+        "bundle_message_ids": bundle_message_ids,
+        "bundle_count": len(bundles),
+        "bundle_context_chars": sum(len(m.content) for b in bundles for m in b.messages),
+        "bundle_message_recall": _fractional_recall(bundle_message_ids, truth.expected_message_ids),
         "bundle_message_hit": bool(set(bundle_message_ids) & set(truth.expected_message_ids)),
     })
     return row
@@ -1468,10 +1563,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
+    parser.add_argument("--question-types", nargs="*", help="Only run these question types (e.g. single-session-preference)")
     parser.add_argument(
         "--question-type",
         action="append",
