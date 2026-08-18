@@ -15,7 +15,7 @@ from coremem.rerank import rerank
 from coremem.types import Memory, SearchResult, SessionBundle
 from coremem.providers import create_provider
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 
 __all__ = [
     "MemoryCore", "Memory", "SearchResult", "SessionBundle",

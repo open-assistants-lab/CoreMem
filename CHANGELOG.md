@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.12.3] — Graph traversal experiment concluded (parked), hybriddb 0.5.5, instrumented eval harness
+
+### Graph traversal (parked 2026-08-18)
+- **Re-tested the falsified graph hypothesis on the fixed HybridDB graph (0.5.5)** with a corrected design (seeds = baseline's exact rerank window, candidates restricted to new sessions) and a full research-grounded edge set: topic, turn_qa, update, causal, self_reference, emotional, entity, semantic (see `docs/graph-edges-design.md`).
+- **20-question subset: neutral** — identical to baseline on every metric (0.974 session recall).
+- **S-scale (500 questions, ~48 sessions each): neutral-to-negative** — multi-session neutral (−0.0008 session recall at full 133), single-session exact ties, temporal-reasoning negative (−0.012 session, −0.008 message). The causal/update edges pull MMR toward graph-discovered sessions that are not temporally correct.
+- The original PPR PoC (0.588/0.333) was measured against buggy graph code and overstated the harm; the corrected verdict is neutral-to-negative, not harmful. The interim +0.0053 multi-session signal at 75 questions was a small-sample artifact.
+- Eval mode `memorycore_traversal_v2` remains ablation-ready; `coremem/traversal.py` keeps the edge set + timing instrumentation.
+
+### Added
+- **`scripts/eval_graph_s.py`** — resumable S-scale eval harness (checkpoint + crash-safe JSONL), per-question progress, and extensive instrumentation: ingest throughput (msgs/s), per-phase retrieval timing (seeds, graph build, traverse, rerank), graph composition (nodes, edges by type), and full retrieval metrics per mode.
+- **Timing instrumentation in `coremem/traversal.py`** — `timings` dict parameter (seeds/graph_build/traverse/rerank phases); `_build_message_graph` returns edge counts by type.
+- **Traversal performance fixes** — batched embeddings (9.4×), numpy-vectorized similarity, inverted-index pair construction, keyword frequency caps; 1-hop traverse is 180× cheaper than 2-hop (0.4s vs 73s per question) with identical metrics.
+
+### Changed
+- **hybriddb bumped to 0.5.5** (published to PyPI) — graph bug fixes: silent empty results on integer PKs, directed-PPR mass loss, node ID namespacing, traverse() type-filter ordering. Verified zero regression on the 20-question eval (identical metrics).
+- **dev extras** now include `fastapi` and `uvicorn` (AML integration tests were skipped without them).
+
 ## [0.12.2] — Metadata filters, expanded score normalization, dream cursor, writer conflicts
 
 ### Fixed

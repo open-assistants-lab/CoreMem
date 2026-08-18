@@ -69,7 +69,13 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 | `fusion` | When session diversity is critical | Best session hit rate (0.952 S) but 2× compute |
 
 **What was falsified:**
-- Graph traversal (PPR, beam search, query-guided traversal v2) — below baseline on every metric. Re-tested on the fixed HybridDB graph (0.5.5, published 2026-08-17) with a corrected design (seeds = baseline's exact rerank window, candidates restricted to new sessions) and a full research-grounded edge set (topic, turn_qa, update, causal, self_reference, emotional, entity, semantic — see `docs/graph-edges-design.md`): **neutral** — identical to baseline on every metric (0.974 session recall on the 20-question subset), never better. The original PPR PoC (0.588/0.333) was measured against buggy graph code (silent empty results, directed-PPR mass loss) and overstated the harm; the corrected verdict is neutral, not harmful. Eval mode `memorycore_traversal_v2` remains ablation-ready.
+- Graph traversal (PPR, beam search, query-guided traversal v2) — **parked 2026-08-18**. Below baseline on every metric. Re-tested on the fixed HybridDB graph (0.5.5, published 2026-08-17) with a corrected design (seeds = baseline's exact rerank window, candidates restricted to new sessions) and a full research-grounded edge set (topic, turn_qa, update, causal, self_reference, emotional, entity, semantic — see `docs/graph-edges-design.md`). Results:
+  - 20-question subset: identical to baseline on every metric (0.974 session recall) — neutral, never better.
+  - S-scale (500 questions, resumable run via `scripts/eval_graph_s.py`): multi-session (133) neutral (−0.0008 session recall), single-session types exact ties, **temporal-reasoning negative** (−0.012 session, −0.008 message at 126/133). The causal/update edges pull MMR toward graph-discovered sessions that are not temporally correct.
+  - The original PPR PoC (0.588/0.333) was measured against buggy graph code (silent empty results, directed-PPR mass loss) and overstated the harm; the corrected verdict is neutral-to-negative, not harmful.
+  - The interim +0.0053 multi-session signal at 75 questions was a small-sample artifact — it eroded to −0.0008 at the full 133.
+  - Eval mode `memorycore_traversal_v2` and `scripts/eval_graph_s.py` (resume + extensive timing: ingest throughput, phase timings, graph composition) remain ablation-ready.
+  - Retrieval cost: graph build is 13× baseline search time per query (12.9s vs 1.0s) — a derived index that would need caching/incremental maintenance to be viable, a question made moot by the neutral-to-negative recall verdict.
 - Session-hub nodes — created gravity wells, removed.
 - Deterministic classifier routing — 78% accuracy on S, not reliable enough for production.
 - Session reranking (ER sessions → MC messages) — session recall collapsed to 0.623.

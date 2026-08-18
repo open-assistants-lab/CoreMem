@@ -89,7 +89,7 @@ subset — the v3 result (identical to baseline) is the bar. If the richer edge
 set still ties, the conclusion is final: the baseline's rerank window covers
 the search space, and graph retrieval is retired with clean evidence.
 
-## Result (2026-08-18)
+## Result (2026-08-18) — 20-question subset
 
 **v4 with the full edge set (topic, turn_qa, update, causal, self_reference,
 emotional, entity, semantic): identical to baseline on every metric.**
@@ -101,15 +101,42 @@ emotional, entity, semantic): identical to baseline on every metric.**
 | message_hit@5 | 0.842 | 0.842 |
 | bundle_message_recall | 0.868 | 0.868 |
 
-Even the full research-grounded edge set produced zero candidates that
-improved any metric. The verdict is final:
+## Result (2026-08-18) — S-scale (resumable run, `scripts/eval_graph_s.py`)
 
-- **The baseline's rerank window (top-50 RRF of the decomposed search)
-  covers the search space** at this scale (~53 sessions/question) — there
-  are almost no new sessions for the graph to discover.
-- **Graph retrieval is retired with clean evidence.** The original
-  falsification (0.588/0.333, buggy HybridDB graph) stood on broken
-  infrastructure; the corrected verdict is neutral, not harmful.
-- The eval mode (`memorycore_traversal_v2`) and the edge set remain in the
-  codebase, ablation-ready, should a future experiment propose a genuinely
-  new connection type or a scale where the baseline window is insufficient.
+Full 500-question run (265 MB dataset, ~48 sessions per question).
+Per-type deltas (traversal − baseline) at 359/500 questions:
+
+| Type | n | session_recall Δ | message_recall Δ |
+|---|---:|---:|---:|
+| multi-session | 133 (complete) | −0.0008 | +0.0012 |
+| single-session-user | 70 (complete) | 0.0000 | 0.0000 |
+| single-session-preference | 30 (complete) | 0.0000 | 0.0000 |
+| temporal-reasoning | 126/133 | −0.0119 | −0.0079 |
+
+**Verdict: parked 2026-08-18.** The graph is neutral-to-negative with full
+statistical power:
+
+- multi-session (the type the cross-session edges were designed for):
+  neutral. The interim +0.0053 signal at 75 questions was a small-sample
+  artifact — it eroded to −0.0008 at the full 133.
+- temporal-reasoning (the type the causal/update edges were designed for):
+  **negative** — the graph candidates displace the baseline's
+  temporally-correct sessions in MMR.
+- The win ratio at the session-set level (superset in most questions) is
+  misleading: the graph adds different sessions, not better ones.
+
+Root causes (consistent across both scales):
+
+1. The baseline's rerank window (top-50 RRF + cross-encoder + MMR) already
+   covers the search space; the graph has almost nothing to discover.
+2. MMR's one-result-per-session cap structurally blocks same-session
+   candidates (turn_qa, temporal neighbors).
+3. Edges connect related messages, not answers — the cross-encoder is a
+   better relevance proxy than any edge type.
+4. Retrieval cost: graph build is 13× baseline search per query (12.9s vs
+   1.0s) — a derived index that would need caching/incremental maintenance,
+   a question made moot by the recall verdict.
+
+The eval mode and the instrumented harness (`scripts/eval_graph_s.py` with
+resume, ingest/search phase timing, graph composition) remain ablation-ready
+for any future hypothesis.
