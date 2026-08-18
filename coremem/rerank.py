@@ -15,6 +15,13 @@ from typing import Any
 _cross_encoder: Any = None
 _cross_encoder_lock = threading.Lock()
 
+# Model override for A/B experiments (e.g. the larger L-12 variant):
+#   COREMEM_CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-12-v2
+_CROSS_ENCODER_MODEL = os.environ.get(
+    "COREMEM_CROSS_ENCODER_MODEL",
+    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+)
+
 
 def get_cross_encoder() -> Any:
     """Lazy-load the cross-encoder reranker model (thread-safe)."""
@@ -24,7 +31,7 @@ def get_cross_encoder() -> Any:
             if _cross_encoder is None:
                 try:
                     from sentence_transformers import CrossEncoder
-                    _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                    _cross_encoder = CrossEncoder(_CROSS_ENCODER_MODEL)
                 except Exception:
                     return None
     return _cross_encoder
