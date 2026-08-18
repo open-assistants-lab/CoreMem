@@ -170,7 +170,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def _build_message_graph(db: Any, messages: list[Memory]) -> None:
+def _build_message_graph(db: Any, messages: list[Memory]) -> dict[str, int]:
     """Materialize the message graph.
 
     Edge types (see docs/graph-edges-design.md):
@@ -180,6 +180,8 @@ def _build_message_graph(db: Any, messages: list[Memory]) -> None:
     Each message pair gets ONE edge — the strongest applicable association
     (causal 0.9 > entity/update 0.8 > turn_qa 0.7 > emotional/self_ref 0.6
     > semantic/topic 0.5) — so traversal path counts stay honest.
+
+    Returns edge counts by type (for eval instrumentation).
     """
     db.add_nodes([
         {
@@ -356,6 +358,8 @@ def _build_message_graph(db: Any, messages: list[Memory]) -> None:
         semantic_counts[a] = semantic_counts.get(a, 0) + 1
         semantic_counts[b] = semantic_counts.get(b, 0) + 1
     db.add_edges(edges)
+    from collections import Counter
+    return dict(Counter(edge["type"] for edge in edges))
 
 
 def search_messages_traversal(
@@ -367,6 +371,7 @@ def search_messages_traversal(
     hop_limit: int = 2,
     max_per_session: int = 2,
     use_cross_encoder: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> list[SearchResult]:
     """Query-guided graph traversal retrieval.
 
@@ -374,32 +379,43 @@ def search_messages_traversal(
     (top-``seed_limit`` decomposed results + graph candidates), so the
     output can only match or beat the baseline: if traversal discovers
     nothing, the rerank + MMR pipeline produces the baseline ranking.
+
+    When ``timings`` is provided, phase durations (seeds, graph build,
+    traversal, rerank) are recorded into it for eval instrumentation.
     """
+    import time
     if limit <= 0:
         return []
 
     # 1. Seeds: the strongest zero-LLM retriever (RRF fusion). The seed
     #    window must match the baseline's exact rerank window (same
     #    per_query_limit), so every baseline candidate is in the pool.
+    _t0 = time.perf_counter()
     seeds = core._search_messages_decomposed(
         query,
         limit=seed_limit,
         per_query_limit=max(20, seed_limit // 4),
         use_cross_encoder=False,
     )
+    if timings is not None:
+        timings["seeds_s"] = time.perf_counter() - _t0
     if not seeds:
         return []
 
     # 2. Materialize the message graph
+    _t0 = time.perf_counter()
     messages = core.fetch_all()
     by_id = {m.id: m for m in messages if m.id}
     _build_message_graph(core._db, messages)
+    if timings is not None:
+        timings["graph_build_s"] = time.perf_counter() - _t0
 
     # 3. Expand from every seed through the graph. Only candidates from
     #    sessions outside the seed set add value: same-session neighbors are
     #    already covered by the baseline's rerank window and bundle
     #    reconstruction, and MMR's one-result-per-session cap means a
     #    same-session candidate can never outrank its own seed.
+    _t0 = time.perf_counter()
     seed_sessions = {seed.memory.session_id for seed in seeds}
     candidates: dict[str, dict[str, Any]] = {}
     for seed in seeds:
@@ -419,6 +435,8 @@ def search_messages_traversal(
             )
             entry["depth"] = min(entry["depth"], row["depth"])
             entry["paths"] += 1
+    if timings is not None:
+        timings["traverse_s"] = time.perf_counter() - _t0
 
     # 4. Relevance re-check, session cap, scoring
     pool = list(seeds)
@@ -446,6 +464,9 @@ def search_messages_traversal(
     #    MMR session diversity. With no surviving candidates the pool is
     #    exactly the baseline's rerank window, so the output is identical
     #    to the baseline top-limit.
+    _t0 = time.perf_counter()
     if use_cross_encoder:
         pool = rerank(query, pool, top_k=max(50, len(pool)))
+    if timings is not None:
+        timings["rerank_s"] = time.perf_counter() - _t0
     return _mmr_diversify(pool, limit)
