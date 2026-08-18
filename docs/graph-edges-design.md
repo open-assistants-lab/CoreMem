@@ -103,15 +103,15 @@ emotional, entity, semantic): identical to baseline on every metric.**
 
 ## Result (2026-08-18) — S-scale (resumable run, `scripts/eval_graph_s.py`)
 
-Full 500-question run (265 MB dataset, ~48 sessions per question).
-Per-type deltas (traversal − baseline) at 359/500 questions:
+Full 500-question run (265 MB dataset, ~48 sessions per question), complete.
+Per-type deltas (traversal − baseline):
 
 | Type | n | session_recall Δ | message_recall Δ |
 |---|---:|---:|---:|
 | multi-session | 133 (complete) | −0.0008 | +0.0012 |
 | single-session-user | 70 (complete) | 0.0000 | 0.0000 |
 | single-session-preference | 30 (complete) | 0.0000 | 0.0000 |
-| temporal-reasoning | 126/133 | −0.0119 | −0.0079 |
+| temporal-reasoning | 133 (complete) | −0.0113 | −0.0075 |
 
 **Verdict: parked 2026-08-18.** The graph is neutral-to-negative with full
 statistical power:
