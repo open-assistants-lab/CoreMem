@@ -53,9 +53,12 @@ def decompose_queries(query: str) -> list[str]:
 
     patterns = (
         r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:\?|$)",
+        r"\bfrom\s+(?:the day )?(.+?)\s+to\s+(?:the day )?(.+?)(?:\?|$)",
+        r"\bsince\s+(.+?)\s+when\s+(.+?)(?:\?|$)",
         r"\bbefore\s+(.+?)\s+did\s+i\s+(.+?)(?:\?|$)",
         r"\bbefore\s+(.+?)\s+did\s+(.+?)(?:\?|$)",
         r"\bfirst,\s*(.+?)\s+or\s+(.+?)(?:\?|$)",
+        r"\bhow\s+many\s+(?:days|weeks|months|years)\s+ago\s+did\s+i\s+(.+?)(?:\?|$)",
     )
     for pattern in patterns:
         match = re.search(pattern, query, re.IGNORECASE)
@@ -64,10 +67,15 @@ def decompose_queries(query: str) -> list[str]:
 
     seen: set[str] = set()
     result: list[str] = []
+    # Pure time-unit phrases ("days ago", "weeks passed") are useless search
+    # cues produced by the "how many" stripping — drop them.
+    _TIME_UNIT_ONLY = re.compile(
+        r"^(?:days|weeks|months|years|hours|minutes)\s+(?:ago|passed|had passed|in total)$"
+    )
     for variant in variants:
         cleaned = variant.strip().rstrip("?.").strip()
         key = cleaned.lower()
-        if cleaned and key not in seen:
+        if cleaned and key not in seen and not _TIME_UNIT_ONLY.match(key):
             seen.add(key)
             result.append(cleaned)
     return result[:8]

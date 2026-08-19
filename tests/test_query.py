@@ -26,6 +26,36 @@ def test_decompose_queries_splits_before_clause():
     assert "attend the Holiday Market" in queries
 
 
+def test_decompose_queries_splits_from_to_clause():
+    queries = decompose_queries(
+        "How many days passed from the day I started watering my herb garden "
+        "to the day I harvested my first tomato?"
+    )
+
+    assert any("started watering my herb garden" in q for q in queries)
+    assert any("harvested my first tomato" in q for q in queries)
+
+
+def test_decompose_queries_splits_since_when_clause():
+    queries = decompose_queries(
+        "How many days had passed since I finished reading the book "
+        "when I attended the concert?"
+    )
+
+    assert any("finished reading the book" in q for q in queries)
+    assert any("attended the concert" in q for q in queries)
+
+
+def test_decompose_queries_cleans_ago_event_cue():
+    queries = decompose_queries(
+        "How many days ago did I attend the Maundy Thursday service "
+        "at the Episcopal Church?"
+    )
+
+    assert any("attend the Maundy Thursday service" in q for q in queries)
+    assert not any(q.strip() == "days ago" for q in queries)
+
+
 def test_decomposed_search_fuses_independent_cues():
     root = tempfile.mkdtemp()
     core = MemoryCore(path=root)
