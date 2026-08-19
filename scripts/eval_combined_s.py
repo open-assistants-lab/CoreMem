@@ -116,10 +116,75 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=Path("results/eval_combined_s.json"))
     parser.add_argument("--root", type=Path, default=Path(tempfile.mkdtemp(prefix="coremem-combined-s-")))
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--merge", nargs="+", type=Path, help="Merge shard output files and compare (no running)")
+    parser.add_argument("--shard-id", type=int, default=0, help="Worker index (0-based)")
+    parser.add_argument("--shard-count", type=int, default=1, help="Total parallel workers")
     args = parser.parse_args(argv)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.merge:
+        merged: list[dict[str, Any]] = []
+        completed_merged: set[int] = set()
+        for shard_output in args.merge:
+            shard_jsonl = shard_output.with_suffix(shard_output.suffix + ".jsonl")
+            if shard_jsonl.exists():
+                for line in shard_jsonl.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        merged.append(json.loads(line))
+            shard_ckpt = shard_output.with_suffix(shard_output.suffix + ".checkpoint.json")
+            if shard_ckpt.exists():
+                completed_merged.update(json.loads(shard_ckpt.read_text(encoding="utf-8")).get("completed", []))
+        # dedupe by question_id
+        seen: set[str] = set()
+        rows = [r for r in merged if not (r["question_id"] in seen or seen.add(r["question_id"]))]
+        metrics: dict[str, Any] = {}
+        def _mean(values: list[float]) -> float:
+            return sum(values) / len(values) if values else 0.0
+        for key in (
+            f"session_recall@{args.k}", f"message_recall@{args.k}",
+            f"session_hit@{args.k}", f"message_hit@{args.k}", "session_rr", "session_map",
+        ):
+            metrics[key] = _mean([r["scoring"].get(key, 0) for r in rows])
+        metrics["bundle_message_recall"] = _mean([r.get("bundle_message_recall", 0) for r in rows])
+        metrics["bundle_message_hit"] = _mean([r.get("bundle_message_hit", 0) for r in rows])
+        metrics["n"] = len(rows)
+        result = {"dataset": str(args.data), "k": args.k, "completed": len(completed_merged), "metrics": metrics, "rows": rows}
+        output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        # comparison
+        baseline: dict[str, dict[str, Any]] = {}
+        if BASELINE_JSONL.exists():
+            for line in BASELINE_JSONL.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if r["mode"] == "memorycore_episodic_reranked":
+                    baseline[r["question_id"]] = r
+        matched = [r for r in rows if r["question_id"] in baseline]
+        print(f"\n=== Combined v2 vs saved baseline (L-6) — merged {len(rows)} questions ===")
+        print(f"{'metric':<28}{'baseline':>12}{'combined':>12}{'delta':>10}")
+        for key in (f"session_recall@{args.k}", f"message_recall@{args.k}", f"session_hit@{args.k}", f"message_hit@{args.k}", "session_rr", "session_map"):
+            b = _mean([baseline[r["question_id"]]["scoring"].get(key, 0) for r in matched])
+            c = _mean([r["scoring"].get(key, 0) for r in matched])
+            print(f"{key:<28}{b:>12.4f}{c:>12.4f}{c-b:>10.4f}")
+        for key in ("bundle_message_recall", "bundle_message_hit"):
+            b = _mean([baseline[r["question_id"]].get(key, 0) for r in matched])
+            c = _mean([r.get(key, 0) for r in matched])
+            print(f"{key:<28}{b:>12.4f}{c:>12.4f}{c-b:>10.4f}")
+        from collections import defaultdict
+        by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for r in matched:
+            by_type[r["question_type"]].append(r)
+        print(f"\n{'type':<26}{'n':>4}{'base_srec':>11}{'v2_srec':>11}{'Δ':>8}{'base_mrec':>11}{'v2_mrec':>11}{'Δ':>8}")
+        for t, rs in sorted(by_type.items()):
+            bs = _mean([baseline[r["question_id"]]["scoring"].get(f"session_recall@{args.k}", 0) for r in rs])
+            cs = _mean([r["scoring"].get(f"session_recall@{args.k}", 0) for r in rs])
+            bm = _mean([baseline[r["question_id"]]["scoring"].get(f"message_recall@{args.k}", 0) for r in rs])
+            cm = _mean([r["scoring"].get(f"message_recall@{args.k}", 0) for r in rs])
+            print(f"{t:<26}{len(rs):>4}{bs:>11.4f}{cs:>11.4f}{cs-bs:>+8.4f}{bm:>11.4f}{cm:>11.4f}{cm-bm:>+8.4f}")
+        print(f"\nmerged results: {output}")
+        return 0
     jsonl_path = output.with_suffix(output.suffix + ".jsonl")
     checkpoint_path = output.with_suffix(output.suffix + ".checkpoint.json")
 
@@ -136,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     t_start = time.perf_counter()
     processed = 0
     for index, raw in stream_longmemeval_instances(args.data, limit=args.limit):
+        if args.shard_count > 1 and index % args.shard_count != args.shard_id:
+            continue
         if index in completed:
             continue
         instance, truth = _prepare_instance(raw, index)
