@@ -86,6 +86,10 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 - Cross-encoder reranking is the critical component (m@5 0.472 → 0.867 oracle).
 - 4k context budget retains evidence recall while cutting bundle context by 67-77%.
 - Episodic reranked beats memorycore on session recall at S scale (0.950 vs 0.865).
+- **Temporal query decomposition** (from/to, since/when, clean ago-event cues) — +0.037 session / +0.029 message recall on the 133 S temporal-reasoning questions (L-6 reranker only; the L-12 reranker cancels this win).
+- **Preference union-retrieval** (per-variant top-40 union for preference queries) — +0.033 session recall on the 30 S preference questions, **folded into the default `episodic` path**.
+- **L-12 cross-encoder** (`COREMEM_CROSS_ENCODER_MODEL` opt-in): +0.018 message recall on the 20-question oracle-style subset, but cancels the temporal decomposition win on S — keep L-6 as default.
+- **Combined S-scale validation** (500/500, `scripts/eval_combined_s.py`): the wins do NOT sum — preference stacks (+0.033), temporal is cancelled by L-12 (−0.004), overall +0.001. Validated fold: preference union only, L-6 retained.
 
 ## Public API
 

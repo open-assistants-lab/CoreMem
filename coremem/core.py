@@ -27,6 +27,7 @@ from coremem.agent_journal import (
 from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import LLMProvider, decompose_queries, expand_queries
+from coremem.retrieval import _is_preference_query, search_messages_preference_union
 from coremem.rerank import rerank
 from coremem.types import Memory, SearchResult, SessionBundle
 
@@ -365,6 +366,15 @@ class MemoryCore:
     ) -> list[SearchResult]:
         if limit <= 0 or per_query_limit <= 0:
             return []
+
+        # Preference queries route through the per-variant union (validated
+        # on S: +0.033 session recall on the 30 preference questions). The
+        # union's non-preference fallback re-enters this method without
+        # recursion (the routing check fails there).
+        if _is_preference_query(query):
+            return search_messages_preference_union(
+                self, query, limit=limit, per_variant=40,
+            )
 
         fused: dict[str, tuple[Memory, float]] = {}
         for query_index, variant in enumerate(decompose_queries(query)):

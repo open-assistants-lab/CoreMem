@@ -149,3 +149,31 @@ def test_preference_union_surfaces_variant_only_message():
         assert any("painting" in r.memory.content for r in results)
     finally:
         core._test_cleanup()
+
+
+def test_decomposed_search_routes_preference_queries_to_union(monkeypatch):
+    """The default decomposed search must route preference queries through
+    the per-variant union (the validated fold-in)."""
+    import coremem.core as coremod
+    from coremem.retrieval import search_messages_preference_union
+
+    core = _tmp_core()
+    try:
+        core.ingest("user", "I like hiking in Yosemite", session_id="s1")
+        core.ingest("user", "I love coffee", session_id="s2")
+
+        called: list[str] = []
+        real = search_messages_preference_union
+
+        def spy(c, query, **kwargs):
+            called.append(query)
+            return real(c, query, **kwargs)
+
+        monkeypatch.setattr(coremod, "search_messages_preference_union", spy)
+
+        core._search_messages_decomposed("what do I like", limit=2, per_query_limit=20)
+        core._search_messages_decomposed("hiking Yosemite", limit=2, per_query_limit=20)
+
+        assert called == ["what do I like"], "preference query routes to the union"
+    finally:
+        core._test_cleanup()
