@@ -37,6 +37,17 @@ def get_cross_encoder() -> Any:
     return _cross_encoder
 
 
+def set_cross_encoder_model(model_name: str) -> None:
+    """Override the cross-encoder model (before the first load).
+
+    Used by eval modes to force a specific model (e.g. the L-12 A/B)
+    regardless of the environment variable.
+    """
+    global _CROSS_ENCODER_MODEL, _cross_encoder
+    _CROSS_ENCODER_MODEL = model_name
+    _cross_encoder = None
+
+
 def rerank(query: str, results: list[Any], top_k: int = 50) -> list[Any]:
     """Rerank results using a lightweight cross-encoder.
 
