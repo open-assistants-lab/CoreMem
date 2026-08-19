@@ -24,3 +24,6 @@ worktrees/
 
 # Local agent config
 .claude/
+
+# Firecrawl CLI cache
+.firecrawl/
