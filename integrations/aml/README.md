@@ -48,6 +48,14 @@ Contract details honored:
   be `gpt-4o-mini`. CoreMem uses **no model** in either operation (the
   default `episodic` strategy is fully local: BM25 + embeddings + a local
   cross-encoder). The submission is deterministic and exactly reproducible.
+- **Retrieval pipeline (validated on LongMemEval-S, 500 questions)** — the
+  default `episodic` strategy includes:
+  - query decomposition (temporal: from/to, since/when, ago-event cues;
+    +0.037 session recall on the 133 temporal-reasoning questions)
+  - preference-question routing through a per-variant top-40 union
+    (+0.033 session recall on the 30 preference questions)
+  - hybrid search → RRF fusion → cross-encoder rerank (MiniLM-L-6) → MMR
+    session diversity (0.950 session recall@5 on S)
 
 ## Run locally
 
@@ -82,7 +90,7 @@ curl -X POST localhost:8000/v1/memories/search -H 'Content-Type: application/jso
 | `COREMEM_PATH` | `/data/memory` | Memory storage path |
 | `AML_STRATEGY` | `episodic` | Recall strategy (`episodic`, `direct`, `expanded`, `fusion`) |
 | `AML_TOP_K` | `100` | Default `top_k` when the request omits it |
-| `AML_MIN_SCORE` | `0.0` | Relevance gate (cross-encoder logit) |
+| `AML_MIN_SCORE` | `-10.0` | Relevance floor: logits below this are "no relevant memory" (measured: the irrelevant cluster sits at −10 to −12; evidence spans −8 to +7 across query types). Preference queries skip the gate entirely |
 | `AML_API_KEY` | *(unset)* | If set, require it via `Authorization: Bearer` or `X-Api-Key` |
 
 ## Notes

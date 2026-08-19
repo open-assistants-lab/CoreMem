@@ -122,6 +122,24 @@ def test_search_returns_empty_data_when_no_relevant_memory(client):
     assert resp.json()["data"] == []
 
 
+def test_search_keeps_preference_evidence(client):
+    """Preference evidence legitimately scores negative cross-encoder logits
+    (measured −8 to −2); the relevance gate must not empty it."""
+    _add(client, "uid-1", "conv-1", [
+        {"role": "user", "content": "I like hiking in Yosemite"},
+        {"role": "user", "content": "I enjoy painting landscapes"},
+    ])
+    resp = client.post("/v1/memories/search", json={
+        "query": "what do I like",
+        "user_id": "uid-1",
+        "top_k": 5,
+    })
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data) >= 1, "preference evidence must not be gated out"
+    assert any("hiking" in item["content"] for item in data)
+
+
 def test_search_honors_top_k(client):
     for i in range(5):
         _add(client, "uid-1", f"conv-{i}", [

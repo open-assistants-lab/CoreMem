@@ -49,13 +49,19 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from coremem import MemoryCore
+from coremem.retrieval import _is_preference_query
 
 logger = logging.getLogger(__name__)
 
 MEMORY_PATH = os.environ.get("COREMEM_PATH", "/data/memory")
 AML_STRATEGY = os.environ.get("AML_STRATEGY", "episodic")
 AML_TOP_K = int(os.environ.get("AML_TOP_K", "100"))
-AML_MIN_SCORE = float(os.environ.get("AML_MIN_SCORE", "0.0"))
+# Relevance floor: cross-encoder logits below this are "no relevant memory"
+# (measured: the genuinely-irrelevant cluster sits at −10 to −12; relevant
+# evidence spans −8 to +7 across direct/preference/temporal queries, so an
+# absolute threshold cannot separate them — the floor only drops the
+# nothing-at-all cluster). Preference queries skip the gate entirely.
+AML_MIN_SCORE = float(os.environ.get("AML_MIN_SCORE", "-10.0"))
 AML_API_KEY = os.environ.get("AML_API_KEY", "")
 
 core = MemoryCore(path=MEMORY_PATH)
@@ -194,6 +200,11 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
         if (getattr(r, "_ce_score", None) if getattr(r, "_ce_score", None) is not None else r.score)
         >= AML_MIN_SCORE
     ]
+    # Preference/indirect queries: the per-variant union's evidence is
+    # purpose-collected for the answer model and legitimately scores low
+    # (measured −8 to −2); the gate must not empty it.
+    if _is_preference_query(payload.query):
+        gated = results
     return SearchResponse(data=[
         SearchResult(
             id=r.memory.id,
