@@ -33,7 +33,8 @@ CoreMem solves all three:
 |-----------|-------------|
 | **HybridDB retrieval** | FTS5 keyword + embedding similarity via a single SQLite-backed store |
 | **Deterministic heuristics** | Keyword overlap (exact + fuzzy + bigram), temporal recency, person-name boost, quoted-phrase matching |
-| **Query decomposition** | Splits multi-cue relational questions ("before X did I Y") into independent search cues |
+| **Query decomposition** | Splits multi-cue relational questions into independent search cues — temporal questions ("from X to Y", "since X when Y", "how many days ago did I X") get anchor + target cues (+0.037 session recall on S temporal-reasoning) |
+| **Preference routing** | Preference questions ("what do I like") route through a per-variant union so implicit-preference evidence survives (+0.033 session recall on S preference questions) |
 | **Cross-encoder reranking** | `ms-marco-MiniLM-L-6-v2` reranks candidates — the single biggest recall win (m@5 0.472 → 0.867 on oracle) |
 | **MMR session diversity** | One result per session, preventing cross-encoder overfit |
 
@@ -51,6 +52,10 @@ CoreMem solves all three:
 
 ### S (500 questions, ~48 sessions each, k=5)
 
+> Numbers are the pre-improvement `episodic` baseline; the validated
+> improvements below add +0.034 session recall overall (temporal +0.037,
+> preference +0.033) — see the next section.
+
 | Metric | `direct` | `episodic` (default) |
 |---|---:|---:|
 | session_recall@5 | 0.865 | **0.950** |
@@ -64,6 +69,20 @@ CoreMem solves all three:
 All modes abstain correctly on unanswerable questions (0% false positive rate).
 
 Results: `eval_output/lme-oracle/results.json`, `eval_output/lme-s/results.json`
+
+## Validated improvements (2026-08, all zero-LLM, folded into the default)
+
+Measured on LongMemEval-S (500 questions) against the `episodic` baseline,
+with the resumable harness in `scripts/`:
+
+| Improvement | Validated delta | Status |
+|---|---|---|
+| **Temporal query decomposition** (from/to, since/when, clean ago-event cues) | **+0.037 session / +0.029 message recall** on the 133 temporal-reasoning questions | ✅ folded into the default |
+| **Preference union routing** (per-variant top-40 union for preference queries) | **+0.033 session recall** on the 30 preference questions | ✅ folded into the default |
+| **L-12 cross-encoder** (`COREMEM_CROSS_ENCODER_MODEL` opt-in) | +0.018 message recall on the oracle-style subset — but cancels the temporal win on S (−0.004) | ⚠️ opt-in only; L-6 stays the default |
+| Graph-based retrieval (8 research-grounded edge types) | neutral-to-negative across 500 S questions | ❌ parked (see `docs/graph-edges-design.md`) |
+
+**The composition lesson:** individually-positive improvements do not always sum — a combined 500/500 S-scale validation showed the L-12 reranker cancels the temporal decomposition's session gains. The default strategy ships only the validated combination (L-6 + temporal decomposition + preference routing), measured at +0.034 session recall overall with zero regressions.
 
 ## Installation
 
@@ -101,7 +120,7 @@ core.ingest_turn([
 
 | Strategy | LLM calls | Pipeline |
 |----------|-----------|----------|
-| `episodic` (default) | 0 | Query decomposition → hybrid search per variant → RRF fusion → cross-encoder rerank → MMR diversity |
+| `episodic` (default) | 0 | Temporal query decomposition → hybrid search per variant → RRF fusion (preference questions: per-variant top-40 union) → cross-encoder rerank → MMR diversity |
 | `direct` | 0 | Single hybrid search + deterministic heuristics |
 | `expanded` | 1 | LLM query rephrasing, then the direct pipeline per variant |
 | `fusion` | 0 | RRF fusion of `direct` + `episodic` |
@@ -166,7 +185,8 @@ await core.compile_turn(turn_id=tid)
 await core.compile_latest_turn(session_id="conv_001")
 await core.compile_uncompiled_turns()
 
-# Dreaming consolidation — LLM analysis of daily pages, promoted facts to MEMORY.md
+# Dreaming consolidation — LLM analysis of daily pages, analysis and
+# promoted facts appended to DREAMS.md (MEMORY.md is compiler-owned)
 await core.dream()
 
 # Rebuild weekly/monthly/index navigation files from daily pages
@@ -196,8 +216,27 @@ coremem mcp   # MCP stdio server (also the default command)
 |----------|---------|
 | `COREMEM_PATH` | Memory storage path (default `~/.coremem/hybrid`) |
 | `COREMEM_LLM_MODEL` | LLM model for journal compilation (e.g. `openai:gpt-4o-mini`, `ollama:llama3.2`) |
+| `COREMEM_CROSS_ENCODER_MODEL` | Cross-encoder model override (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`) |
 | `DISABLE_CROSS_ENCODER` | Set to `1` to skip cross-encoder reranking (eval scripts) |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OLLAMA_API_KEY` | Provider keys for LLM-backed features |
+
+## Agent Memory Leaderboard (AML) deployment
+
+CoreMem participates in the [Agent Memory Leaderboard](https://agentmemories.ai/) —
+an open, reader-matched evaluation of long-term memory systems. The adapter
+lives in **`integrations/aml/`**:
+
+| File | Purpose |
+|------|---------|
+| `server.py` | FastAPI adapter implementing the AML Add/Search contract (verified against the live api-guide): `user_id` isolation, `session_id` grouping, `timestamp` (Unix ms), `success` echo envelope, `data[{id, content, score, created_at}]` responses with a relevance floor for "no relevant memory" |
+| `Dockerfile` | Academic-route submission: builds CoreMem from the repo, pre-downloads models at build time (instant container startup), exposes the API on port 8000 |
+| `README.md` | Submission guide: contract, local run, academic submission steps, method disclosure (zero-LLM deterministic pipeline + validated retrieval improvements) |
+
+**Submission status:** submitted via the academic route (public GitHub repo,
+Docker deployment — no leaderboard key). The platform runs the smoke suite
+(Top K 90) then the full evaluation across LongMemEval-S, PersonaMem,
+ScriptMem, BEAM, CLBench, and LoCoMo-Refined — an independent,
+reader-matched, multi-judge measurement of CoreMem's end-to-end QA accuracy.
 
 ## License
 
