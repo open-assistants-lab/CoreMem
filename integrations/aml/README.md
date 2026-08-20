@@ -83,6 +83,11 @@ curl -X POST localhost:8000/v1/memories/search -H 'Content-Type: application/jso
 3. No leaderboard key is issued for the academic route; the platform runs
    the smoke suite (Top K 90) and then the formal `full` evaluation.
 
+> **Form values**: `integrations/aml/SUBMISSION_NOTES.md` contains the exact
+> field values and the paste-ready submission notes for the evaluation
+> request form (Academic leaderboard → Submit GitHub code for platform
+> deployment).
+
 ## Environment variables
 
 | Variable | Default | Purpose |
