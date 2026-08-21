@@ -46,17 +46,3 @@ class SessionBundle:
     score: float = 0.0
     complete: bool = False
     anchor_ids: list[str] = field(default_factory=list)
-
-
-@dataclass
-class SearchQuery:
-    """A search query with optional metadata and column filters."""
-    text: str
-    limit: int = 10
-    role: str | None = None
-    session_id: str | None = None
-    user_id: str | None = None
-    agent_id: str | None = None
-    ts_after: str | None = None
-    ts_before: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)

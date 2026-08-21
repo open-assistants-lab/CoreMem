@@ -15,8 +15,8 @@ def _format_recall(results: list) -> str:
         return "No results."
     lines = []
     for r in results:
-        content = r.memory.content[:200]
-        lines.append(f"[{r.memory.role}] {content} (score: {r.score:.2f}, session: {r.memory.session_id})")
+        content = r.memory.content[:500]
+        lines.append(f"[{r.memory.role}] (id: {r.memory.id}, score: {r.score:.2f}, session: {r.memory.session_id}) {content}")
     return "\n".join(lines)
 
 
@@ -27,7 +27,7 @@ def _format_bundles(bundles: list) -> str:
     for b in bundles:
         lines.append(f"## Session {b.session_id} (score: {b.score:.2f})")
         for m in b.messages:
-            lines.append(f"  [{m.role}] {m.content[:200]}")
+            lines.append(f"  [{m.role}] (id: {m.id}) {m.content[:500]}")
     return "\n".join(lines)
 
 
@@ -80,12 +80,22 @@ def _cmd_rebuild(args, core):
 
 
 def _cmd_sessions(args, core):
-    rows = core._db.raw_query(
-        "SELECT session_id, COUNT(*) as messages, MAX(ts) as last_ts "
-        "FROM messages WHERE session_id IS NOT NULL GROUP BY session_id "
-        "ORDER BY last_ts DESC"
-    )
+    rows = core.list_sessions()
     print(_format_sessions(rows))
+
+
+def _cmd_stats(args, core):
+    s = core.stats()
+    print(
+        f"messages: {s['messages']}, sessions: {s['sessions']}, "
+        f"users: {s['users']}, last_ts: {s['last_ts'] or 'n/a'}, "
+        f"journal_pending: {s['journal_pending']}"
+    )
+
+
+def _cmd_delete(args, core):
+    n = core.delete_messages(args.message_ids)
+    print(f"deleted: {n} messages")
 
 
 def _cmd_hook(args, core):
@@ -127,6 +137,10 @@ def main(argv: list[str] | None = None):
 
     sub.add_parser("rebuild", help="Rebuild search index")
     sub.add_parser("sessions", help="List sessions")
+    sub.add_parser("stats", help="Show memory statistics")
+
+    p_delete = sub.add_parser("delete", help="Delete messages by id")
+    p_delete.add_argument("message_ids", nargs="+", help="Message ids to delete")
 
     p_hook = sub.add_parser("hook", help="Run hook handler (reads JSON from stdin)")
     p_hook.add_argument("event", choices=list(EVENT_HANDLERS.keys()))
@@ -149,6 +163,8 @@ def main(argv: list[str] | None = None):
         "compile": _cmd_compile,
         "rebuild": _cmd_rebuild,
         "sessions": _cmd_sessions,
+        "stats": _cmd_stats,
+        "delete": _cmd_delete,
         "hook": _cmd_hook,
     }
     handler = handlers.get(args.command)

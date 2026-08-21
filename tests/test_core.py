@@ -8,6 +8,8 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from coremem import MemoryCore, SessionBundle
 from coremem.agent_journal import AgentJournalCompileResult, AgentJournalError
 from coremem.types import Memory, SearchResult
@@ -887,5 +889,85 @@ def test_recall_bundles_default_is_anchor_first():
         ids = [message.id for message in bundles[0].messages]
         assert ids[0] == "b2", f"anchor should lead the bundle, got {ids}"
         assert set(ids) == {"b1", "b2", "b3"}
+    finally:
+        core._test_cleanup()
+
+
+# ── Session inventory, memory hygiene, lifecycle ───────────────────────────
+
+
+def test_list_sessions_returns_counts_and_activity():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "first message", session_id="s1")
+        core.ingest("user", "second", session_id="s2")
+        core.ingest("user", "third", session_id="s1")
+        rows = core.list_sessions()
+        by_id = {r["session_id"]: r for r in rows}
+        assert set(by_id) == {"s1", "s2"}
+        assert by_id["s1"]["messages"] == 2
+        assert by_id["s2"]["messages"] == 1
+        assert by_id["s1"]["last_ts"]
+    finally:
+        core._test_cleanup()
+
+
+def test_delete_messages_by_id():
+    core = _tmp_core()
+    try:
+        core.ingest("user", "keep me", session_id="s1")
+        ids = core.ingest_many([
+            {"id": "drop-1", "role": "user", "content": "drop me", "session_id": "s1"},
+            {"id": "drop-2", "role": "user", "content": "drop me too", "session_id": "s1"},
+        ])
+        n = core.delete_messages(["drop-1", "drop-2", "nonexistent"])
+        assert n == 2
+        assert core.count() == 1
+        assert core.delete_messages([]) == 0
+    finally:
+        core._test_cleanup()
+
+
+def test_stats_counts():
+    core = _tmp_core()
+    try:
+        s0 = core.stats()
+        assert s0["messages"] == 0
+        core.ingest("user", "hello", session_id="s1", user_id="u1")
+        core.ingest("assistant", "hi", session_id="s1", user_id="u1")
+        s = core.stats()
+        assert s["messages"] == 2
+        assert s["sessions"] == 1
+        assert s["users"] == 1
+        assert s["last_ts"]
+        assert s["journal_pending"] == 0
+    finally:
+        core._test_cleanup()
+
+
+def test_close_and_context_manager():
+    core = _tmp_core()
+    core.ingest("user", "before close", session_id="s1")
+    core.close()
+    # after close the instance must not be reused; opening fresh works
+    core2 = MemoryCore(path=str(core._db._vector_path).removesuffix("/vectors"))
+    core2.ingest("user", "fresh instance", session_id="s2")
+    assert core2.count() == 2
+    core2.close()
+
+    with _tmp_core() as ctx_core:
+        ctx_core.ingest("user", "context manager", session_id="s3")
+        assert ctx_core.count() == 1
+    assert ctx_core._closed is True
+
+
+def test_ingest_raises_on_empty_content():
+    core = _tmp_core()
+    try:
+        with pytest.raises(ValueError, match="non-empty content"):
+            core.ingest("user", "")
+        with pytest.raises(ValueError, match="non-empty content"):
+            core.ingest("user", "   ")
+        assert core.count() == 0
     finally:
         core._test_cleanup()

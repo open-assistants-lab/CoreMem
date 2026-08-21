@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.13.1] — API polish: memory hygiene, lifecycle, wider MCP surface
+
+### Added
+- **`MemoryCore.list_sessions()`** — session inventory `{session_id, messages, last_ts}` (most recent first); replaces raw SQL in the CLI and MCP server.
+- **`MemoryCore.delete_messages(message_ids)`** — remove specific messages by id (ids now appear in recall output, so agents can act on results).
+- **`MemoryCore.stats()`** — `{messages, sessions, users, last_ts, journal_pending}` for health checks.
+- **`MemoryCore.close()` + context manager** — releases pooled Chroma handles (unclosed handles previously left the vector store readonly in long-running processes).
+- **CLI**: `stats` and `delete <message_id...>` subcommands; recall/bundles output now includes message ids.
+- **MCP server widened from 5 to 8 tools** — `delete`, `fetch_session`, `stats`; `recall` accepts `role`, `ts_after`, `ts_before`, `session_cap`; every tool description carries usage examples and cost notes (e.g. `expanded` = 1 LLM call).
+
+### Changed
+- **`ingest` raises `ValueError` on empty/whitespace content** instead of silently returning `""` (bulk paths still skip empties).
+- **Return conventions documented** — `ingest`/`ingest_turn` → turn_id (for `compile`); `ingest_many`/`store` → message ids.
+
+### Removed
+- Dead `SearchQuery` type (zero usages; filters are plain kwargs).
+
 ## [0.13.0] — Preference union + temporal decomposition fold, answer-eval-validated bundle defaults, batch ingest, session-cap selection
 
 ### Changed

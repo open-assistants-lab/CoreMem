@@ -228,13 +228,27 @@ coremem ingest user "I built a Spitfire model kit" --session-id conv_001
 coremem compile <turn_id>
 coremem rebuild
 coremem sessions
+coremem stats
+coremem delete <message_id...>
 coremem mcp   # MCP stdio server (also the default command)
 ```
 
-- **MCP server** — 5 tools: `recall`, `ingest`, `compile`, `rebuild_index`, `list_sessions`
+- **MCP server** — 8 tools: `recall` (with filters + `session_cap`), `ingest`, `delete`, `fetch_session`, `list_sessions`, `stats`, `compile`, `rebuild_index`. Recall output includes message ids so agents can act on results; every tool description carries usage examples.
 - **Hooks** — Claude Code and Codex: `UserPromptSubmit` (capture + retrieval injection), `Stop` (capture), `PreCompact` (no-op)
 - **Integration configs** in `integrations/` for Claude Code, Codex, and OpenCode
 
+### Memory hygiene and lifecycle
+
+```python
+with MemoryCore(path="./memory") as core:      # context manager closes resources
+    core.ingest("user", "I built a Spitfire model kit", session_id="conv_001")
+
+core.list_sessions()        # [{session_id, messages, last_ts}] most recent first
+core.delete_messages([mid]) # remove a wrong memory; ids appear in recall output
+core.stats()                # {messages, sessions, users, last_ts, journal_pending}
+```
+
+**Return conventions:** `ingest`/`ingest_turn` return the **turn_id** (needed for `compile`); `ingest_many`/`store` return **message ids**. `ingest` raises on empty content instead of silently no-oping.
 ### Environment variables
 
 | Variable | Purpose |

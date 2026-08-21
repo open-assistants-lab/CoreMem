@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -248,6 +249,7 @@ class MemoryCore:
             model=agent_journal_model,
         )
         self._reranker: CrossEncoderReranker | None = None
+        self._closed = False
         self._agent_journal_search = AgentJournalSearch(
             self._agent_journal_root,
             reranker=None,
@@ -315,6 +317,14 @@ class MemoryCore:
         embedding: list[float] | None = None,
         turn_id: str | None = None,
     ) -> str:
+        """Store a single message. Returns the **turn_id**.
+
+        Raises ValueError if ``content`` is empty/whitespace (a silent no-op
+        hides storage failures). For bulk ingestion use :meth:`ingest_many`
+        (returns message ids) — empty messages are skipped there.
+        """
+        if not content or not content.strip():
+            raise ValueError("ingest requires non-empty content")
         if turn_id is None:
             if role == "user":
                 turn_id = str(uuid.uuid4())[:12]
@@ -329,6 +339,10 @@ class MemoryCore:
         return turn_id
 
     def ingest_turn(self, messages: list[dict], session_id: str | None = None) -> str:
+        """Store a conversation turn. Returns the **turn_id**.
+
+        Messages with empty content are skipped.
+        """
         tid = str(uuid.uuid4())[:12]
         for msg in messages:
             _ingest_message(
@@ -950,6 +964,89 @@ class MemoryCore:
 
     def clear(self) -> None:
         self._db.raw_query("DELETE FROM messages")
+
+    # ── Session inventory, memory hygiene, lifecycle ────────────────────
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """List all sessions with message counts and last activity.
+
+        Returns rows of ``{"session_id", "messages", "last_ts"}`` ordered by
+        most recent activity first.
+        """
+        return self._db.raw_query(
+            "SELECT session_id, COUNT(*) as messages, MAX(ts) as last_ts "
+            "FROM messages WHERE session_id IS NOT NULL AND session_id != '' "
+            "GROUP BY session_id ORDER BY last_ts DESC"
+        )
+
+    def delete_messages(self, message_ids: list[str]) -> int:
+        """Delete specific messages by id. Returns the number deleted."""
+        if not message_ids:
+            return 0
+        placeholders = ",".join("?" * len(message_ids))
+        before = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
+        self._db.raw_query(
+            f"DELETE FROM messages WHERE id IN ({placeholders})",
+            message_ids,
+        )
+        after = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
+        before_n = before[0]["c"] if before else 0
+        after_n = after[0]["c"] if after else 0
+        return before_n - after_n
+
+    def stats(self) -> dict[str, Any]:
+        """Return basic memory statistics for health checks and agent tooling."""
+        rows = self._db.raw_query(
+            "SELECT COUNT(*) as messages, COUNT(DISTINCT session_id) as sessions, "
+            "COUNT(DISTINCT user_id) as users, MAX(ts) as last_ts "
+            "FROM messages"
+        )
+        row = rows[0] if rows else {}
+        pending = 0
+        try:
+            pending = self._db.journal_status().get("pending", 0)
+        except Exception:
+            pass
+        return {
+            "messages": row.get("messages", 0),
+            "sessions": row.get("sessions", 0) if row.get("sessions") else 0,
+            "users": row.get("users", 0) if row.get("users") else 0,
+            "last_ts": row.get("last_ts"),
+            "journal_pending": pending,
+        }
+
+    def close(self) -> None:
+        """Release Chroma/hybrid resources held by this instance.
+
+        Without this, pooled Chroma clients keep file handles open across
+        many ``MemoryCore`` instantiations (a real failure mode: unclosed
+        handles left the vector store readonly in long-running processes).
+        The instance is unusable after close; create a new one to reopen.
+        """
+        try:
+            from hybriddb.db import _chroma_client_pool, _chroma_pool_lock
+
+            key = os.fspath(self._db._vector_path)
+            with _chroma_pool_lock:
+                client = _chroma_client_pool.pop(key, None)
+            if client is not None:
+                try:
+                    client.clear_system_cache()
+                except Exception:
+                    pass
+                try:
+                    client._system.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._closed = True
+
+    def __enter__(self) -> MemoryCore:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
 
     # ── AgentJournal methods ───────────────────────────────────
 
