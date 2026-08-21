@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from coremem import MemoryCore
 from coremem.providers import create_provider
 from eval_agent_journal_longmemeval import build_memorycore, load_longmemeval_instances, prepare_instances
 
@@ -25,6 +26,7 @@ MODES = (
     "memorycore_episodic",
     "episodic_4k",
     "episodic_4k_reranked",
+    "episodic_cap2",
     "memorycore_llm_expansion",
 )
 
@@ -48,8 +50,13 @@ def _format_messages(messages: list[Any]) -> str:
 def _format_bundles(bundles: list[Any]) -> str:
     parts = []
     for bundle in bundles:
+        anchor_ids = set(bundle.anchor_ids or [])
+        ordered = sorted(
+            bundle.messages,
+            key=lambda m: (m.id not in anchor_ids, m.ts or datetime.min.replace(tzinfo=UTC)),
+        )
         message_parts = []
-        for message in bundle.messages:
+        for message in ordered:
             date = message.ts.date().isoformat() if message.ts else "unknown"
             message_parts.append(f"[{date} {message.role}] {message.content}")
         parts.append(
@@ -60,12 +67,19 @@ def _format_bundles(bundles: list[Any]) -> str:
 
 
 def _format_bundles_without_headers(bundles: list[Any]) -> str:
-    return "\n\n".join(
-        f"[{message.ts.date().isoformat() if message.ts else 'unknown'} {message.role}] "
-        f"{message.content}"
-        for bundle in bundles
-        for message in bundle.messages
-    )
+    parts = []
+    for bundle in bundles:
+        anchor_ids = set(bundle.anchor_ids or [])
+        ordered = sorted(
+            bundle.messages,
+            key=lambda m: (m.id not in anchor_ids, m.ts or datetime.min.replace(tzinfo=UTC)),
+        )
+        parts.extend(
+            f"[{message.ts.date().isoformat() if message.ts else 'unknown'} {message.role}] "
+            f"{message.content}"
+            for message in ordered
+        )
+    return "\n\n".join(parts)
 
 
 def _answer(provider: Any, question: str, context: str) -> str:
@@ -127,6 +141,7 @@ def run(
     judge_model: str,
     limit: int | None = None,
     resume: bool = False,
+    reuse: bool = False,
 ) -> dict[str, Any]:
     raw = load_longmemeval_instances(data_path, limit=limit)
     prepared, _ = prepare_instances(raw)
@@ -147,13 +162,19 @@ def run(
             print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: resumed", flush=True)
             continue
         print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: running", flush=True)
-        instance_root = root / f"{index:04d}_{instance.question_id}"
-        shutil.rmtree(instance_root, ignore_errors=True)
-        core = build_memorycore(
-            instance_root,
-            [instance],
-            llm_provider=answer_provider,
-        )
+        instance_root = root / f"{index:04d}_{instance.question_id[:8]}"
+        if not (reuse and (instance_root / "hybrid").exists()):
+            shutil.rmtree(instance_root, ignore_errors=True)
+            core = build_memorycore(
+                instance_root,
+                [instance],
+                llm_provider=answer_provider,
+            )
+        else:
+            core = MemoryCore(
+                path=str(instance_root / "hybrid"),
+                llm_provider=answer_provider,
+            )
 
         contexts: dict[str, str] = {}
         retrieval_seconds: dict[str, float] = {}
@@ -218,6 +239,23 @@ def run(
         contexts["episodic_4k_reranked"] = _format_bundles(reranked_bundles)
 
         started = time.perf_counter()
+        cap2_primary = core._search_messages_decomposed(
+            instance.query,
+            limit=5,
+            per_query_limit=20,
+            use_cross_encoder=True,
+            session_cap=2,
+        )
+        cap2_bundles = core._reconstruct_sessions(
+            instance.query,
+            session_limit=5,
+            max_context_chars=16_000,
+            primary_results=cap2_primary,
+        )
+        retrieval_seconds["episodic_cap2"] = time.perf_counter() - started
+        contexts["episodic_cap2"] = _format_bundles(cap2_bundles)
+
+        started = time.perf_counter()
         deep = core._search_messages_llm_expansion(instance.query, limit=5)
         retrieval_seconds["memorycore_llm_expansion"] = time.perf_counter() - started
         contexts["memorycore_llm_expansion"] = _format_messages([result.memory for result in deep])
@@ -253,7 +291,8 @@ def run(
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        shutil.rmtree(instance_root, ignore_errors=True)
+        if not reuse:
+            shutil.rmtree(instance_root, ignore_errors=True)
 
     return {
         "answer_model": answer_model,
@@ -272,6 +311,7 @@ def main() -> int:
     parser.add_argument("--judge-model", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--reuse", action="store_true", help="Reuse existing per-question hybrid dirs (skip re-ingest)")
     args = parser.parse_args()
     result = run(
         args.data,
@@ -281,6 +321,7 @@ def main() -> int:
         judge_model=args.judge_model,
         limit=args.limit,
         resume=args.resume,
+        reuse=args.reuse,
     )
     print(json.dumps(result["metrics"], indent=2))
     return 0

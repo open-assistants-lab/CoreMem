@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,8 +29,81 @@ from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
 from coremem.query import LLMProvider, decompose_queries, expand_queries
 from coremem.retrieval import _is_preference_query, search_messages_preference_union
-from coremem.rerank import rerank
+from coremem.rerank import get_cross_encoder, rerank
 from coremem.types import Memory, SearchResult, SessionBundle
+
+# ── Batched embedding (ingest path) ────────────────────────────────────────
+#
+# HybridDB's journal flush embeds one document at a time through Chroma's
+# per-call embedding function (~75 ms/doc on CPU). Batched SentenceTransformer
+# encoding is ~15x faster with the same all-MiniLM-L6-v2 model. We prewarm a
+# content→vector cache for every pending journal document and temporarily
+# shadow ``db._get_embedding`` during the flush so the journal loop picks up
+# the cached vectors instead of re-embedding per document.
+
+_batch_embed_model: Any = None
+_batch_embed_lock = threading.Lock()
+
+
+def _batch_embedding_model() -> Any:
+    global _batch_embed_model
+    if _batch_embed_model is None:
+        with _batch_embed_lock:
+            if _batch_embed_model is None:
+                try:
+                    from sentence_transformers import SentenceTransformer
+
+                    _batch_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+                except Exception:
+                    _batch_embed_model = False
+    return _batch_embed_model or None
+
+
+def _batch_embed_texts(texts: list[str], batch_size: int = 128) -> list[list[float]]:
+    """Batch-encode texts with the same model HybridDB's default embedding fn uses."""
+    model = _batch_embedding_model()
+    if model is None:
+        raise RuntimeError("no embedding model available")
+    vectors = model.encode(texts, batch_size=batch_size, show_progress_bar=False)
+    return [[float(v) for v in row] for row in vectors]
+
+
+def _flush_journal_batched(db: HybridDB, batch_limit: int = 5000) -> int:
+    """Process HybridDB's pending journal with batched embedding.
+
+    Returns the number of journal entries processed. Falls back to the
+    stock per-document embedding path if batch encoding is unavailable.
+    """
+    with db._connect() as cur:
+        pending = [
+            dict(row)
+            for row in cur.execute(
+                "SELECT id, data FROM _journal WHERE status = 'pending' "
+                "AND op IN ('add', 'update') LIMIT ?",
+                (batch_limit,),
+            ).fetchall()
+        ]
+    if not pending:
+        return db.process_journal(limit=batch_limit)
+    try:
+        docs = [entry["data"] or "" for entry in pending]
+        vectors = _batch_embed_texts(docs)
+        cache = {doc: vec for doc, vec in zip(docs, vectors)}
+    except Exception:
+        return db.process_journal(limit=batch_limit)
+    orig = db._get_embedding
+
+    def _cached(text: str) -> list[float]:
+        cached_vec = cache.get(text)
+        if cached_vec is not None:
+            return cached_vec
+        return orig(text)
+
+    db._get_embedding = _cached  # type: ignore[method-assign]
+    try:
+        return db.process_journal(limit=batch_limit)
+    finally:
+        db._get_embedding = orig  # type: ignore[method-assign]
 
 _DEFAULT_SEARCH_DEPTH = 5
 
@@ -124,6 +198,25 @@ def _matches_filters(
 
 def _row_to_search_result(row: dict[str, Any], score: float) -> SearchResult:
     return SearchResult(memory=_row_to_memory(row), score=score)
+
+
+def _anchor_first(messages: list[Memory], anchor_ids: list[str]) -> list[Memory]:
+    """Order bundle messages with the retrieved evidence (anchors) first.
+
+    Validated on the 500-question LongMemEval-S answer eval (LLM answer +
+    LLM judge): evidence-first bundle formatting avoids needle-in-haystack
+    failures — the same 15k-char context that scored 0/1 on a question
+    scored 1/1 after reordering. Anchors keep their relative order; the
+    remaining messages stay chronological.
+    """
+    if not anchor_ids:
+        return messages
+    anchors = set(anchor_ids)
+    positions = {message.id: index for index, message in enumerate(messages)}
+    return sorted(messages, key=lambda m: (m.id not in anchors, positions.get(m.id, 0)))
+
+
+_DEFAULT_BUNDLE_BUDGET_CHARS = 4_000
 
 
 class MemoryCore:
@@ -248,6 +341,65 @@ class MemoryCore:
             )
         return tid
 
+    def ingest_many(self, messages: list[dict]) -> list[str]:
+        """Batch-ingest messages in one HybridDB journal flush.
+
+        Each dict accepts the same keys as :meth:`ingest` (``role``,
+        ``content``, ``session_id``, ``user_id``, ``agent_id``, ``ts``,
+        ``metadata``, ``turn_id``, ``embedding``) plus an optional ``id``
+        for callers that manage their own ids (e.g. eval harnesses).
+        Turn assignment mirrors :meth:`ingest`: user messages open a new
+        turn, assistant messages reuse the session's latest turn.
+
+        Returns the list of inserted message ids.
+        """
+        rows: list[dict[str, Any]] = []
+        ids: list[str] = []
+        last_turn: dict[str, str] = {}
+        for msg in messages:
+            content = msg.get("content", "")
+            if not content.strip():
+                continue
+            mid = msg.get("id") or str(uuid.uuid4())[:12]
+            session_id = msg.get("session_id") or ""
+            role = msg.get("role", "user")
+            tid = msg.get("turn_id")
+            if not tid:
+                if role == "user":
+                    tid = str(uuid.uuid4())[:12]
+                else:
+                    tid = last_turn.get(session_id) or self._get_last_turn_id(session_id) or str(uuid.uuid4())[:12]
+                last_turn[session_id] = tid
+            ts_value = msg.get("ts")
+            ts_iso = (
+                ts_value.isoformat()
+                if hasattr(ts_value, "isoformat")
+                else (ts_value or datetime.now(UTC).isoformat())
+            )
+            row: dict[str, Any] = {
+                "id": mid,
+                "role": role,
+                "content": content,
+                "user_id": msg.get("user_id", ""),
+                "agent_id": msg.get("agent_id", ""),
+                "session_id": session_id,
+                "turn_id": tid,
+                "metadata": json.dumps(msg.get("metadata") or {}),
+                "ts": ts_iso,
+            }
+            embedding = msg.get("embedding")
+            if embedding:
+                row["embedding"] = (
+                    embedding if isinstance(embedding, str) else json.dumps(embedding)
+                )
+            rows.append(row)
+            ids.append(mid)
+        if not rows:
+            return []
+        self._db.insert_batch("messages", rows, sync=False)
+        _flush_journal_batched(self._db)
+        return ids
+
     def _search_messages(
         self, query: str, limit: int = 10,
         role: str | None = None,
@@ -363,6 +515,8 @@ class MemoryCore:
         ts_after: str | None = None,
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_cap: int = 1,
+        allocation: str = "global",
     ) -> list[SearchResult]:
         if limit <= 0 or per_query_limit <= 0:
             return []
@@ -400,13 +554,149 @@ class MemoryCore:
         ranked.sort(key=lambda result: result.score, reverse=True)
         if use_cross_encoder:
             ranked = rerank(query, ranked)
+            if session_cap > 1:
+                return self._select_with_session_cap(
+                    query, ranked, limit=limit, cap=session_cap,
+                    allocation=allocation,
+                )
         return _mmr_diversify(ranked, limit)
+
+    def _select_with_session_cap(
+        self,
+        query: str,
+        ranked: list[SearchResult],
+        *,
+        limit: int = 5,
+        cap: int = 2,
+        allocation: str = "global",
+    ) -> list[SearchResult]:
+        """Final selection: cross-encoder score every message of the top
+        ``limit`` sessions, then fill the top-``limit`` slots.
+
+        The one-message-per-session MMR cap loses answers that live in a
+        second message of an already-found session (question echo + answer
+        detail, user fact + assistant confirmation). Re-scoring the full
+        session lets those answers surface.
+
+        ``allocation``:
+          - "global" (default): top-``limit`` slots from the pool with up to
+            ``cap`` per session. Best message recall (measured on S:
+            +0.123 message_recall@5) but a second message of the top
+            session can displace the 5th session (−0.059 session_recall@5).
+          - "anchor": the top session gets two slots, the next sessions one
+            each; the extra slot always comes from the strongest context.
+        """
+        if not ranked or limit <= 0:
+            return []
+        # Top ``limit`` sessions by each result's cross-encoder score.
+        best: dict[str, tuple[float, SearchResult]] = {}
+        for result in ranked:
+            sid = result.memory.session_id or f"_no_session_{hash(result.memory.content)}"
+            score = getattr(result, "_ce_score", result.score)
+            if sid not in best or score > best[sid][0]:
+                best[sid] = (score, result)
+        top_sessions = [sid for sid, _ in sorted(best.items(), key=lambda kv: -kv[1][0])[:limit]]
+
+        # Pool: full message list per real session, original result otherwise.
+        # Long sessions are windowed around the anchor + the recent tail so the
+        # cross-encoder batch stays bounded.
+        pool: list[tuple[Memory, str]] = []
+        for sid in top_sessions:
+            if sid.startswith("_no_session_"):
+                memory = best[sid][1].memory
+                pool.append((memory, sid))
+                continue
+            rows = self._db.raw_query(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC, rowid ASC",
+                (sid,),
+            )
+            messages = [_row_to_memory(row) for row in rows]
+            if len(messages) > 60:
+                anchor_id = best[sid][1].memory.id
+                positions = {m.id: index for index, m in enumerate(messages)}
+                anchor_index = positions.get(anchor_id, 0)
+                window = sorted(set(
+                    range(max(0, anchor_index - 15), min(len(messages), anchor_index + 16))
+                ) | set(range(max(0, len(messages) - 30), len(messages)))
+                )
+                messages = [messages[i] for i in window]
+            pool.extend((memory, sid) for memory in messages)
+        if not pool:
+            return []
+
+        model = get_cross_encoder()
+        if model is None:
+            return _mmr_diversify(ranked, limit)
+        try:
+            pairs = [(query, memory.content[:512]) for memory, _ in pool]
+            scores = model.predict(pairs, show_progress_bar=False, batch_size=32)
+        except Exception:
+            return _mmr_diversify(ranked, limit)
+
+        scored = sorted(
+            zip(pool, scores),
+            key=lambda item: -float(item[1]),
+        )
+        if allocation == "anchor":
+            return self._score_anchor_slots(scored, limit=limit, cap=cap)
+        taken: dict[str, int] = {}
+        selected: list[SearchResult] = []
+        for (memory, sid), score in scored:
+            if taken.get(sid, 0) >= cap:
+                continue
+            taken[sid] = taken.get(sid, 0) + 1
+            result = SearchResult(memory=memory, score=float(score))
+            setattr(result, "_ce_score", float(score))
+            selected.append(result)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _score_anchor_slots(
+        self,
+        scored: list[tuple[tuple[Memory, str], float]],
+        *,
+        limit: int = 5,
+        cap: int = 2,
+    ) -> list[SearchResult]:
+        """Anchor-biased slot allocation: the best session gets two slots,
+        the next sessions one each (session coverage preserved for the
+        top contexts; the anchor's second message may surface).
+        """
+        groups: dict[str, list[tuple[Memory, float]]] = {}
+        for (memory, sid), score in scored:
+            groups.setdefault(sid, []).append((memory, float(score)))
+        selected: list[SearchResult] = []
+        remaining = limit
+        for rank, (sid, entries) in enumerate(groups.items()):
+            slots = min(cap if rank == 0 else 1, remaining, len(entries))
+            for memory, score in entries[:slots]:
+                result = SearchResult(memory=memory, score=score)
+                setattr(result, "_ce_score", score)
+                selected.append(result)
+                remaining -= 1
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            # Very few sessions: fill the rest best-first under the cap.
+            taken = {sid: len(entries[: (cap if i == 0 else 1)]) for i, (sid, entries) in enumerate(groups.items())}
+            for (memory, sid), score in scored:
+                if taken.get(sid, 0) >= cap:
+                    continue
+                taken[sid] = taken.get(sid, 0) + 1
+                result = SearchResult(memory=memory, score=float(score))
+                setattr(result, "_ce_score", float(score))
+                selected.append(result)
+                remaining -= 1
+                if remaining <= 0:
+                    break
+        return selected
 
     def _reconstruct_sessions(
         self,
         query: str,
         session_limit: int = 5,
-        max_context_chars: int = 16_000,
+        max_context_chars: int = _DEFAULT_BUNDLE_BUDGET_CHARS,
         short_max_messages: int = 12,
         short_max_chars: int = 8_000,
         segment_max_messages: int = 6,
@@ -434,7 +724,10 @@ class MemoryCore:
             if len(messages) <= short_max_messages and total_chars <= short_max_chars:
                 bundles.append(SessionBundle(
                     session_id=session_id,
-                    messages=messages,
+                    messages=_anchor_first(
+                        messages,
+                        [result.memory.id] if result.memory.id else [],
+                    ),
                     score=result.score,
                     complete=True,
                     anchor_ids=[result.memory.id] if result.memory.id else [],
@@ -473,7 +766,10 @@ class MemoryCore:
             ]
             bundles.append(SessionBundle(
                 session_id=session_id,
-                messages=selected,
+                messages=_anchor_first(
+                    selected,
+                    [result.memory.id] if result.memory.id else [],
+                ),
                 score=result.score,
                 complete=len(selected_indexes) == len(segments),
                 anchor_ids=[result.memory.id] if result.memory.id else [],
@@ -517,6 +813,7 @@ class MemoryCore:
                 selected_ids.add(message.id)
                 used_chars += message_chars
             selected.sort(key=lambda message: position[message.id])
+            selected = _anchor_first(selected, bundle.anchor_ids)
             budgeted.append(SessionBundle(
                 session_id=bundle.session_id,
                 messages=selected,
@@ -865,6 +1162,7 @@ class MemoryCore:
         ts_after: str | None = None,
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_cap: int = 1,
     ) -> list[SearchResult] | list[SessionBundle]:
         """Retrieve memories by query strategy.
 
@@ -876,6 +1174,14 @@ class MemoryCore:
 
         Set bundles=True to return SessionBundle objects with surrounding context.
         Filter params (role, session_id, etc.) apply to direct/episodic/expanded.
+        Bundles use a 4k-char total context budget with evidence-first message
+        ordering (retrieved anchors lead) — validated on the 500-question S
+        answer eval (LLM answer + judge): 4k bundles scored 0.678 vs 0.608 at
+        16k with ~60% less context.
+        ``session_cap`` (episodic only) allows up to N messages per session in
+        the final ranking instead of the default one-per-session MMR cap —
+        recovers answers that live in a second message of a found session
+        (+0.048 answer accuracy on S at cap=2, at the cost of session recall).
         """
         if strategy == "direct":
             results = self._search_messages(
@@ -916,6 +1222,7 @@ class MemoryCore:
                 role=role, session_id=session_id, user_id=user_id,
                 agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
                 metadata=metadata,
+                session_cap=session_cap,
             )
             if bundles:
                 return self._reconstruct_sessions(

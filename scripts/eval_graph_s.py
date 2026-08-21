@@ -57,11 +57,11 @@ TRAVERSAL_MODE = "memorycore_traversal_v2"
 
 
 def _ingest_instance(core: MemoryCore, instance: PreparedInstance) -> int:
-    """Canonical eval ingestion (direct insert, no embedding computation)."""
+    """Canonical eval ingestion (batch insert, single journal flush)."""
     count = 0
     for session in instance.sessions:
-        for msg in session.messages:
-            core.db.insert("messages", {
+        core.ingest_many([
+            {
                 "id": msg.id,
                 "role": msg.role,
                 "content": msg.content,
@@ -69,10 +69,12 @@ def _ingest_instance(core: MemoryCore, instance: PreparedInstance) -> int:
                 "user_id": msg.user_id or "",
                 "agent_id": msg.agent_id or "",
                 "turn_id": session.turn_id,
-                "metadata": "{}",
+                "metadata": {},
                 "ts": msg.ts.isoformat() if msg.ts else "1970-01-01T00:00:00Z",
-            })
-            count += 1
+            }
+            for msg in session.messages
+        ])
+        count += len(session.messages)
     return count
 
 

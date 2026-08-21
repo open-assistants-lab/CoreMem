@@ -47,15 +47,15 @@ from eval_agent_journal_longmemeval import (  # noqa: E402
 from coremem import MemoryCore  # noqa: E402
 from coremem.retrieval import search_messages_preference_union  # noqa: E402
 
-MODE = "memorycore_episodic_reranked_v2"
+MODE = "memorycore_episodic_reranked_v3"
 BASELINE_JSONL = Path(__file__).resolve().parents[1] / "results" / "eval_graph_s.json.jsonl"
 
 
 def _ingest_instance(core: MemoryCore, instance: Any) -> int:
     count = 0
     for session in instance.sessions:
-        for msg in session.messages:
-            core.db.insert("messages", {
+        core.ingest_many([
+            {
                 "id": msg.id,
                 "role": msg.role,
                 "content": msg.content,
@@ -63,10 +63,12 @@ def _ingest_instance(core: MemoryCore, instance: Any) -> int:
                 "user_id": msg.user_id or "",
                 "agent_id": msg.agent_id or "",
                 "turn_id": session.turn_id,
-                "metadata": "{}",
+                "metadata": {},
                 "ts": msg.ts.isoformat() if msg.ts else "1970-01-01T00:00:00Z",
-            })
-            count += 1
+            }
+            for msg in session.messages
+        ])
+        count += len(session.messages)
     return count
 
 
@@ -79,7 +81,9 @@ def _score(core: MemoryCore, instance: Any, truth: Any, *, k: int) -> tuple[dict
             "bundle_context_chars": 0, "bundle_message_recall": 0.0, "bundle_message_hit": False,
         })
         return row, time.perf_counter() - t0
-    primary = search_messages_preference_union(core, instance.query, limit=k, per_variant=40)
+    # v3 fold: default episodic routing (preference queries -> per-variant union)
+    # + session-cap selection (cap=2) for everything else.
+    primary = core.recall(instance.query, strategy="episodic", limit=k, session_cap=2)
     hits = [
         RawSearchHit(
             message=ReferenceMessage(
@@ -116,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=Path("results/eval_combined_s.json"))
     parser.add_argument("--root", type=Path, default=Path(tempfile.mkdtemp(prefix="coremem-combined-s-")))
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--allocation", choices=("global", "anchor"), default="global")
+    parser.add_argument("--reuse", action="store_true", help="Reuse existing per-question hybrid dirs (skip re-ingest)")
     parser.add_argument("--merge", nargs="+", type=Path, help="Merge shard output files and compare (no running)")
     parser.add_argument("--shard-id", type=int, default=0, help="Worker index (0-based)")
     parser.add_argument("--shard-count", type=int, default=1, help="Total parallel workers")
@@ -123,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    global ALLOCATION, MODE
+    ALLOCATION = args.allocation
+    MODE = "memorycore_episodic_reranked_v4" if args.allocation == "anchor" else "memorycore_episodic_reranked_v3"
 
     if args.merge:
         merged: list[dict[str, Any]] = []
@@ -162,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                 if r["mode"] == "memorycore_episodic_reranked":
                     baseline[r["question_id"]] = r
         matched = [r for r in rows if r["question_id"] in baseline]
-        print(f"\n=== Combined v2 vs saved baseline (L-6) — merged {len(rows)} questions ===")
+        print(f"\n=== {MODE} vs saved baseline (L-6) — merged {len(rows)} questions ===")
         print(f"{'metric':<28}{'baseline':>12}{'combined':>12}{'delta':>10}")
         for key in (f"session_recall@{args.k}", f"message_recall@{args.k}", f"session_hit@{args.k}", f"message_hit@{args.k}", "session_rr", "session_map"):
             b = _mean([baseline[r["question_id"]]["scoring"].get(key, 0) for r in matched])
@@ -210,13 +219,18 @@ def main(argv: list[str] | None = None) -> int:
         t_q = time.perf_counter()
 
         root = args.root / f"{index:04d}_{qid[:8]}"
-        if root.exists():
-            shutil.rmtree(root)
-        core = MemoryCore(path=str(root / "hybrid"))
+        if not (args.reuse and (root / "hybrid").exists()):
+            if root.exists():
+                shutil.rmtree(root)
+            core = MemoryCore(path=str(root / "hybrid"))
 
-        t0 = time.perf_counter()
-        n_msgs = _ingest_instance(core, instance)
-        ingest_s = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            n_msgs = _ingest_instance(core, instance)
+            ingest_s = time.perf_counter() - t0
+        else:
+            core = MemoryCore(path=str(root / "hybrid"))
+            n_msgs = 0
+            ingest_s = 0.0
 
         row, search_s = _score(core, instance, truth, k=args.k)
         total_s = time.perf_counter() - t_q
@@ -286,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
                 baseline[r["question_id"]] = r
     matched = [r for r in rows if r["question_id"] in baseline]
 
-    print("\n=== Combined v2 vs saved baseline (L-6) ===")
+    print("\n=== {MODE} vs saved baseline (L-6) ===")
     print(f"matched questions: {len(matched)} / {len(rows)}")
     print(f"{'metric':<28}{'baseline':>12}{'combined':>12}{'delta':>10}")
     for key in (

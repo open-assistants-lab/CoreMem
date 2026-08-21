@@ -476,7 +476,8 @@ def test_reconstruct_sessions_returns_complete_short_session():
 
         assert len(bundles) == 1
         assert bundles[0].complete is True
-        assert [message.id for message in bundles[0].messages] == ["m1", "m2", "m3"]
+        # anchor-first ordering: the retrieved evidence leads the bundle
+        assert [message.id for message in bundles[0].messages] == ["m2", "m1", "m3"]
     finally:
         core._test_cleanup()
 
@@ -499,7 +500,8 @@ def test_reconstruct_sessions_combines_opening_and_anchor_segments():
 
         assert len(bundles) == 1
         assert bundles[0].complete is False
-        assert [message.id for message in bundles[0].messages] == ["m0", "m1", "m6", "m7"]
+        # anchor m6 leads, the rest stay chronological
+        assert [message.id for message in bundles[0].messages] == ["m6", "m0", "m1", "m7"]
     finally:
         core._test_cleanup()
 
@@ -530,8 +532,8 @@ def test_reconstruct_sessions_respects_global_budget_across_sessions():
         assert sum(
             len(message.content) for bundle in bundles for message in bundle.messages
         ) <= 3_000
-        assert [message.id for message in bundles[0].messages] == ["s1-m0", "s1-m1"]
-        assert [message.id for message in bundles[1].messages] == ["s2-m0", "s2-m1"]
+        assert [message.id for message in bundles[0].messages] == ["s1-m1", "s1-m0"]
+        assert [message.id for message in bundles[1].messages] == ["s2-m1", "s2-m0"]
     finally:
         core._test_cleanup()
 
@@ -706,3 +708,184 @@ def test_get_core_default_journal_model_when_env_unset(tmp_path):
             os.environ.pop("COREMEM_LLM_MODEL", None)
         else:
             os.environ["COREMEM_LLM_MODEL"] = old_model
+
+
+# ── Batch ingest (ingest_many) ─────────────────────────────────────────────
+
+
+def test_ingest_many_batches_and_flushes():
+    core = _tmp_core()
+    try:
+        messages = [
+            {"role": "user", "content": f"fact number {i}", "session_id": f"s{i % 2}"}
+            for i in range(20)
+        ]
+        ids = core.ingest_many(messages)
+        assert len(ids) == 20
+        assert len(set(ids)) == 20
+        assert core.count() == 20
+        # journal drained — nothing pending
+        assert core.db.journal_status()["pending"] == 0
+        # searchable after flush
+        results = core._search_messages("fact number 7", limit=5)
+        assert any("fact number 7" in r.memory.content for r in results)
+    finally:
+        core._test_cleanup()
+
+
+def test_ingest_many_skips_empty_content_and_mirrors_turn_logic():
+    core = _tmp_core()
+    try:
+        ids = core.ingest_many([
+            {"role": "user", "content": "hello", "session_id": "s1"},
+            {"role": "assistant", "content": "hi back", "session_id": "s1"},
+            {"role": "user", "content": "   ", "session_id": "s1"},
+            {"role": "user", "content": "second turn", "session_id": "s1"},
+        ])
+        assert len(ids) == 3
+        rows = core.db.raw_query("SELECT turn_id FROM messages ORDER BY ts")
+        turn_ids = [r["turn_id"] for r in rows]
+        # user msg 1 opens a turn, assistant reuses it, second user opens a new one
+        assert turn_ids[0] == turn_ids[1]
+        assert turn_ids[2] != turn_ids[0]
+    finally:
+        core._test_cleanup()
+
+
+def test_ingest_many_preserves_explicit_ids_and_metadata():
+    core = _tmp_core()
+    try:
+        ids = core.ingest_many([
+            {"id": "custom-1", "role": "user", "content": "keep me",
+             "session_id": "s1", "metadata": {"kind": "keep"}},
+        ])
+        assert ids == ["custom-1"]
+        rows = core.db.raw_query("SELECT id, metadata FROM messages WHERE id = ?", ("custom-1",))
+        assert rows and "keep" in rows[0]["metadata"]
+    finally:
+        core._test_cleanup()
+
+
+# ── Session-cap selection (cap=2) ──────────────────────────────────────────
+
+
+def test_session_cap_allows_two_messages_per_session():
+    core = _tmp_core()
+    try:
+        for s in range(1, 7):
+            core.ingest("user", f"user asks about topic alpha {s}", session_id=f"s{s}")
+            core.ingest("assistant", f"assistant details topic alpha {s}", session_id=f"s{s}")
+
+        mono = core._search_messages_decomposed(
+            "topic alpha", limit=5, per_query_limit=20, use_cross_encoder=True,
+            session_cap=1,
+        )
+        cap2 = core._search_messages_decomposed(
+            "topic alpha", limit=5, per_query_limit=20, use_cross_encoder=True,
+            session_cap=2,
+        )
+        # cap=1: one message per session (enough sessions exist)
+        assert len(mono) == 5
+        assert len({r.memory.session_id for r in mono}) == 5
+        # cap=2: still five results, but one session may supply two
+        assert len(cap2) == 5
+        counts = {}
+        for r in cap2:
+            counts[r.memory.session_id] = counts.get(r.memory.session_id, 0) + 1
+        assert max(counts.values()) == 2
+        assert 3 <= len(counts) <= 4
+        # cap=2 surfaces at least one message cap=1 missed
+        cap1_ids = {r.memory.id for r in mono}
+        cap2_extra = [r for r in cap2 if r.memory.id not in cap1_ids]
+        assert cap2_extra, "cap=2 must surface at least one message cap=1 missed"
+    finally:
+        core._test_cleanup()
+
+
+def test_session_cap_anchor_allocation_keeps_top_sessions():
+    core = _tmp_core()
+    try:
+        for s in range(1, 7):
+            core.ingest("user", f"user asks about topic alpha {s}", session_id=f"s{s}")
+            core.ingest("assistant", f"assistant details topic alpha {s}", session_id=f"s{s}")
+
+        anchor = core._search_messages_decomposed(
+            "topic alpha", limit=5, per_query_limit=20, use_cross_encoder=True,
+            session_cap=2, allocation="anchor",
+        )
+        assert len(anchor) == 5
+        counts = {}
+        for r in anchor:
+            counts[r.memory.session_id] = counts.get(r.memory.session_id, 0) + 1
+        # top session holds two slots, three other sessions one each
+        assert max(counts.values()) == 2
+        assert len(counts) == 4
+        # the two-slot session is the highest-scoring one
+        top_session = max(counts.items(), key=lambda kv: kv[1])[0]
+        mono = core._search_messages_decomposed(
+            "topic alpha", limit=5, per_query_limit=20, use_cross_encoder=True,
+            session_cap=1,
+        )
+        assert mono[0].memory.session_id == top_session
+    finally:
+        core._test_cleanup()
+
+
+def test_session_cap_default_unchanged():
+    core = _tmp_core()
+    try:
+        core.ingest_many([
+            {"role": "user", "content": f"pizza topping discussion {i}", "session_id": f"s{i % 6}"}
+            for i in range(12)
+        ])
+        default = core.recall("pizza topping", strategy="episodic")
+        assert len(default) == 5
+        # default cap=1: at most one per session when enough sessions exist
+        sessions = {r.memory.session_id for r in default}
+        assert len(sessions) == len(default)
+    finally:
+        core._test_cleanup()
+
+
+# ── Default bundle budget + anchor-first ordering (validated config) ───────
+
+
+def test_reconstruct_sessions_default_budget_is_4k_and_anchor_first():
+    core = _tmp_core()
+    try:
+        for index in range(8):
+            _insert_traversal_message(
+                core, f"m{index}", f"message {index} " + "x" * 600, "s1"
+            )
+        core._search_messages_decomposed = lambda query, limit=5: [
+            _seed("m5", "answer", "s1", 1.0),
+        ]
+
+        bundles = core._reconstruct_sessions("answer")
+
+        # default max_context_chars is now 4_000 (validated on the S answer
+        # eval: 4k bundles scored 0.678 vs 0.608 at 16k with 60% less context)
+        assert len(bundles) == 1
+        total = sum(len(message.content) for message in bundles[0].messages)
+        assert total <= 4_000
+        # anchor-first: the retrieved evidence leads the bundle
+        assert bundles[0].messages[0].id == "m5"
+    finally:
+        core._test_cleanup()
+
+
+def test_recall_bundles_default_is_anchor_first():
+    core = _tmp_core()
+    try:
+        core.ingest_many([
+            {"id": "b1", "role": "user", "content": "context before", "session_id": "s1"},
+            {"id": "b2", "role": "user", "content": "the answer is cobalt blue", "session_id": "s1"},
+            {"id": "b3", "role": "user", "content": "context after", "session_id": "s1"},
+        ])
+        bundles = core.recall("cobalt blue", strategy="episodic", bundles=True)
+        assert len(bundles) == 1
+        ids = [message.id for message in bundles[0].messages]
+        assert ids[0] == "b2", f"anchor should lead the bundle, got {ids}"
+        assert set(ids) == {"b1", "b2", "b3"}
+    finally:
+        core._test_cleanup()

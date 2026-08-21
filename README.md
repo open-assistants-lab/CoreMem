@@ -68,6 +68,22 @@ CoreMem solves all three:
 
 All modes abstain correctly on unanswerable questions (0% false positive rate).
 
+### End-to-end answer accuracy (LLM answer → LLM judge, 500 S questions)
+
+Measured with `scripts/eval_answer_longmemeval.py` (deepseek-v4-flash as
+answer model and judge, anonymous shuffled judging, evidence-first bundle
+formatting):
+
+| Context | Accuracy | Context chars |
+|---|---:|---:|
+| **4k bundles (CE-ranked, evidence-first) — the default** | **0.678** | 6,016 |
+| cap=2 session selection (`session_cap=2`) | 0.656 | 11,866 |
+| LLM query expansion (`expanded`) | 0.642 | 4,587 |
+| 16k bundles (pre-0.13 default) | 0.608 | 14,744 |
+| message top-5 only | 0.528 | 7,302 |
+
+Abstention accuracy 0.867 for the top modes. Result: `results/eval_answer_s500.json`.
+
 Results: `eval_output/lme-oracle/results.json`, `eval_output/lme-s/results.json`
 
 ## Validated improvements (2026-08, all zero-LLM, folded into the default)
@@ -79,6 +95,9 @@ with the resumable harness in `scripts/`:
 |---|---|---|
 | **Temporal query decomposition** (from/to, since/when, clean ago-event cues) | **+0.037 session / +0.029 message recall** on the 133 temporal-reasoning questions | ✅ folded into the default |
 | **Preference union routing** (per-variant top-40 union for preference queries) | **+0.033 session recall** on the 30 preference questions | ✅ folded into the default |
+| **4k bundles + evidence-first ordering** (retrieved anchors lead) | **+0.070 answer accuracy** vs 16k bundles (0.678 vs 0.608), ~60% less context | ✅ folded into the default (v0.13) |
+| **Session-cap selection** (`session_cap=2`, eval modes v3/v4) | **+0.124 message recall / +0.048 answer accuracy**, at −0.058 session recall | ⚠️ opt-in (tradeoff) |
+| **Batch ingest** (`ingest_many`) | 550 messages 49.9 s → 11.5 s (4.3×), identical retrieval | ✅ shipped |
 | **L-12 cross-encoder** (`COREMEM_CROSS_ENCODER_MODEL` opt-in) | +0.018 message recall on the oracle-style subset — but cancels the temporal win on S (−0.004) | ⚠️ opt-in only; L-6 stays the default |
 | Graph-based retrieval (8 research-grounded edge types) | neutral-to-negative across 500 S questions | ❌ parked (see `docs/graph-edges-design.md`) |
 
@@ -130,6 +149,7 @@ results = core.recall("How many model kits?", limit=10)
 results = core.recall("What did I build recently?", strategy="direct")
 
 # Session bundles — surrounding context around each hit
+# (4k-char total budget, evidence-first ordering — the validated default)
 bundles = core.recall("model kits", bundles=True)
 for b in bundles:
     print(f"## Session {b.session_id} (complete={b.complete})")
@@ -138,6 +158,11 @@ for b in bundles:
 
 # Filter params
 results = core.recall("coffee", role="user", session_id="conv_001", ts_after="2024-01-01")
+
+# Session-cap selection: up to 2 messages per session instead of the
+# one-per-session MMR cap (recovers answers in a second message of an
+# already-found session; eval mode memorycore_episodic_reranked_v3)
+results = core.recall("model kits", session_cap=2)
 ```
 
 ### Heuristics

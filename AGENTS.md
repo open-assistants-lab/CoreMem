@@ -58,7 +58,7 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 - **Bundle evidence recall** (0.847 S, 0.917 oracle) — evidence is available even when not in top-5.
 - **No retrieval LLM calls** — uses a local cross-encoder (`ms-marco-MiniLM-L-6-v2`).
 - **Context is efficient** (3,991 chars S, 4,540 chars oracle).
-- **4k budget retains identical primary retrieval** with 77% less bundle context (2,685 vs 11,579 chars).
+- **Answer eval is the decision metric for bundles** (500 S questions, LLM answer + LLM judge, `scripts/eval_answer_longmemeval.py`): the default ships **4k bundles with evidence-first ordering** (0.678 accuracy, 6,016 chars) — the winning configuration over 16k bundles (0.608) and cap=2 (0.656).
 
 **When to use other strategies:**
 
@@ -90,6 +90,9 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 - **Preference union-retrieval** (per-variant top-40 union for preference queries) — +0.033 session recall on the 30 S preference questions, **folded into the default `episodic` path**.
 - **L-12 cross-encoder** (`COREMEM_CROSS_ENCODER_MODEL` opt-in): +0.018 message recall on the 20-question oracle-style subset, but cancels the temporal decomposition win on S — keep L-6 as default.
 - **Combined S-scale validation** (500/500, `scripts/eval_combined_s.py`): the wins do NOT sum — preference stacks (+0.033), temporal is cancelled by L-12 (−0.004), overall +0.001. Validated fold: preference union only, L-6 retained.
+- **Session-cap selection** (500/500, eval modes `memorycore_episodic_reranked_v3` (global) / `v4` (anchor), L-6): after the global CE rerank, every message of the top-k sessions is CE-scored and the final top-k may hold up to 2 messages per session instead of the one-per-session MMR cap. Full S-scale: **message_recall@5 +0.124 (0.580 → 0.704), message_hit +0.086 (0.722 → 0.808)** at the cost of **session_recall@5 −0.058 (0.893 → 0.835)** — a second message of the top session displaces the 5th session (90/500 rows lose an expected session; 427/500 rows cover fewer distinct sessions). The anchor allocation (v4) is statistically identical to global (v3). The session loss is structural to cap=2 at k=5 — any two-message-per-session scheme covers ≤4 sessions. On oracle-style corpora (2 sessions/question) cap=2 would be a pure win (both sessions already covered); the S setup (48 sessions) stresses diversity. Bundle evidence hit is flat (−0.01). **Not folded into the default; opt-in via `recall(session_cap=2)`.**
+- **Batch ingest** (`MemoryCore.ingest_many`, single journal flush + batched all-MiniLM encoding): 550 messages 49.9 s → 11.5 s (4.3×) with identical retrieval; eval harnesses (`build_memorycore`, `eval_combined_s._ingest_instance`, `eval_graph_s._ingest_instance`) all use it. Full S-scale eval dropped from ~2.2 h to ~23 min (3 shards).
+- **Answer eval (LLM answer → LLM judge) on S** (500/500, `scripts/eval_answer_longmemeval.py`, deepseek-v4-flash for both roles, evidence-first bundle formatting): accuracy 0.678 `episodic_4k_reranked` > 0.656 `episodic_cap2` > 0.642 `llm_expansion` > 0.608 `memorycore_episodic` (the former default) > 0.528 `memorycore`. Abstention accuracy 0.867 for the top modes. Findings folded into the default: **bundle budget 16k → 4k** and **evidence-first bundle ordering** (anchor messages lead) — 4k bundles answered correctly on a question where the identical 15k context failed (needle-in-haystack); cap=2 adds +0.048 answer accuracy but stays opt-in (`session_cap`) due to the session-recall cost.
 
 ## Public API
 
@@ -105,8 +108,11 @@ results = core.recall(query, strategy="episodic")     # decomposed + cross-encod
 results = core.recall(query, strategy="expanded")     # 1 LLM call for query rephrasing
 results = core.recall(query, strategy="fusion")       # RRF of direct + episodic
 
-# Session bundles
+# Session bundles (4k-char budget, evidence-first ordering)
 bundles = core.recall(query, bundles=True)
+
+# Message-depth selection (opt-in; +0.048 answer accuracy, −0.06 session recall)
+results = core.recall(query, session_cap=2)
 
 # With filter params
 results = core.recall(query, role="user", session_id="abc", ts_after="2024-01-01")
@@ -137,6 +143,14 @@ uv run scripts/eval_agent_journal_longmemeval.py data/longmemeval_oracle.json \
 uv run scripts/eval_agent_journal_longmemeval.py data/longmemeval_s_20_subset.json \
   --mode memorycore_episodic_reranked --k 5 \
   --progress --root /tmp/coremem-s20 --output results.json --overwrite
+
+# S full (500 questions) — cap=2 session selection (v3 global / v4 anchor)
+# Persistent per-question HybridDB instances (cache for further experiments):
+#   data/instances_s500/  (~4.3 GB for all 500, ~9 MB/question; gitignored)
+# --reuse skips re-ingesting when the instance already exists.
+uv run scripts/eval_combined_s.py data/longmemeval_s_cleaned.json \
+  --allocation global --root data/instances_s500 --reuse --progress \
+  --output results/eval_v3_s500.json
 ```
 
 ## Tests

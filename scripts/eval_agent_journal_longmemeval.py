@@ -37,7 +37,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -186,12 +186,16 @@ def build_memorycore(
     *,
     llm_provider: Any = None,
 ) -> MemoryCore:
-    """Build a MemoryCore with the provided LongMemEval haystack messages."""
+    """Build a MemoryCore with the provided LongMemEval haystack messages.
+
+    Uses batch ingest (single journal flush with batched embedding) —
+    ~5-15x faster than per-message inserts.
+    """
     core = MemoryCore(path=str(root / "hybrid"), llm_provider=llm_provider)
     for instance in instances:
         for session in instance.sessions:
-            for msg in session.messages:
-                core.db.insert("messages", {
+            core.ingest_many([
+                {
                     "id": msg.id,
                     "role": msg.role,
                     "content": msg.content,
@@ -199,9 +203,11 @@ def build_memorycore(
                     "user_id": msg.user_id or "",
                     "agent_id": msg.agent_id or "",
                     "turn_id": session.turn_id,
-                    "metadata": "{}",
+                    "metadata": {},
                     "ts": msg.ts.isoformat() if msg.ts else "1970-01-01T00:00:00Z",
-                })
+                }
+                for msg in session.messages
+            ])
     return core
 
 
@@ -251,6 +257,7 @@ def run_eval(
     reset: bool = False,
     expand_model: str | None = None,
     cleanup_instances: bool = False,
+    reuse_instances: bool = False,
     resume: bool = False,
     resume_path: str | Path | None = None,
     progress: bool = False,
@@ -349,6 +356,7 @@ def run_eval(
                 mode_rows=mode_rows,
                 completed_question_ids=completed_question_ids,
                 cleanup_instances=cleanup_instances,
+                reuse_instances=reuse_instances,
                 resume_path=resume_path,
                 progress=progress,
                 jsonl_file=jsonl_file,
@@ -364,16 +372,22 @@ def run_eval(
                         print(f"[{index + 1}/{total}] {instance.question_id}: resumed", flush=True)
                     continue
                 instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
-                if instance_root.exists():
-                    _safe_reset_root(instance_root)
+                if not (reuse_instances and (instance_root / "hybrid").exists()):
+                    if instance_root.exists():
+                        _safe_reset_root(instance_root)
+                    core = build_memorycore(
+                        instance_root,
+                        instances=(instance,),
+                        llm_provider=llm_provider,
+                    )
+                else:
+                    core = MemoryCore(
+                        path=str(instance_root / "hybrid"),
+                        llm_provider=llm_provider,
+                    )
                 if progress:
                     print(f"[{index + 1}/{total}] {instance.question_id}: running", flush=True)
                 question_start = time.time()
-                core = build_memorycore(
-                    instance_root,
-                    instances=(instance,),
-                    llm_provider=llm_provider,
-                )
                 truth = truth_by_question_id[instance.question_id]
 
                 new_rows = _score_question(
@@ -454,6 +468,10 @@ def _score_question(
             new_rows[m] = _score_instance_preference_union(core, instance, truth, k=k)
         elif m == "memorycore_episodic_reranked_v2":
             new_rows[m] = _score_instance_v2(core, instance, truth, k=k)
+        elif m == "memorycore_episodic_reranked_v3":
+            new_rows[m] = _score_instance_v3(core, instance, truth, k=k, allocation="global")
+        elif m == "memorycore_episodic_reranked_v4":
+            new_rows[m] = _score_instance_v3(core, instance, truth, k=k, allocation="anchor")
     return new_rows
 
 
@@ -469,6 +487,7 @@ def _run_streaming(
     mode_rows: dict[str, list[dict[str, Any]]],
     completed_question_ids: set[str],
     cleanup_instances: bool,
+    reuse_instances: bool,
     resume_path: str | Path | None,
     progress: bool,
     jsonl_file: Any,
@@ -500,18 +519,23 @@ def _run_streaming(
             continue
 
         instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
-        if instance_root.exists():
-            _safe_reset_root(instance_root)
+        if not (reuse_instances and (instance_root / "hybrid").exists()):
+            if instance_root.exists():
+                _safe_reset_root(instance_root)
+            core = build_memorycore(
+                instance_root,
+                instances=(instance,),
+                llm_provider=llm_provider,
+            )
+        else:
+            core = MemoryCore(
+                path=str(instance_root / "hybrid"),
+                llm_provider=llm_provider,
+            )
         if progress:
             print(f"[{index + 1}] {instance.question_id}: running", flush=True)
 
         question_start = time.time()
-        core = build_memorycore(
-            instance_root,
-            instances=(instance,),
-            llm_provider=llm_provider,
-        )
-
         new_rows = _score_question(
             core, instance, truth,
             active_modes=active_modes, k=k,
@@ -760,6 +784,87 @@ def _score_instance_episodic(
         instance.query,
         session_limit=k,
         max_context_chars=max_context_chars,
+        primary_results=primary,
+    )
+    bundle_message_ids = [
+        message.id for bundle in bundles for message in bundle.messages if message.id
+    ]
+    row.update({
+        "bundle_session_ids": [bundle.session_id for bundle in bundles],
+        "bundle_message_ids": bundle_message_ids,
+        "bundle_count": len(bundles),
+        "bundle_context_chars": sum(
+            len(message.content) for bundle in bundles for message in bundle.messages
+        ),
+        "bundle_message_recall": _fractional_recall(
+            bundle_message_ids, truth.expected_message_ids,
+        ),
+        "bundle_message_hit": bool(set(bundle_message_ids) & set(truth.expected_message_ids)),
+    })
+    return row
+
+
+def _score_instance_v3(
+    core: MemoryCore,
+    instance: PreparedInstance,
+    truth: QuestionTruth,
+    *,
+    k: int,
+    allocation: str = "global",
+) -> dict[str, Any]:
+    """Episodic reranked with session-cap selection (cap=2).
+
+    After the global cross-encoder rerank, every message of the top-k
+    sessions is cross-encoder scored and the final top-k is filled with up
+    to 2 messages per session (instead of the one-per-session MMR cap).
+    Recovers answers that live in a second message of an already-found
+    session.
+
+    Allocation:
+      - global (v3): best message recall (+0.123 message_recall@5 on S)
+        but a second message of the top session can displace the 5th
+        session (-0.059 session_recall@5).
+      - anchor (v4): top session gets two slots, the rest one each —
+        session coverage of the top contexts is preserved.
+    """
+    mode = "memorycore_episodic_reranked_v4" if allocation == "anchor" else "memorycore_episodic_reranked_v3"
+    if truth.abstention_expected:
+        row = _empty_score(instance, truth, mode=mode)
+        row.update({
+            "bundle_session_ids": [],
+            "bundle_message_ids": [],
+            "bundle_count": 0,
+            "bundle_context_chars": 0,
+            "bundle_message_recall": 0.0,
+            "bundle_message_hit": False,
+        })
+        return row
+
+    primary = core._search_messages_decomposed(
+        instance.query,
+        limit=k,
+        per_query_limit=max(20, k * 4),
+        use_cross_encoder=True,
+        session_cap=2,
+        allocation=allocation,
+    )
+    hits = [
+        RawSearchHit(
+            message=ReferenceMessage(
+                turn_id=str((result.memory.metadata or {}).get("turn_id") or result.memory.id or ""),
+                session_id=result.memory.session_id or "",
+                message_id=result.memory.id or "",
+                role=result.memory.role,
+                content=result.memory.content,
+            ),
+            score=result.score,
+        )
+        for result in primary
+    ]
+    row = _build_scored_row(instance, truth, hits, mode=mode, k=k)
+    bundles = core._reconstruct_sessions(
+        instance.query,
+        session_limit=k,
         primary_results=primary,
     )
     bundle_message_ids = [
@@ -1618,7 +1723,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
@@ -1649,6 +1754,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint file if present")
     parser.add_argument("--resume-path", type=Path, help="Checkpoint path for resumable runs")
     parser.add_argument("--cleanup-instances", action="store_true", help="Delete per-question instance dirs after scoring (saves disk)")
+    parser.add_argument("--reuse-instances", action="store_true", help="Reuse existing per-question hybrid dirs instead of re-ingesting (requires a persistent --root)")
     parser.add_argument("--progress", action="store_true", help="Print per-question progress")
     parser.add_argument("--stream", action="store_true", help="Stream questions one at a time via ijson (low memory, for large datasets like S/M)")
     args = parser.parse_args(argv)
@@ -1673,6 +1779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 question_types=args.question_types, limit=args.limit,
                 expand_model=args.expand_model,
                 cleanup_instances=args.cleanup_instances,
+                reuse_instances=args.reuse_instances,
                 resume=args.resume,
                 resume_path=resume_path,
                 progress=args.progress,
@@ -1695,6 +1802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             question_types=args.question_types, limit=args.limit,
             reset=args.overwrite, expand_model=args.expand_model,
             cleanup_instances=args.cleanup_instances,
+            reuse_instances=args.reuse_instances,
             resume=args.resume,
             resume_path=resume_path,
             progress=args.progress,

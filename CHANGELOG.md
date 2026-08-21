@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.13.0] — Preference union + temporal decomposition fold, answer-eval-validated bundle defaults, batch ingest, session-cap selection
+
+### Changed
+- **Bundle budget default 16k → 4k chars with evidence-first ordering** — the winning configuration from the 500-question S answer eval (LLM answer → LLM judge, deepseek-v4-flash both roles): 4k CE-ranked bundles score **0.678 accuracy vs 0.608** for 16k bundles with ~60% less context (6,016 vs 14,744 chars). Evidence-first ordering (retrieved anchors lead each bundle, rest chronological) fixes needle-in-haystack failures — the same 15k-char context that answered 0/1 scored 1/1 after reordering.
+- **Preference union-retrieval folded into the default `episodic` path** — per-variant top-40 union for preference queries (+0.033 session recall on the 30 S preference questions).
+- **Temporal query decomposition in the default path** (from/to, since/when, clean ago-event cues; +0.037 session / +0.029 message recall on the 133 temporal questions).
+- Combined S-scale validation (500/500) confirmed the fold: preference stacks, L-12 cancels temporal — the default ships L-6 + preference union + temporal decomposition only.
+
+### Added
+- **`MemoryCore.ingest_many()`** — batch ingestion with a single HybridDB journal flush and batched all-MiniLM embedding (content→vector cache shadowing `_get_embedding` during the flush). 550 messages: 49.9 s → 11.5 s (4.3×) with identical retrieval. All eval harnesses use it (full S-scale eval: ~2.2 h → ~23 min on 3 shards).
+- **`session_cap` parameter** (`recall(..., session_cap=2)`) + eval modes `memorycore_episodic_reranked_v3` (global) / `v4` (anchor) — after the global cross-encoder rerank, every message of the top-k sessions is CE-scored and the final top-k may hold up to 2 messages per session. Full S-scale: **+0.124 message recall@5 (+0.048 answer accuracy)** at −0.058 session recall (a second message of the top session displaces the 5th session). Not folded — opt-in, documented tradeoff.
+- **`scripts/eval_answer_longmemeval.py` extended** — `episodic_cap2` mode, `--reuse` for cached per-question instances, evidence-first bundle formatting.
+- **`--reuse-instances` / `--reuse` flags** on the eval harnesses — re-score from persistent per-question HybridDB instances without re-ingesting. Cache guidance: ~9.5 MB/question (500 S questions ≈ 4.3 GB, Chroma fixed overhead dominates).
+
+### Fixed
+- **AML relevance gate calibration** — preference evidence was emptied by the gate.
+- **Answer-eval harness deleted reused instances after scoring** — cleanup now skipped with `--reuse`, preserving the experiment cache.
+
+### Eval results (S, 500 questions, k=5, deepseek-v4-flash answer + judge)
+
+| Mode | Accuracy | Context chars |
+|---|---:|---:|
+| 4k bundles (CE, evidence-first) — new default | 0.678 | 6,016 |
+| session_cap=2 | 0.656 | 11,866 |
+| llm_expansion | 0.642 | 4,587 |
+| 16k bundles — previous default | 0.608 | 14,744 |
+| message top-5 | 0.528 | 7,302 |
+
+Abstention accuracy 0.867 for the top modes. Retrieval metrics (session_recall@5 0.950 answerable / message_recall@5 0.617) are unchanged.
+
 ## [0.12.3] — Graph traversal experiment concluded (parked), hybriddb 0.5.5, instrumented eval harness
 
 ### Graph traversal (parked 2026-08-18)
