@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.13.2] — Filter plumbing fixes from E2E bug hunt, lifecycle guards
+
+E2E bug hunt (discovery → TDD fix, 12 regression tests in `tests/test_bughunt_fixes.py`, full suite 175 passed). All retrieval-path filters are now honored by every strategy; eval results are unaffected (eval harnesses call these paths without filters).
+
+### Fixed
+- **Preference queries no longer bypass recall filters** — "what do i like"-style queries routed through the preference union silently dropped `role`/`session_id`/`ts_*`/`metadata` filters and leaked other sessions' messages (results and bundles). Filters now forward through the union path and its non-preference fallback.
+- **`session_cap` selection honors filters** — the cross-encoder pool re-query (`SELECT * WHERE session_id = ?`) ignored the caller's filters; a `role="user"` recall with `session_cap=2` could return assistant messages. Pool messages are now filter-checked before anchor windowing.
+- **`fusion` strategy honors filters** — previously ignored all filter params silently; they now reach both the MC and ER legs (and bundles). Docstring updated: filters apply to all strategies.
+- **`ingest()` returns the turn_id actually stored** — when `_get_last_turn_id` found only rows written by `store()` (`turn_id=''`), ingest stored a fresh uuid internally but returned `''`; `compile_turn` on the returned id then found nothing.
+- **Use-after-close now raises** — `close()` claimed the instance is unusable afterwards but `recall()`/`ingest()` kept working (with sqlite↔vector desync risk). Public data-path methods raise `RuntimeError` after close; `close()` is idempotent.
+- **`stats()` excludes the empty-session bucket** — messages with `session_id=''` were counted as a session (`list_sessions()` already excluded them).
+- **MCP `ingest` surfaces invalid metadata JSON** — invalid/non-object JSON was silently dropped (message stored without metadata, no error); the tool now returns an error via new `parse_metadata_arg()`.
+- **`recall()` rejects empty queries** — empty/whitespace queries on `direct` acted as match-all returning arbitrary rows; all strategies now raise `ValueError("recall requires a non-empty query")`.
+
+### Known limitations (documented, not fixed)
+- `_flush_journal_batched` embedding-cache shadow is not thread-safe under concurrent flushes.
+- A real `session_id` starting with `_no_session_` is misclassified as session-less in cap selection.
+- Timestamp filters compare ISO strings lexically — mixed naive/aware formats compare incorrectly.
+
 ## [0.13.1] — API polish: memory hygiene, lifecycle, wider MCP surface
 
 ### Added

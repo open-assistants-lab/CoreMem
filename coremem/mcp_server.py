@@ -9,6 +9,24 @@ Tool design notes (AI-first):
 
 from __future__ import annotations
 
+import json
+
+
+def parse_metadata_arg(metadata: str) -> tuple[dict, str | None]:
+    """Parse the MCP ingest ``metadata`` JSON string.
+
+    Returns ``(meta, None)`` on success and ``({}, error_message)`` on
+    invalid input so the tool can surface the problem instead of silently
+    storing the message without its metadata.
+    """
+    try:
+        meta = json.loads(metadata) if metadata else {}
+    except (TypeError, ValueError) as exc:
+        return {}, f"error: invalid metadata JSON: {exc}"
+    if not isinstance(meta, dict):
+        return {}, "error: metadata must be a JSON object"
+    return meta, None
+
 
 def format_recall_results(results: list) -> str:
     if not results:
@@ -105,12 +123,9 @@ def run_mcp_server(path: str | None = None) -> None:
         Example: ingest(role="user", content="I prefer dark roast coffee",
         session_id="conv_001")
         """
-        import json as _json
-
-        try:
-            meta = _json.loads(metadata) if metadata else {}
-        except (TypeError, ValueError):
-            meta = {}
+        meta, error = parse_metadata_arg(metadata)
+        if error is not None:
+            return error
         turn_id = core.ingest(
             role, content,
             session_id=session_id or None,

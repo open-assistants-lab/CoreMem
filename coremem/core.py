@@ -323,13 +323,16 @@ class MemoryCore:
         hides storage failures). For bulk ingestion use :meth:`ingest_many`
         (returns message ids) — empty messages are skipped there.
         """
+        self._ensure_open()
         if not content or not content.strip():
             raise ValueError("ingest requires non-empty content")
         if turn_id is None:
             if role == "user":
                 turn_id = str(uuid.uuid4())[:12]
             else:
-                turn_id = self._get_last_turn_id(session_id or "")
+                # _get_last_turn_id can return '' (e.g. rows written by store()),
+                # which must never become the stored/returned turn id.
+                turn_id = self._get_last_turn_id(session_id or "") or str(uuid.uuid4())[:12]
         _ingest_message(
             db=self._db, role=role, content=content,
             session_id=session_id, user_id=user_id, agent_id=agent_id,
@@ -343,6 +346,7 @@ class MemoryCore:
 
         Messages with empty content are skipped.
         """
+        self._ensure_open()
         tid = str(uuid.uuid4())[:12]
         for msg in messages:
             _ingest_message(
@@ -367,6 +371,7 @@ class MemoryCore:
 
         Returns the list of inserted message ids.
         """
+        self._ensure_open()
         rows: list[dict[str, Any]] = []
         ids: list[str] = []
         last_turn: dict[str, str] = {}
@@ -542,6 +547,9 @@ class MemoryCore:
         if _is_preference_query(query):
             return search_messages_preference_union(
                 self, query, limit=limit, per_variant=40,
+                role=role, session_id=session_id, user_id=user_id,
+                agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+                metadata=metadata,
             )
 
         fused: dict[str, tuple[Memory, float]] = {}
@@ -572,6 +580,9 @@ class MemoryCore:
                 return self._select_with_session_cap(
                     query, ranked, limit=limit, cap=session_cap,
                     allocation=allocation,
+                    role=role, session_id=session_id, user_id=user_id,
+                    agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+                    metadata=metadata,
                 )
         return _mmr_diversify(ranked, limit)
 
@@ -583,6 +594,13 @@ class MemoryCore:
         limit: int = 5,
         cap: int = 2,
         allocation: str = "global",
+        role: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        ts_after: str | None = None,
+        ts_before: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
         """Final selection: cross-encoder score every message of the top
         ``limit`` sessions, then fill the top-``limit`` slots.
@@ -624,7 +642,15 @@ class MemoryCore:
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY ts ASC, rowid ASC",
                 (sid,),
             )
-            messages = [_row_to_memory(row) for row in rows]
+            messages = [
+                m for m in (_row_to_memory(row) for row in rows)
+                if _matches_filters(
+                    m,
+                    role=role, session_id=session_id, user_id=user_id,
+                    agent_id=agent_id, ts_after=ts_after,
+                    ts_before=ts_before, metadata=metadata,
+                )
+            ]
             if len(messages) > 60:
                 anchor_id = best[sid][1].memory.id
                 positions = {m.id: index for index, m in enumerate(messages)}
@@ -849,6 +875,7 @@ class MemoryCore:
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Memory]:
+        self._ensure_open()
         where_parts: list[str] = []
         params: list[Any] = []
         if role:
@@ -899,6 +926,7 @@ class MemoryCore:
         )
 
     def store(self, memories: list[Memory]) -> list[str]:
+        self._ensure_open()
         ids = []
         for mem in memories:
             row = {
@@ -917,6 +945,7 @@ class MemoryCore:
         return ids
 
     def count(self) -> int:
+        self._ensure_open()
         rows = self._db.raw_query("SELECT COUNT(*) as c FROM messages")
         return rows[0]["c"] if rows else 0
 
@@ -930,6 +959,7 @@ class MemoryCore:
         ts_before: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        self._ensure_open()
         where_parts: list[str] = []
         params: list[Any] = []
         if role:
@@ -963,9 +993,17 @@ class MemoryCore:
         return (before[0]["c"] - after[0]["c"]) if before and after else 0
 
     def clear(self) -> None:
+        self._ensure_open()
         self._db.raw_query("DELETE FROM messages")
 
     # ── Session inventory, memory hygiene, lifecycle ────────────────────
+
+    def _ensure_open(self) -> None:
+        """Raise if this instance has been closed (use-after-close guard)."""
+        if self._closed:
+            raise RuntimeError(
+                "MemoryCore instance is closed; create a new MemoryCore to reopen"
+            )
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """List all sessions with message counts and last activity.
@@ -973,6 +1011,7 @@ class MemoryCore:
         Returns rows of ``{"session_id", "messages", "last_ts"}`` ordered by
         most recent activity first.
         """
+        self._ensure_open()
         return self._db.raw_query(
             "SELECT session_id, COUNT(*) as messages, MAX(ts) as last_ts "
             "FROM messages WHERE session_id IS NOT NULL AND session_id != '' "
@@ -981,6 +1020,7 @@ class MemoryCore:
 
     def delete_messages(self, message_ids: list[str]) -> int:
         """Delete specific messages by id. Returns the number deleted."""
+        self._ensure_open()
         if not message_ids:
             return 0
         placeholders = ",".join("?" * len(message_ids))
@@ -996,8 +1036,10 @@ class MemoryCore:
 
     def stats(self) -> dict[str, Any]:
         """Return basic memory statistics for health checks and agent tooling."""
+        self._ensure_open()
         rows = self._db.raw_query(
-            "SELECT COUNT(*) as messages, COUNT(DISTINCT session_id) as sessions, "
+            "SELECT COUNT(*) as messages, "
+            "COUNT(DISTINCT CASE WHEN session_id != '' THEN session_id END) as sessions, "
             "COUNT(DISTINCT user_id) as users, MAX(ts) as last_ts "
             "FROM messages"
         )
@@ -1058,6 +1100,7 @@ class MemoryCore:
         *,
         force: bool = False,
     ) -> AgentJournalCompileResult | None:
+        self._ensure_open()
         rows = self._turn_rows(turn_id)
         if not rows:
             return None
@@ -1270,7 +1313,7 @@ class MemoryCore:
             - "fusion": RRF fusion of direct + episodic, zero LLM
 
         Set bundles=True to return SessionBundle objects with surrounding context.
-        Filter params (role, session_id, etc.) apply to direct/episodic/expanded.
+        Filter params (role, session_id, etc.) apply to all strategies.
         Bundles use a 4k-char total context budget with evidence-first message
         ordering (retrieved anchors lead) — validated on the 500-question S
         answer eval (LLM answer + judge): 4k bundles scored 0.678 vs 0.608 at
@@ -1280,6 +1323,9 @@ class MemoryCore:
         recovers answers that live in a second message of a found session
         (+0.048 answer accuracy on S at cap=2, at the cost of session recall).
         """
+        if not query or not query.strip():
+            raise ValueError("recall requires a non-empty query")
+        self._ensure_open()
         if strategy == "direct":
             results = self._search_messages(
                 query, limit=limit, role=role, session_id=session_id,
@@ -1305,7 +1351,12 @@ class MemoryCore:
             return results
 
         if strategy == "fusion":
-            results = self._search_with_fusion(query, limit=limit)
+            results = self._search_with_fusion(
+                query, limit=limit,
+                role=role, session_id=session_id, user_id=user_id,
+                agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+                metadata=metadata,
+            )
             if bundles:
                 return self._reconstruct_sessions(
                     query, session_limit=limit, primary_results=results,
@@ -1334,14 +1385,28 @@ class MemoryCore:
         query: str,
         limit: int = 5,
         per_query_limit: int = 20,
+        role: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        ts_after: str | None = None,
+        ts_before: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
         if limit <= 0:
             return []
 
-        mc_results = self._search_messages(query, limit=per_query_limit)
+        mc_results = self._search_messages(
+            query, limit=per_query_limit, role=role, session_id=session_id,
+            user_id=user_id, agent_id=agent_id, ts_after=ts_after,
+            ts_before=ts_before, metadata=metadata,
+        )
         er_results = self._search_messages_decomposed(
             query, limit=per_query_limit, per_query_limit=per_query_limit,
             use_cross_encoder=True,
+            role=role, session_id=session_id, user_id=user_id,
+            agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+            metadata=metadata,
         )
 
         fused: dict[str, tuple[Memory, float]] = {}

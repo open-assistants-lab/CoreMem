@@ -192,6 +192,13 @@ def search_messages_preference_union(
     *,
     limit: int = 5,
     per_variant: int = 10,
+    role: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    ts_after: str | None = None,
+    ts_before: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> list[SearchResult]:
     """Preference queries: per-variant top-k UNION instead of RRF fusion.
 
@@ -201,17 +208,28 @@ def search_messages_preference_union(
     union collects the top-k of every variant, then lets the cross-encoder
     decide. Non-preference queries fall back to the baseline decomposed
     search.
+
+    Filter params are forwarded to every underlying search so scoped recalls
+    (e.g. ``session_id=...``) never leak messages across sessions.
     """
     if not _is_preference_query(query):
         return core._search_messages_decomposed(
             query, limit=limit, per_query_limit=max(20, limit * 4),
             use_cross_encoder=True,
+            role=role, session_id=session_id, user_id=user_id,
+            agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+            metadata=metadata,
         )
     from coremem.query import decompose_queries
 
     collected: dict[str, SearchResult] = {}
     for variant in decompose_queries(query):
-        for result in core._search_messages(variant, limit=per_variant):
+        for result in core._search_messages(
+            variant, limit=per_variant,
+            role=role, session_id=session_id, user_id=user_id,
+            agent_id=agent_id, ts_after=ts_after, ts_before=ts_before,
+            metadata=metadata,
+        ):
             memory_id = result.memory.id or ""
             if memory_id and memory_id not in collected:
                 collected[memory_id] = result

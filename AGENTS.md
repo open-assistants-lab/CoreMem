@@ -156,5 +156,5 @@ uv run scripts/eval_combined_s.py data/longmemeval_s_cleaned.json \
 ## Tests
 
 ```bash
-uv run python3 -m pytest tests/ -q   # 142 pass
+uv run python3 -m pytest tests/ -q   # 175 pass
 ```
