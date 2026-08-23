@@ -1,5 +1,8 @@
 # CoreMem
 
+[![PyPI version](https://img.shields.io/pypi/v/coremem)](https://pypi.org/project/coremem/)
+[![Downloads](https://img.shields.io/pypi/dm/coremem)](https://pypi.org/project/coremem/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 > **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. The default `recall(strategy="episodic")` path scores **99.9% session recall@5 on LongMemEval Oracle (500 questions)** and **95.0% on LongMemEval S (500 questions, ~48 sessions each)** with zero LLM calls.
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with HybridDB (SQLite + FTS5 + ChromaDB) + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.

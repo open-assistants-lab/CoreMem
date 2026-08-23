@@ -3,6 +3,10 @@ name = "coremem"
 version = "0.13.2"
 description = "Zero-LLM memory for AI agents — semantic search, cross-encoder reranking, and deterministic heuristics"
 readme = "README.md"
+[project.urls]
+Homepage = "https://openassistants.org"
+Source = "https://github.com/open-assistants-lab/CoreMem"
+
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
