@@ -158,3 +158,16 @@ uv run scripts/eval_combined_s.py data/longmemeval_s_cleaned.json \
 ```bash
 uv run python3 -m pytest tests/ -q   # 175 pass
 ```
+
+## Release
+
+```bash
+# 1. Bump version in pyproject.toml + add a CHANGELOG.md entry
+# 2. Sync lockfile (should only change the coremem version) and build
+uv lock && uv build
+# 3. Publish — PYPI_TOKEN lives in .env as `export PYPI_TOKEN=pypi-...`
+uv publish --token "$(grep '^export PYPI_TOKEN=' .env | sed 's/^export PYPI_TOKEN=//' | tr -d '\"')"
+```
+
+Keep `[project.urls]` and all other tables at the END of their TOML section —
+a table header placed mid-`[project]` silently swallows every field below it.

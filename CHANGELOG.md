@@ -5,6 +5,7 @@
 E2E bug hunt (discovery → TDD fix, 12 regression tests in `tests/test_bughunt_fixes.py`, full suite 175 passed). All retrieval-path filters are now honored by every strategy; eval results are unaffected (eval harnesses call these paths without filters).
 
 ### Fixed
+- **Packaging: `[project.urls]` table placement broke editable installs** — the urls table was inserted mid-`[project]`, swallowing everything below it (`requires-python`, `license`, `authors`, `dependencies`) per TOML semantics; fresh `pip install -e .` failed with `TypeError: URL 'authors' of field 'project.urls' must be a string`. Published wheels were unaffected (non-editable builds validated differently); table moved after the project fields and the lockfile was regenerated cleanly.
 - **Preference queries no longer bypass recall filters** — "what do i like"-style queries routed through the preference union silently dropped `role`/`session_id`/`ts_*`/`metadata` filters and leaked other sessions' messages (results and bundles). Filters now forward through the union path and its non-preference fallback.
 - **`session_cap` selection honors filters** — the cross-encoder pool re-query (`SELECT * WHERE session_id = ?`) ignored the caller's filters; a `role="user"` recall with `session_cap=2` could return assistant messages. Pool messages are now filter-checked before anchor windowing.
 - **`fusion` strategy honors filters** — previously ignored all filter params silently; they now reach both the MC and ER legs (and bundles). Docstring updated: filters apply to all strategies.
