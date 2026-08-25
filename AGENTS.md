@@ -93,6 +93,7 @@ It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations
 - **Session-cap selection** (500/500, eval modes `memorycore_episodic_reranked_v3` (global) / `v4` (anchor), L-6): after the global CE rerank, every message of the top-k sessions is CE-scored and the final top-k may hold up to 2 messages per session instead of the one-per-session MMR cap. Full S-scale: **message_recall@5 +0.124 (0.580 → 0.704), message_hit +0.086 (0.722 → 0.808)** at the cost of **session_recall@5 −0.058 (0.893 → 0.835)** — a second message of the top session displaces the 5th session (90/500 rows lose an expected session; 427/500 rows cover fewer distinct sessions). The anchor allocation (v4) is statistically identical to global (v3). The session loss is structural to cap=2 at k=5 — any two-message-per-session scheme covers ≤4 sessions. On oracle-style corpora (2 sessions/question) cap=2 would be a pure win (both sessions already covered); the S setup (48 sessions) stresses diversity. Bundle evidence hit is flat (−0.01). **Not folded into the default; opt-in via `recall(session_cap=2)`.**
 - **Batch ingest** (`MemoryCore.ingest_many`, single journal flush + batched all-MiniLM encoding): 550 messages 49.9 s → 11.5 s (4.3×) with identical retrieval; eval harnesses (`build_memorycore`, `eval_combined_s._ingest_instance`, `eval_graph_s._ingest_instance`) all use it. Full S-scale eval dropped from ~2.2 h to ~23 min (3 shards).
 - **Answer eval (LLM answer → LLM judge) on S** (500/500, `scripts/eval_answer_longmemeval.py`, deepseek-v4-flash for both roles, evidence-first bundle formatting): accuracy 0.678 `episodic_4k_reranked` > 0.656 `episodic_cap2` > 0.642 `llm_expansion` > 0.608 `memorycore_episodic` (the former default) > 0.528 `memorycore`. Abstention accuracy 0.867 for the top modes. Findings folded into the default: **bundle budget 16k → 4k** and **evidence-first bundle ordering** (anchor messages lead) — 4k bundles answered correctly on a question where the identical 15k context failed (needle-in-haystack); cap=2 adds +0.048 answer accuracy but stays opt-in (`session_cap`) due to the session-recall cost.
+- **hybriddb 0.5.6+ bugfixes are retrieval-neutral** (v0.13.3, A/B on the 20-question subset, `memorycore_episodic_reranked` k=5): per-question results byte-identical between 0.5.5 and 0.5.8 (0/34 metric rows differ; ingest+search time and disk identical). The 0.5.6 fixes (chronological last-op-wins journal, FTS5 backfill, TEXT-PK insert rowid semantics, `read_query` authorizer, 13× journal write path) change only failure modes CoreMem does not hit (delete-then-reinsert of a reused PK, `auto_rebuild_chroma=True` HNSW corruption detection, queries with `%`/`_`). **Floor raised to `hybriddb>=0.5.8`** so locked environments resolve the fixed journal path.
 
 ## Public API
 
@@ -122,6 +123,7 @@ results = core.recall(query, role="user", session_id="abc", ts_after="2024-01-01
 
 - **No verbatim compiler** — removed; only LLM compiler for daily journals
 - **Daily pages use hybriddb timestamps** — `daily/{actual_date}.md`, not `datetime.now(UTC)`
+- **hybriddb floor `>=0.5.8`** — pinned above the 0.5.6 bugfix release; validated retrieval-neutral by A/B (see confirmed). `coremem.__version__` must match `pyproject.toml` exactly (0.13.3 fixed a 0.13.1/0.13.2 drift, same class as hybriddb 0.5.8).
 - **`DEFAULT_AGENT_JOURNAL_MODEL`** = `"openai:gpt-4o-mini"` (ollama-cloud not in library default)
 - **Per-question haystack** — canonical LongMemEval setup
 - **Resume/checkpoint** via sidecar `{output}.checkpoint.json`
@@ -163,6 +165,8 @@ uv run python3 -m pytest tests/ -q   # 175 pass
 
 ```bash
 # 1. Bump version in pyproject.toml + add a CHANGELOG.md entry
+#    Also bump `__version__` in coremem/__init__.py to the SAME version —
+#    a stale string there ships in the wheel (0.13.2 published 0.13.1).
 # 2. Sync lockfile (should only change the coremem version) and build
 uv lock && uv build
 # 3. Publish — PYPI_TOKEN lives in .env as `export PYPI_TOKEN=pypi-...`
