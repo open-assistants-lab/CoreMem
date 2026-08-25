@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.13.3] — hybriddb 0.5.8 floor, version-string consistency
+
+Dependency + packaging hygiene release, validated by an A/B eval on the 20-question
+LongMemEval subset (hybriddb 0.5.5 vs 0.5.8, `memorycore_episodic_reranked`, k=5):
+per-question results are byte-identical (0/34 metric rows differ) — the hybriddb
+0.5.6+ bugfixes (journal ordering, FTS5 backfill, custom-PK support, read_query
+hardening) do not change CoreMem retrieval behavior.
+
+### Fixed
+- **`coremem.__version__` drift** — `__init__.py` still reported `0.13.1` while the
+  package was 0.13.2; same version-string consistency bug class hybriddb fixed in
+  0.5.8. Now matches `pyproject.toml`.
+
+### Changed
+- **`hybriddb` floor raised `>=0.5.5` → `>=0.5.8`** — ensures locked/older
+  environments resolve the fixed journal write path (13× faster `insert_batch`,
+  chronological last-op-wins journal ordering, TEXT-PK insert rowid semantics)
+  instead of only fresh installs. Full suite 174 passed, 1 skipped (mcp extra,
+  pre-existing) on 0.5.8.
+
 ## [0.13.2] — Filter plumbing fixes from E2E bug hunt, lifecycle guards
 
 E2E bug hunt (discovery → TDD fix, 12 regression tests in `tests/test_bughunt_fixes.py`, full suite 175 passed). All retrieval-path filters are now honored by every strategy; eval results are unaffected (eval harnesses call these paths without filters).
