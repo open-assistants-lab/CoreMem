@@ -120,3 +120,34 @@ Artifacts:
 Cost note: ~19–35 sessions/question (~16K tokens haystack) — similar ingest
 profile to LongMemEval S per question; full 1,982-question run is the heaviest
 eval available in-repo. Use the stratified-30 for iteration.
+
+## LoCoMo baseline (memorycore_episodic_reranked, k=5, stratified-30)
+
+Overall: session_recall@5 0.722, message_recall@5 0.25, session_hit@5 0.792,
+session_mrr 0.581, empty_retrieval_rate 0.20 (abstention = 6/30, correct to
+return empty), abstention_false_positive_rate 0.0.
+
+Per type (n=6 each):
+
+| type | sess_rec | msg_rec | sess_hit | msg_hit | bundle_msg_hit |
+|---|---:|---:|---:|---:|---:|
+| single-session-user | 1.000 | 0.333 | 1.000 | 0.333 | 0.833 |
+| temporal-reasoning | 0.833 | 0.667 | 0.833 | 0.667 | 0.667 |
+| open-domain | 0.583 | 0.000 | 0.667 | 0.000 | 0.500 |
+| multi-session | 0.472 | 0.000 | 0.667 | 0.000 | 0.500 |
+| abstention | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+
+Key observations (n=6/type — small, directional only):
+- Session-level retrieval is strong (0.72 overall); message-level is weak (0.25).
+  Same pattern as LongMemEval S (session 0.95 / message 0.62) but LoCoMo's
+  evidence granularity (single turn inside a ~22-turn session) is harder.
+- open-domain questions (commonsense/world knowledge, e.g. "is Melanie an ally
+  to the transgender community?") have no lexical overlap with the answer turn —
+  message recall 0.0 despite session hit 0.667: the right SESSION is found but
+  not the exact turn. These are the retrieval-hardest questions.
+- multi-session: bundle evidence hit 0.50 — bundles recover the answer turn
+  even when top-k messages miss it (bundle_message_recall not stored in this
+  jsonl; hit only).
+- abstention 0.0 = correct (empty expected).
+
+Files: /tmp/locomo_baseline2.json (+ .jsonl checkpoint), root /tmp/coremem-locomo-baseline2
