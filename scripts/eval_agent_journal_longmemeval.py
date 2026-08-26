@@ -37,7 +37,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -393,6 +393,10 @@ def run_eval(
                         path=str(instance_root / "hybrid"),
                         llm_provider=llm_provider,
                     )
+                core_factaug = _maybe_build_factaug_core(
+                    instance_root, instance, llm_provider, reuse_instances,
+                    active_modes,
+                )
                 if progress:
                     print(f"[{index + 1}/{total}] {instance.question_id}: running", flush=True)
                 question_start = time.time()
@@ -400,7 +404,7 @@ def run_eval(
 
                 new_rows = _score_question(
                     core, instance, truth,
-                    active_modes=active_modes, k=k,
+                    active_modes=active_modes, k=k, core_factaug=core_factaug,
                 )
                 question_elapsed = time.time() - question_start
                 instance_disk_mb = _dir_size_mb(instance_root)
@@ -450,6 +454,7 @@ def _score_question(
     *,
     active_modes: Sequence[str],
     k: int,
+    core_factaug: MemoryCore | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Score one question across all active modes. Returns {mode: row}."""
     new_rows: dict[str, dict[str, Any]] = {}
@@ -466,6 +471,19 @@ def _score_question(
             new_rows[m] = _score_instance_episodic(
                 core, instance, truth, k=k, use_cross_encoder=True, max_context_chars=4_000,
             )
+        elif m == "memorycore_episodic_reranked_factaug":
+            if core_factaug is None:
+                # No fact-augmented core available (e.g. no LLM provider):
+                # score against the stock core so the row exists (tagged mode).
+                row = _score_instance_episodic(
+                    core, instance, truth, k=k, use_cross_encoder=True,
+                )
+            else:
+                row = _score_instance_episodic(
+                    core_factaug, instance, truth, k=k, use_cross_encoder=True,
+                )
+            row["mode"] = m
+            new_rows[m] = row
         elif m == "memorycore_fusion":
             new_rows[m] = _score_instance_fusion(core, instance, truth, k=k)
         elif m == "memorycore_traversal_v2":
@@ -540,13 +558,17 @@ def _run_streaming(
                 path=str(instance_root / "hybrid"),
                 llm_provider=llm_provider,
             )
+        core_factaug = _maybe_build_factaug_core(
+            instance_root, instance, llm_provider, reuse_instances,
+            active_modes,
+        )
         if progress:
             print(f"[{index + 1}] {instance.question_id}: running", flush=True)
 
         question_start = time.time()
         new_rows = _score_question(
             core, instance, truth,
-            active_modes=active_modes, k=k,
+            active_modes=active_modes, k=k, core_factaug=core_factaug,
         )
         question_elapsed = time.time() - question_start
         instance_disk_mb = _dir_size_mb(instance_root)
@@ -1701,6 +1723,40 @@ def _instance_dir(root: Path, index: int, instance: PreparedInstance) -> Path:
     return root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
 
 
+def _maybe_build_factaug_core(
+    instance_root: Path,
+    instance: PreparedInstance,
+    llm_provider: Any,
+    reuse_instances: bool,
+    active_modes: Sequence[str],
+) -> MemoryCore | None:
+    """Build/reuse the fact-augmented core when the factaug mode is active.
+
+    The factaug store lives at ``{instance_root}/fa/hybrid`` so the stock and
+    fact-augmented variants coexist without clobbering each other. Requires an
+    LLM provider for fact extraction; without one, falls back to None (the
+    caller scores the stock core)."""
+    if "memorycore_episodic_reranked_factaug" not in active_modes:
+        return None
+    fa_root = instance_root / "fa"
+    if reuse_instances and (fa_root / "hybrid").exists():
+        return MemoryCore(
+            path=str(fa_root / "hybrid"),
+            llm_provider=llm_provider,
+            fact_augment=True,
+        )
+    if llm_provider is None:
+        return None
+    if fa_root.exists():
+        _safe_reset_root(fa_root)
+    return build_memorycore(
+        fa_root,
+        instances=(instance,),
+        llm_provider=llm_provider,
+        fact_augment=True,
+    )
+
+
 def _safe_reset_root(root: Path) -> None:
     resolved = root.resolve()
     if resolved in {Path.cwd().resolve(), Path.home().resolve(), Path("/").resolve()}:
@@ -1749,7 +1805,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")
