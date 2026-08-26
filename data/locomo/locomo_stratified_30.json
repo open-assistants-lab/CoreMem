@@ -2,6 +2,7 @@
  {
   "question_id": "locomo_conv-26_q152_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "What did Caroline realize after her charity race?",
   "answer": "",
   "haystack_sessions": [
@@ -2188,6 +2189,7 @@
  {
   "question_id": "locomo_conv-26_q153_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "What are Melanie's plans for the summer with respect to adoption?",
   "answer": "",
   "haystack_sessions": [
@@ -4374,6 +4376,7 @@
  {
   "question_id": "locomo_conv-26_q154_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "What type of individuals does the adoption agency Melanie is considering support?",
   "answer": "",
   "haystack_sessions": [
@@ -6560,6 +6563,7 @@
  {
   "question_id": "locomo_conv-26_q155_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "Why did Melanie choose the adoption agency?",
   "answer": "",
   "haystack_sessions": [
@@ -8746,6 +8750,7 @@
  {
   "question_id": "locomo_conv-26_q156_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "What is Melanie excited about in her adoption process?",
   "answer": "",
   "haystack_sessions": [
@@ -10932,6 +10937,7 @@
  {
   "question_id": "locomo_conv-26_q157_abs",
   "question_type": "abstention",
+  "conversation_id": "locomo_conv-26",
   "question": "What does Melanie's necklace symbolize?",
   "answer": "",
   "haystack_sessions": [
@@ -13118,6 +13124,7 @@
  {
   "question_id": "locomo_conv-26_q003",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "What did Caroline research?",
   "answer": "Adoption agencies",
   "haystack_sessions": [
@@ -15304,6 +15311,7 @@
  {
   "question_id": "locomo_conv-26_q004",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "What is Caroline's identity?",
   "answer": "Transgender woman",
   "haystack_sessions": [
@@ -17490,6 +17498,7 @@
  {
   "question_id": "locomo_conv-26_q007",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "What is Caroline's relationship status?",
   "answer": "Single",
   "haystack_sessions": [
@@ -19677,6 +19686,7 @@
  {
   "question_id": "locomo_conv-26_q011",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "Where did Caroline move from 4 years ago?",
   "answer": "Sweden",
   "haystack_sessions": [
@@ -21864,6 +21874,7 @@
  {
   "question_id": "locomo_conv-26_q013",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "What career path has Caroline decided to persue?",
   "answer": "counseling or mental health for Transgender people",
   "haystack_sessions": [
@@ -24051,6 +24062,7 @@
  {
   "question_id": "locomo_conv-26_q015",
   "question_type": "multi-session",
+  "conversation_id": "locomo_conv-26",
   "question": "What activities does Melanie partake in?",
   "answer": "pottery, camping, painting, swimming",
   "haystack_sessions": [
@@ -26239,6 +26251,7 @@
  {
   "question_id": "locomo_conv-26_q002",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "What fields would Caroline be likely to pursue in her educaton?",
   "answer": "Psychology, counseling certification",
   "haystack_sessions": [
@@ -28425,6 +28438,7 @@
  {
   "question_id": "locomo_conv-26_q014",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "Would Caroline still want to pursue counseling as a career if she hadn't received support growing up?",
   "answer": "Likely no",
   "haystack_sessions": [
@@ -30612,6 +30626,7 @@
  {
   "question_id": "locomo_conv-26_q022",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "Would Caroline likely have Dr. Seuss books on her bookshelf?",
   "answer": "Yes, since she collects classic children's books",
   "haystack_sessions": [
@@ -32798,6 +32813,7 @@
  {
   "question_id": "locomo_conv-26_q027",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "Would Caroline pursue writing as a career option?",
   "answer": "LIkely no; though she likes reading, she wants to be a counselor",
   "haystack_sessions": [
@@ -34984,6 +35000,7 @@
  {
   "question_id": "locomo_conv-26_q042",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "Would Melanie be more interested in going to a national park or a theme park?",
   "answer": "National park; she likes the outdoors",
   "haystack_sessions": [
@@ -37170,6 +37187,7 @@
  {
   "question_id": "locomo_conv-26_q050",
   "question_type": "open-domain",
+  "conversation_id": "locomo_conv-26",
   "question": "What would Caroline's political leaning likely be?",
   "answer": "Liberal",
   "haystack_sessions": [
@@ -39356,6 +39374,7 @@
  {
   "question_id": "locomo_conv-26_q082",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "What did the charity race raise awareness for?",
   "answer": "mental health",
   "haystack_sessions": [
@@ -41542,6 +41561,7 @@
  {
   "question_id": "locomo_conv-26_q083",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "What did Melanie realize after the charity race?",
   "answer": "self-care is important",
   "haystack_sessions": [
@@ -43728,6 +43748,7 @@
  {
   "question_id": "locomo_conv-26_q084",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "How does Melanie prioritize self-care?",
   "answer": "by carving out some me-time each day for activities like running, reading, or playing the violin",
   "haystack_sessions": [
@@ -45914,6 +45935,7 @@
  {
   "question_id": "locomo_conv-26_q085",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "What are Caroline's plans for the summer?",
   "answer": "researching adoption agencies",
   "haystack_sessions": [
@@ -48100,6 +48122,7 @@
  {
   "question_id": "locomo_conv-26_q086",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "What type of individuals does the adoption agency Caroline is considering support?",
   "answer": "LGBTQ+ individuals",
   "haystack_sessions": [
@@ -50286,6 +50309,7 @@
  {
   "question_id": "locomo_conv-26_q087",
   "question_type": "single-session-user",
+  "conversation_id": "locomo_conv-26",
   "question": "Why did Caroline choose the adoption agency?",
   "answer": "because of their inclusivity and support for LGBTQ+ individuals",
   "haystack_sessions": [
@@ -52472,6 +52496,7 @@
  {
   "question_id": "locomo_conv-26_q000",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When did Caroline go to the LGBTQ support group?",
   "answer": "7 May 2023",
   "haystack_sessions": [
@@ -54658,6 +54683,7 @@
  {
   "question_id": "locomo_conv-26_q001",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When did Melanie paint a sunrise?",
   "answer": "2022",
   "haystack_sessions": [
@@ -56844,6 +56870,7 @@
  {
   "question_id": "locomo_conv-26_q005",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When did Melanie run a charity race?",
   "answer": "The sunday before 25 May 2023",
   "haystack_sessions": [
@@ -59030,6 +59057,7 @@
  {
   "question_id": "locomo_conv-26_q006",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When is Melanie planning on going camping?",
   "answer": "June 2023",
   "haystack_sessions": [
@@ -61216,6 +61244,7 @@
  {
   "question_id": "locomo_conv-26_q008",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When did Caroline give a speech at a school?",
   "answer": "The week before 9 June 2023",
   "haystack_sessions": [
@@ -63402,6 +63431,7 @@
  {
   "question_id": "locomo_conv-26_q009",
   "question_type": "temporal-reasoning",
+  "conversation_id": "locomo_conv-26",
   "question": "When did Caroline meet up with her friends, family, and mentors?",
   "answer": "The week before 9 June 2023",
   "haystack_sessions": [

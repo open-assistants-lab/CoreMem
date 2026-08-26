@@ -28,3 +28,4 @@ worktrees/
 # Firecrawl CLI cache
 .firecrawl/
 data/instances_s500/
+data/instances_locomo/

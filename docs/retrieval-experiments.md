@@ -151,3 +151,37 @@ Key observations (n=6/type — small, directional only):
 - abstention 0.0 = correct (empty expected).
 
 Files: /tmp/locomo_baseline2.json (+ .jsonl checkpoint), root /tmp/coremem-locomo-baseline2
+
+## LoCoMo full baseline + per-conversation cache (done)
+
+Per-conversation HybridDB cache at `data/instances_locomo/` (gitignored):
+10 stores, one per conversation, **47 MB total** (vs ~5.8 GB if per-question).
+Built in one pass while running the full 1,982-question baseline.
+
+Harness change (eval_agent_journal_longmemeval.py):
+- instances may carry `conversation_id`; when present, session/turn/message ids
+  derive from it (stable across questions of the conversation) and the
+  instance dir is `instances/{conversation_id}` — all questions share one
+  ingested store. LongMemEval S (no conversation_id) is unchanged.
+- `_turn_id` accepts str keys; cleanup skips shared conversation dirs.
+
+Full LoCoMo baseline — memorycore_episodic_reranked k=5, n=1982:
+
+| type | n | sess_rec | msg_rec | sess_hit | msg_hit | bndl_rec | bndl_hit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-session-user | 841 | 0.867 | 0.377 | 0.868 | 0.386 | 0.733 | 0.740 |
+| temporal-reasoning | 321 | 0.780 | 0.424 | 0.798 | 0.452 | 0.700 | 0.723 |
+| multi-session | 282 | 0.435 | 0.117 | 0.741 | 0.252 | 0.343 | 0.649 |
+| open-domain | 92 | 0.430 | 0.091 | 0.565 | 0.120 | 0.332 | 0.478 |
+| abstention | 446 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| **overall** | 1982 | 0.744 | 0.322 | 0.812 | 0.359 | — | — |
+
+Overall: session_recall@5 0.744, message_recall@5 0.322, session_hit@5 0.812,
+empty_retrieval_rate 0.225 (= abstention 446/1982, correct),
+abstention_false_positive_rate 0.0.
+
+Reuse check: same command with --reuse-instances --resume ran 20 questions in
+~10s (model load dominated) with zero re-ingest; disk unchanged (47 MB).
+
+Results: results/eval_locomo_full_baseline.json + .jsonl (1982 rows), log in
+results/eval_locomo_full_baseline.log.
