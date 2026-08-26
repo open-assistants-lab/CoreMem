@@ -185,3 +185,28 @@ Reuse check: same command with --reuse-instances --resume ran 20 questions in
 
 Results: results/eval_locomo_full_baseline.json + .jsonl (1982 rows), log in
 results/eval_locomo_full_baseline.log.
+
+## Lever 2 — Fact-augmented key expansion: NEUTRAL on LongMemEval S (concluded)
+
+Answer eval (stratified-56, gpt-oss-120b reader/judge): factaug 0.554 vs control
+0.571 — net -1 question (multi-session 0.38→0.25; +1 ss-pref, -2 total). Not a win.
+
+Retrieval eval (same 56 questions, harness `memorycore_episodic_reranked_factaug`
+mode added to eval_agent_journal_longmemeval.py):
+- session_recall@5 0.964, message_recall@5 0.526 — **identical** to stock control
+- 13/56 questions retrieve different message ids (embeddings genuinely differ)
+- per-type message recall delta: **0.000 across all 6 types**
+
+Root cause (verified by direct A/B on one question): factaug changes the RAW
+candidate pool (decomposed, pre-rerank), but the cross-encoder reranker restores
+the identical top-5 — the CE layer is the deciding component and is robust to
+the candidate-pool perturbation. Paper's +9.4% recall@k did not transfer.
+
+Caveat: paper used Stella V5 dense retriever WITHOUT a reranker at session/round
+granularity; CoreMem uses all-MiniLM + CE at message granularity. The CE
+reranker appears to absorb the fact-augmentation signal.
+
+VERDICT: factaug does not help CoreMem's default episodic pipeline on
+LongMemEval S. Not folded in. (The LoCoMo run is the remaining test — its
+open-domain type has near-zero lexical overlap, where fact bridging might
+survive reranking. Per-conversation cache makes that run cheap.)
