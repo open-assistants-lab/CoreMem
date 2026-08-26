@@ -5,9 +5,12 @@ Single HybridDB instance. Messages stored with turn_id for AgentJournal compilat
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -35,6 +38,8 @@ from coremem.types import Memory, SearchResult, SessionBundle
 
 # ── Batched embedding (ingest path) ────────────────────────────────────────
 #
+logger = logging.getLogger("coremem.core")
+
 # HybridDB's journal flush embeds one document at a time through Chroma's
 # per-call embedding function (~75 ms/doc on CPU). Batched SentenceTransformer
 # encoding is ~15x faster with the same all-MiniLM-L6-v2 model. We prewarm a
@@ -69,17 +74,22 @@ def _batch_embed_texts(texts: list[str], batch_size: int = 128) -> list[list[flo
     return [[float(v) for v in row] for row in vectors]
 
 
-def _flush_journal_batched(db: HybridDB, batch_limit: int = 5000) -> int:
+def _flush_journal_batched(
+    db: HybridDB, batch_limit: int = 5000, augment: dict[str, str] | None = None,
+) -> int:
     """Process HybridDB's pending journal with batched embedding.
 
-    Returns the number of journal entries processed. Falls back to the
-    stock per-document embedding path if batch encoding is unavailable.
+    ``augment`` optionally maps journal row ids to an alternative document
+    text to encode (fact-augmented key expansion): the vector stored in the
+    index comes from the augmented text while SQLite keeps the verbatim
+    content. Falls back to the stock per-document embedding path if batch
+    encoding is unavailable.
     """
     with db._connect() as cur:
         pending = [
             dict(row)
             for row in cur.execute(
-                "SELECT id, data FROM _journal WHERE status = 'pending' "
+                "SELECT id, row_id, app_table, data FROM _journal WHERE status = 'pending' "
                 "AND op IN ('add', 'update') LIMIT ?",
                 (batch_limit,),
             ).fetchall()
@@ -87,8 +97,21 @@ def _flush_journal_batched(db: HybridDB, batch_limit: int = 5000) -> int:
     if not pending:
         return db.process_journal(limit=batch_limit)
     try:
+        # Encode the augmented text when present; cache under the ORIGINAL doc
+        # text because the shadowed _get_embedding receives journal data.
+        # Augment keys are app-row rowids (str), applied to 'messages' rows
+        # only. Edge case: two entries with byte-identical content but
+        # different facts share one cache key — last writer wins.
         docs = [entry["data"] or "" for entry in pending]
-        vectors = _batch_embed_texts(docs)
+        texts_to_encode = [
+            (
+                (augment.get(str(entry["row_id"])) or entry["data"] or "")
+                if (augment and entry["app_table"] == "messages")
+                else entry["data"] or ""
+            )
+            for entry in pending
+        ] if augment else docs
+        vectors = _batch_embed_texts(texts_to_encode)
         cache = {doc: vec for doc, vec in zip(docs, vectors)}
     except Exception:
         return db.process_journal(limit=batch_limit)
@@ -236,10 +259,13 @@ class MemoryCore:
         path: str,
         llm_provider: LLMProvider | None = None,
         agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
+        fact_augment: bool = False,
     ):
         self._db = HybridDB(path=path)
         self._heuristics = SearchHeuristics()
         self._llm_provider = llm_provider
+        self._fact_augment = fact_augment
+        self._fact_augment_warned = False
         self._ensure_tables()
         workspace_root = Path(path).resolve().parent
         self._agent_journal_root = workspace_root / "agent_journal"
@@ -295,6 +321,14 @@ class MemoryCore:
         self._db.raw_query(
             "CREATE INDEX IF NOT EXISTS idx_journal_records_session ON journal_records(session_id)"
         )
+        # Fact-augmented key expansion side table (LongMemEval §5.3): LLM-extracted
+        # user facts per message, prepended to the encoded document at flush time.
+        # SQLite content stays verbatim; only the embedding input changes.
+        if "message_facts" not in self._db.list_tables():
+            self._db.create_table("message_facts", {
+                "id": "TEXT PRIMARY KEY",
+                "facts": "TEXT NOT NULL",
+            })
 
     @property
     def db(self) -> HybridDB:
@@ -416,8 +450,103 @@ class MemoryCore:
         if not rows:
             return []
         self._db.insert_batch("messages", rows, sync=False)
-        _flush_journal_batched(self._db)
+        augment = None
+        if self._fact_augment:
+            augment = self._extract_and_store_facts(rows)
+            if augment is None and not self._fact_augment_warned:
+                self._fact_augment_warned = True
+                logger.warning(
+                    "fact_augment=True but no usable LLM provider; "
+                    "ingesting without fact augmentation"
+                )
+        _flush_journal_batched(self._db, augment=augment)
         return ids
+
+    _FACT_EXTRACT_CHUNK = 20  # messages per LLM call
+
+    def _extract_and_store_facts(self, rows: list[dict[str, Any]]) -> dict[str, str] | None:
+        """Extract durable user facts from user-role rows via the LLM provider.
+
+        Returns ``{app_row_rowid: augmented_text}`` ready for flush-time
+        augmentation, or ``None`` when no provider is available. Facts are
+        persisted to the ``message_facts`` side table so re-flushes stay
+        consistent.
+        """
+        provider = self._llm_provider
+        if provider is None:
+            return None
+        user_rows = [row for row in rows if row.get("role") == "user"]
+        if not user_rows:
+            return {}
+        all_facts: dict[str, str] = {}
+        chunk_size = self._FACT_EXTRACT_CHUNK
+        try:
+            for start in range(0, len(user_rows), chunk_size):
+                chunk = [
+                    {"id": row["id"], "content": row["content"]}
+                    for row in user_rows[start:start + chunk_size]
+                ]
+                prompt = (
+                    "You will be given messages from a human user to an AI assistant. For each "
+                    "message, extract all personal information, life events, experience, and "
+                    "preferences stated in it. Include details such as life events, preferences, "
+                    "specific numbers, locations, names, or dates. State each piece of "
+                    "information as a simple standalone sentence. Minimize coreference — "
+                    "replace pronouns with actual entities. If a message contains no "
+                    "extractable personal facts, use an empty list for it.\n\n"
+                    f"Messages (JSON list of {{\"id\", \"content\"}}):\n{json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    "Return ONLY a JSON object mapping each id to an array of fact strings."
+                )
+                response = asyncio.run(provider.chat([{"role": "user", "content": prompt}]))
+                text = str(response.content if hasattr(response, "content") else response).strip()
+                match = re.search(r"\{.*\}", text, re.DOTALL)
+                if not match:
+                    continue
+                parsed = json.loads(match.group(0))
+                if not isinstance(parsed, dict):
+                    continue
+                for mid, facts in parsed.items():
+                    if isinstance(facts, list) and facts:
+                        lines = [str(f).strip() for f in facts if str(f).strip()]
+                        if lines:
+                            all_facts[mid] = "\n".join(f"- {line}" for line in lines)
+        except Exception as exc:
+            logger.warning("fact extraction failed after %d facts: %s", len(all_facts), exc)
+        if all_facts:
+            # The LLM occasionally keys a fact by a hallucinated id that may
+            # collide with a row already stored by an earlier session's
+            # extraction (ids are globally unique per question, but the model
+            # does not always echo them faithfully). Skip ids we already have;
+            # hallucinated ids fail the rowid lookup later and are inert for
+            # augmentation anyway.
+            existing_rows = self._db.raw_query(
+                "SELECT id FROM message_facts"
+            )
+            existing_ids = {r["id"] for r in existing_rows}
+            fresh = [
+                {"id": mid, "facts": text}
+                for mid, text in all_facts.items()
+                if mid not in existing_ids
+            ]
+            if fresh:
+                self._db.insert_batch("message_facts", fresh, sync=False)
+            # NOTE: deliberately no flush here — the caller's flush drains the
+            # combined journal (messages + side-table writes) in one pass. A
+            # flush here would drain the pending *message* entries first and
+            # embed them without augmentation.
+        # Resolve each fact's app-table rowid and build augmented texts keyed by
+        # rowid (the journal's linkage) with facts prepended to verbatim content.
+        content_by_id = {row["id"]: row["content"] for row in rows}
+        augment_by_rowid: dict[str, str] = {}
+        for mid, fact_text in all_facts.items():
+            found = self._db.raw_query(
+                "SELECT rowid AS rid FROM messages WHERE id = ?", [mid]
+            )
+            if found:
+                augment_by_rowid[str(found[0]["rid"])] = (
+                    f"{fact_text}\n{content_by_id.get(mid, '')}"
+                )
+        return augment_by_rowid or {}
 
     def _search_messages(
         self, query: str, limit: int = 10,

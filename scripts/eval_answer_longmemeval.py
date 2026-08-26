@@ -28,7 +28,19 @@ MODES = (
     "episodic_4k_reranked",
     "episodic_cap2",
     "memorycore_llm_expansion",
+    # Reading-strategy ablation: identical episodic_4k_reranked context,
+    # answered with Chain-of-Note (extract-then-reason) instead of a direct
+    # answer prompt. _json additionally serializes items as structured JSON
+    # (LongMemEval §5.5: CoN+JSON is the strongest reader configuration).
+    "episodic_4k_reranked_con",
+    "episodic_4k_reranked_con_json",
+    # Fact-augmented key expansion (LongMemEval §5.3): a second core instance
+    # ingests with LLM-extracted user facts prepended to embedded documents.
+    # Same retrieval chain as episodic_4k_reranked; only the index differs.
+    "episodic_4k_reranked_factaug",
 )
+
+_CON_MODES = frozenset({"episodic_4k_reranked_con", "episodic_4k_reranked_con_json"})
 
 
 def _chat(provider: Any, prompt: str) -> str:
@@ -82,11 +94,51 @@ def _format_bundles_without_headers(bundles: list[Any]) -> str:
     return "\n\n".join(parts)
 
 
+def _ordered_bundle_messages(bundle: Any) -> list[Any]:
+    anchor_ids = set(bundle.anchor_ids or [])
+    return sorted(
+        bundle.messages,
+        key=lambda m: (m.id not in anchor_ids, m.ts or datetime.min.replace(tzinfo=UTC)),
+    )
+
+
+def _format_bundles_json(bundles: list[Any]) -> str:
+    """Serialize bundles as structured JSON (LongMemEval reading format)."""
+    sessions = []
+    for bundle in bundles:
+        sessions.append({
+            "session_id": bundle.session_id,
+            "complete": bool(bundle.complete),
+            "messages": [
+                {
+                    "date": message.ts.date().isoformat() if message.ts else "unknown",
+                    "role": message.role,
+                    "content": message.content,
+                }
+                for message in _ordered_bundle_messages(bundle)
+            ],
+        })
+    return json.dumps(sessions, ensure_ascii=False)
+
+
 def _answer(provider: Any, question: str, context: str) -> str:
     return _chat(provider, (
         "Answer the question using only the memory context. Resolve comparisons, counts, "
         "and date differences when the context supports them. If the context is insufficient, "
         "say that the information is insufficient. Give a concise direct answer.\n\n"
+        f"Question:\n{question}\n\nMemory context:\n{context}"
+    ))
+
+
+def _answer_con(provider: Any, question: str, context: str) -> str:
+    """Chain-of-Note reading: extract evidence as notes first, then reason (LongMemEval §5.5)."""
+    return _chat(provider, (
+        "Answer the question using only the memory context. Work step by step: first go "
+        "through each memory item and write a brief note of any information relevant to "
+        "the question, then reason over your notes to reach the final answer. Resolve "
+        "comparisons, counts, and date differences when the context supports them. If the "
+        "context is insufficient, say that the information is insufficient. End your reply "
+        "with a final line of the exact form: Final answer: <concise answer>\n\n"
         f"Question:\n{question}\n\nMemory context:\n{context}"
     ))
 
@@ -176,6 +228,27 @@ def run(
                 llm_provider=answer_provider,
             )
 
+        # Fact-augmented key expansion: a second instance ingests the same
+        # haystack with LLM-extracted user facts prepended to embedded docs.
+        # Built lazily only when the mode is active (saves ingest + LLM cost).
+        core_factaug = None
+        if "episodic_4k_reranked_factaug" in MODES:
+            fa_root = instance_root / "fa"
+            if reuse and (fa_root / "hybrid").exists():
+                core_factaug = MemoryCore(
+                    path=str(fa_root / "hybrid"),
+                    llm_provider=answer_provider,
+                    fact_augment=True,
+                )
+            else:
+                shutil.rmtree(fa_root, ignore_errors=True)
+                core_factaug = build_memorycore(
+                    fa_root,
+                    [instance],
+                    llm_provider=answer_provider,
+                    fact_augment=True,
+                )
+
         contexts: dict[str, str] = {}
         retrieval_seconds: dict[str, float] = {}
 
@@ -237,6 +310,29 @@ def run(
         )
         retrieval_seconds["episodic_4k_reranked"] = time.perf_counter() - started
         contexts["episodic_4k_reranked"] = _format_bundles(reranked_bundles)
+        # Reading-strategy ablation reuses this exact context; only the answer
+        # prompt (and for _json, the serialization) differs.
+        contexts["episodic_4k_reranked_con"] = contexts["episodic_4k_reranked"]
+        contexts["episodic_4k_reranked_con_json"] = _format_bundles_json(reranked_bundles)
+        retrieval_seconds["episodic_4k_reranked_con"] = retrieval_seconds["episodic_4k_reranked"]
+        retrieval_seconds["episodic_4k_reranked_con_json"] = retrieval_seconds["episodic_4k_reranked"]
+
+        if core_factaug is not None:
+            started = time.perf_counter()
+            fa_primary = core_factaug._search_messages_decomposed(
+                instance.query,
+                limit=5,
+                per_query_limit=20,
+                use_cross_encoder=True,
+            )
+            fa_bundles = core_factaug._reconstruct_sessions(
+                instance.query,
+                session_limit=5,
+                max_context_chars=4_000,
+                primary_results=fa_primary,
+            )
+            retrieval_seconds["episodic_4k_reranked_factaug"] = time.perf_counter() - started
+            contexts["episodic_4k_reranked_factaug"] = _format_bundles(fa_bundles)
 
         started = time.perf_counter()
         cap2_primary = core._search_messages_decomposed(
@@ -264,7 +360,10 @@ def run(
         answer_seconds: dict[str, float] = {}
         for mode in MODES:
             started = time.perf_counter()
-            answers[mode] = _answer(answer_provider, instance.query, contexts[mode])
+            if mode in _CON_MODES:
+                answers[mode] = _answer_con(answer_provider, instance.query, contexts[mode])
+            else:
+                answers[mode] = _answer(answer_provider, instance.query, contexts[mode])
             answer_seconds[mode] = time.perf_counter() - started
         judgments = _judge(
             judge_provider,

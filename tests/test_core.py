@@ -971,3 +971,59 @@ def test_ingest_raises_on_empty_content():
         assert core.count() == 0
     finally:
         core._test_cleanup()
+
+
+class _FactStubProvider:
+    """Async stub that returns a fixed fact per user message id."""
+
+    def __init__(self, fact: str = "The user lives in Denver with a dog named Max."):
+        self.fact = fact
+
+    async def chat(self, messages):
+        import json
+
+        text = messages[0]["content"]
+        # The payload is the JSON list after "Messages (JSON list of ...):"
+        payload = json.loads(
+            text.split("Messages (JSON list of")[1].split(":", 1)[1].rsplit("Return ONLY", 1)[0]
+        )
+        out = {m["id"]: [self.fact] for m in payload if isinstance(m, dict) and "id" in m}
+        return type("R", (), {"content": json.dumps(out)})()
+
+
+def test_fact_augment_extracts_and_embeds_augmented():
+    core = _tmp_core(llm_provider=_FactStubProvider(), fact_augment=True)
+    try:
+        core.ingest_many([
+            {"id": "a1", "role": "user", "content": "I live in Denver.", "session_id": "s1"},
+            {"id": "a2", "role": "assistant", "content": "Nice!", "session_id": "s1"},
+            {"id": "a3", "role": "user", "content": "Hi there", "session_id": "s1"},
+        ])
+        # Facts extracted for user messages only, stored in the side table.
+        facts = core.db.raw_query("SELECT id, facts FROM message_facts ORDER BY id")
+        assert [f["id"] for f in facts] == ["a1", "a3"]
+        assert "Denver" in facts[0]["facts"]
+        # Search surfaces verbatim content, never the fact prefix.
+        hits = core.recall("Where do I live?", strategy="direct")
+        assert hits
+        assert all(not h.memory.content.startswith("-") for h in hits)
+        assert any("Denver" in h.memory.content for h in hits)
+    finally:
+        core._test_cleanup()
+
+
+def test_fact_augment_off_by_default_and_no_provider_degrades_gracefully():
+    core = _tmp_core()  # fact_augment defaults False
+    try:
+        core.ingest_many([{"id": "b1", "role": "user", "content": "I live in Denver.", "session_id": "s1"}])
+        assert core.db.raw_query("SELECT COUNT(*) AS c FROM message_facts")[0]["c"] == 0
+    finally:
+        core._test_cleanup()
+
+    core2 = _tmp_core(fact_augment=True)  # no provider -> no crash, no facts
+    try:
+        core2.ingest_many([{"id": "c1", "role": "user", "content": "I live in Denver.", "session_id": "s1"}])
+        assert core2.db.raw_query("SELECT COUNT(*) AS c FROM message_facts")[0]["c"] == 0
+        assert core2.count() == 1
+    finally:
+        core2._test_cleanup()
