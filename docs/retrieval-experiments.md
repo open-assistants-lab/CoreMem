@@ -91,3 +91,32 @@ often do NOT sum — validate, don't assume.
 - Results: `results/eval_answer_s500_con.json`, `results/eval_answer_s_stratified_con.json`,
   `results/eval_answer_s_stratified_factaug.json`
 - Tests: `tests/test_core.py::test_fact_augment_*` (2 new, suite now 176 passed)
+
+## LoCoMo adapter (setup complete)
+
+`scripts/adapt_locomo.py` converts snap-research/locomo (`data/locomo/locomo10.json`,
+10 conversations, 1,986 QA) into CoreMem's LongMemEval-shaped eval format.
+
+Mapping: single-hop→single-session-user, multi-hop→multi-session,
+temporal→temporal-reasoning, open-domain→open-domain (custom type),
+adversarial→abstention (`_abs` suffix, empty answer). Each instance carries the
+full source conversation as its per-question haystack (canonical setup).
+Speaker mapping is deterministic: speaker_a→user, speaker_b→assistant.
+
+Data quirks handled:
+- evidence dia_ids with leading-zero typos (`D30:05`→`D30:5`) resolved via
+  normalization so evidence matches turns
+- 4 open-domain questions with empty evidence are dropped (unscorable for
+  retrieval metrics; harness would misclassify as abstention)
+- image turns: `blip_caption` appended as `[image: ...]`
+
+Artifacts:
+- `data/locomo/locomo_longmemeval.json` — 1,982 instances (264 MB)
+- `data/locomo/locomo_stratified_30.json` — 6/type × 5 types + abstention (3 MB)
+- Smoke test: `memorycore_episodic_reranked` on 3 multi-session questions runs
+  end-to-end (session_hit@5 0.333, non-zero recall; abstention questions
+  correctly return empty)
+
+Cost note: ~19–35 sessions/question (~16K tokens haystack) — similar ingest
+profile to LongMemEval S per question; full 1,982-question run is the heaviest
+eval available in-repo. Use the stratified-30 for iteration.
