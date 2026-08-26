@@ -79,6 +79,7 @@ class PreparedInstance:
     query: str
     stripped: Mapping[str, Any]
     sessions: tuple[PreparedSession, ...]
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -378,7 +379,7 @@ def run_eval(
                     if progress:
                         print(f"[{index + 1}/{total}] {instance.question_id}: resumed", flush=True)
                     continue
-                instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
+                instance_root = _instance_dir(root, index, instance)
                 if not (reuse_instances and (instance_root / "hybrid").exists()):
                     if instance_root.exists():
                         _safe_reset_root(instance_root)
@@ -413,7 +414,7 @@ def run_eval(
                             jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
                             jsonl_file.flush()
                 completed_question_ids.add(instance.question_id)
-                if cleanup_instances and instance_root.exists():
+                if cleanup_instances and instance_root.exists() and instance.conversation_id is None:
                     shutil.rmtree(instance_root, ignore_errors=True)
                 if resume_path is not None:
                     checkpoint = _build_mode_result(
@@ -525,7 +526,7 @@ def _run_streaming(
                 print(f"[{index + 1}] {instance.question_id}: resumed", flush=True)
             continue
 
-        instance_root = root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
+        instance_root = _instance_dir(root, index, instance)
         if not (reuse_instances and (instance_root / "hybrid").exists()):
             if instance_root.exists():
                 _safe_reset_root(instance_root)
@@ -589,13 +590,19 @@ def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[Prep
     question_id = _string_field(stripped, "question_id", f"question_{instance_index:04d}")
     question_type = _string_field(stripped, "question_type", "unknown")
     query = _string_field(stripped, "question", "")
+    # Shared-haystack key: when instances carry a ``conversation_id`` (e.g. the
+    # LoCoMo adapter), session/turn/message ids are derived from it instead of
+    # the per-question index so that every question of the same conversation
+    # produces identical ids and can share one ingested HybridDB store.
+    conversation_id = _string_field(stripped, "conversation_id", "") or None
+    id_key = _safe_identifier(conversation_id) if conversation_id else f"{instance_index:04d}"
     raw_session_ids = _session_ids(stripped)
     # Each session position gets a unique public_session_id, even when the
     # same raw_session_id appears multiple times (S/M variants).
     # Map first occurrence of each raw_session_id for answer_session_ids lookup.
     public_session_ids: dict[str, str] = {}
     for session_index, raw_session_id in enumerate(raw_session_ids):
-        public_id = f"lme_{instance_index:04d}_session_{session_index:04d}"
+        public_id = f"lme_{id_key}_session_{session_index:04d}"
         if raw_session_id not in public_session_ids:
             public_session_ids[raw_session_id] = public_id
     dates = _haystack_dates(stripped)
@@ -609,8 +616,8 @@ def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[Prep
         if not isinstance(session_raw, list):
             raise ValueError(f"{question_id}: haystack_sessions[{session_index}] must be a list")
         raw_session_id = raw_session_ids[session_index] if session_index < len(raw_session_ids) else f"session_{session_index:04d}"
-        session_id = f"lme_{instance_index:04d}_session_{session_index:04d}"
-        turn_id = _turn_id(instance_index, session_id, session_index)
+        session_id = f"lme_{id_key}_session_{session_index:04d}"
+        turn_id = _turn_id(id_key, session_id, session_index)
         ts = _parse_date(dates[session_index] if session_index < len(dates) else None)
         messages: list[Memory] = []
         for message_index, message_raw in enumerate(session_raw):
@@ -653,6 +660,7 @@ def _prepare_instance(raw: Mapping[str, Any], instance_index: int) -> tuple[Prep
         query=query,
         stripped=stripped,
         sessions=tuple(sessions),
+        conversation_id=conversation_id,
     ), QuestionTruth(
             expected_session_ids=expected_session_ids,
             expected_message_ids=tuple(expected_message_ids),
@@ -1516,8 +1524,10 @@ def _has_answer(raw: Mapping[str, Any], session_index: int, message_index: int) 
     return False
 
 
-def _turn_id(instance_index: int, session_id: str, session_index: int) -> str:
-    return f"lme_{instance_index:04d}__{session_index:04d}_{_safe_identifier(session_id)}"
+def _turn_id(instance_index: int | str, session_id: str, session_index: int) -> str:
+    # instance_index is normally a zero-padded int; for shared-haystack
+    # instances it is the sanitized conversation id string.
+    return f"lme_{instance_index}__{session_index:04d}_{_safe_identifier(session_id)}"
 
 
 def _message_id(session_id: str, message_index: int, role: str) -> str:
@@ -1680,6 +1690,15 @@ def _fractional_recall(actual: Sequence[str], expected: Sequence[str]) -> float:
     if not expected_set:
         return 0.0
     return round(len(set(actual) & expected_set) / len(expected_set), 3)
+
+
+def _instance_dir(root: Path, index: int, instance: PreparedInstance) -> Path:
+    """Per-question instance dir, or a shared dir when the instance carries a
+    ``conversation_id`` (LoCoMo adapter): all questions of one conversation
+    share a single ingested HybridDB store."""
+    if instance.conversation_id:
+        return root / "instances" / _safe_identifier(instance.conversation_id)
+    return root / "instances" / f"{index:04d}_{_safe_identifier(instance.question_id)}"
 
 
 def _safe_reset_root(root: Path) -> None:

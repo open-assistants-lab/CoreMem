@@ -166,6 +166,7 @@ def convert_sample(
         instances.append({
             "question_id": question_id,
             "question_type": qtype,
+            "conversation_id": f"locomo_{sample.get('sample_id', sample_index)}",
             "question": str(qa.get("question", "")),
             "answer": str(qa.get("answer", "")) if not is_abs else "",
             "haystack_sessions": [
