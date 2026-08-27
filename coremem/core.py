@@ -50,6 +50,15 @@ logger = logging.getLogger("coremem.core")
 _batch_embed_model: Any = None
 _batch_embed_lock = threading.Lock()
 
+# Embedding model used for both ingest (batched encode) and query (hybriddb's
+# embedding fn). Swap via COREMEM_EMBEDDING_MODEL (e.g. bge-small-en-v1.5);
+# both sides must use the same model or vectors are incomparable.
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+
+def _embedding_model_name() -> str:
+    return os.environ.get("COREMEM_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+
 
 def _batch_embedding_model() -> Any:
     global _batch_embed_model
@@ -59,10 +68,19 @@ def _batch_embedding_model() -> Any:
                 try:
                     from sentence_transformers import SentenceTransformer
 
-                    _batch_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+                    _batch_embed_model = SentenceTransformer(_embedding_model_name())
                 except Exception:
                     _batch_embed_model = False
     return _batch_embed_model or None
+
+
+def _query_embedding_fn(text: str) -> list[float]:
+    """Query-side embedding matching the batched ingest model."""
+    model = _batch_embedding_model()
+    if model is None:
+        raise RuntimeError("no embedding model available")
+    vectors = model.encode([text], show_progress_bar=False)
+    return [float(v) for v in vectors[0]]
 
 
 def _batch_embed_texts(texts: list[str], batch_size: int = 128) -> list[list[float]]:
@@ -261,7 +279,7 @@ class MemoryCore:
         agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
         fact_augment: bool = False,
     ):
-        self._db = HybridDB(path=path)
+        self._db = HybridDB(path=path, embedding_fn=_query_embedding_fn)
         self._heuristics = SearchHeuristics()
         self._llm_provider = llm_provider
         self._fact_augment = fact_augment

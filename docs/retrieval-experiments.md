@@ -210,3 +210,27 @@ VERDICT: factaug does not help CoreMem's default episodic pipeline on
 LongMemEval S. Not folded in. (The LoCoMo run is the remaining test — its
 open-domain type has near-zero lexical overlap, where fact bridging might
 survive reranking. Per-conversation cache makes that run cheap.)
+
+## Lever 3 — Embedding model swap (bge-small-en-v1.5): small positive, right types
+
+MemDelta finding: swapping only the embedder moves LongMemEval-S accuracy
++6.2pp, biggest on temporal/multi-session. Implemented configurable embedding
+model (COREMEM_EMBEDDING_MODEL env, default all-MiniLM-L6-v2) — both ingest
+(batched encode) and query (hybriddb embedding_fn) use the same model.
+
+A/B on stratified-56 (memorycore_episodic_reranked k=5, same questions):
+
+| type | n | minilm_msg | bge_msg | delta |
+|---|---:|---:|---:|---:|
+| multi-session | 10 | 0.488 | 0.522 | +0.033 |
+| temporal-reasoning | 8 | 0.525 | 0.550 | +0.025 |
+| knowledge-update | 8 | 0.708 | 0.708 | 0.000 |
+| ss-user / ss-assistant / ss-pref | 30 | flat | flat | 0.000 |
+| OVERALL | 56 | 0.451 | 0.460 | +0.009 |
+
+Harness summary: message_recall@5 0.526 -> 0.537 (+0.011); session 0.964->0.965.
+
+Direction matches MemDelta exactly (gains on temporal + multi-session, flat on
+single-session types). Magnitude small at n=56 — needs full-S to confirm
+significance. bge-small-en-v1.5 is 384-dim (no collection-dimension risk) and
+~130MB download. Not folded in yet.
