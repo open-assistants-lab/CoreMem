@@ -37,7 +37,7 @@ from coremem.types import Memory
 _TURN_MESSAGES: dict[str, tuple[Memory, ...]] = {}
 
 GROUND_TRUTH_FIELDS = {"answer", "answer_session_ids", "has_answer"}
-MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug")
+MODES = ("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug", "memorycore_episodic_reranked_timeprune")
 STOPWORDS = {
     "a", "about", "after", "again", "all", "also", "am", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "being",
@@ -471,6 +471,10 @@ def _score_question(
             new_rows[m] = _score_instance_episodic(
                 core, instance, truth, k=k, use_cross_encoder=True, max_context_chars=4_000,
             )
+        elif m == "memorycore_episodic_reranked_timeprune":
+            new_rows[m] = _score_instance_episodic(
+                core, instance, truth, k=k, use_cross_encoder=True, time_prune=True,
+            )
         elif m == "memorycore_episodic_reranked_factaug":
             if core_factaug is None:
                 # No fact-augmented core available (e.g. no LLM provider):
@@ -783,8 +787,13 @@ def _score_instance_episodic(
     k: int,
     use_cross_encoder: bool = False,
     max_context_chars: int = 16_000,
+    time_prune: bool = False,
 ) -> dict[str, Any]:
-    mode = "memorycore_episodic_reranked_4k" if max_context_chars == 4_000 else "memorycore_episodic_reranked"
+    mode = (
+        "memorycore_episodic_reranked_4k" if max_context_chars == 4_000
+        else "memorycore_episodic_reranked_timeprune" if time_prune
+        else "memorycore_episodic_reranked"
+    )
     if truth.abstention_expected:
         row = _empty_score(instance, truth, mode=mode)
         row.update({
@@ -797,11 +806,19 @@ def _score_instance_episodic(
         })
         return row
 
+    # Lever 5: only the timeprune mode passes the question date as the anchor
+    # for temporal window pruning; the control arm keeps the stock behavior.
+    anchor_ts = None
+    if time_prune and isinstance(instance.stripped, Mapping):
+        anchor_ts = instance.stripped.get("question_date")
+        anchor_ts = str(anchor_ts) if anchor_ts else None
+
     primary = core._search_messages_decomposed(
         instance.query,
         limit=k,
         per_query_limit=max(20, k * 4),
         use_cross_encoder=use_cross_encoder,
+        anchor_ts=anchor_ts,
     )
     hits = [
         RawSearchHit(
@@ -1805,7 +1822,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("data", type=Path, help="Local LongMemEval-shaped JSON file")
     parser.add_argument("--root", type=Path, help="AgentJournal bundle root to write")
-    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug", "all"),
+    parser.add_argument("--mode", default="all", choices=("raw_bm25", "memorycore", "memorycore_llm_expansion", "memorycore_episodic_reranked", "memorycore_episodic_reranked_4k", "memorycore_fusion", "memorycore_traversal_v2", "memorycore_episodic_reranked_confirmed", "memorycore_episodic_reranked_preference_union", "memorycore_episodic_reranked_v2", "memorycore_episodic_reranked_v3", "memorycore_episodic_reranked_v4", "memorycore_episodic_reranked_factaug", "memorycore_episodic_reranked_timeprune", "all"),
                         help="Search mode to run (default: all)")
     parser.add_argument("--k", type=int, default=5, help="Retrieval cutoff")
     parser.add_argument("--limit", type=int, help="Maximum number of instances to load")

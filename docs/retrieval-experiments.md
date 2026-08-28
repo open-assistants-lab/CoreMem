@@ -274,3 +274,34 @@ Same failure signature as the L-12 A/B (AGENTS.md: "cancels the temporal
 decomposition win"): the 568M reranker scores by general semantic relevance,
 displacing verbatim evidence in synthesis-heavy types. VERDICT: keep L-6.
 The MS-MARCO NDCG advantage does not transfer to conversational memory.
+
+## Lever 5 — Deterministic time-aware range pruning: NO-OP (closed)
+
+Implemented deterministic temporal window parsing (coremem/heuristics.py:
+`parse_temporal_window(query, anchor)` + `_window_factor`) anchored to the
+question date, applied as a PRIOR on the CE score ordering (post-rerank —
+pre-rerank boosts are washed out, the lever-2 lesson). Mode:
+`memorycore_episodic_reranked_timeprune`.
+
+Parser handles: "in the past N months/weeks/days" (incl. number-words),
+"last month/week/year", "<Month> <year>", "between <Month> and <Month>" —
+7/7 targeted tests pass. "How many N ago" counting questions deliberately
+get no window (event date unknown a priori; filter adds no signal).
+
+Results:
+- stratified-56: 2/56 questions have a resolvable window; retrieval changed
+  0. Aggregates identical (0.964/0.526).
+- ALL 133 temporal-reasoning questions (full S): only **4/133** have a
+  parseable window; retrieval changed on 2; aggregates identical
+  (message_recall 0.601 = 0.601, session 0.922 = 0.922).
+
+Root cause: LongMemEval temporal questions are dominated by INTER-EVENT
+ARITHMETIC ("how many days between A and B", "which happened first", 54+38
+of 133) — they need BOTH event timestamps, not a filtered range. True range
+queries ("last month", "in the past N months") are ~3% of the type. The
+paper's +6.8–11.3% came from LLM-inferred ranges on a mix where ranges
+dominate; the paper's own extractor returns N/A when no range exists.
+
+VERDICT: no-op on this benchmark. Code retained (zero-LLM, opt-in via
+anchor_ts) — the window prior is correct-by-construction and may matter on
+range-heavy real-world queries, but it cannot move LongMemEval S.

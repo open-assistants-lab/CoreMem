@@ -683,6 +683,7 @@ class MemoryCore:
         metadata: dict[str, Any] | None = None,
         session_cap: int = 1,
         allocation: str = "global",
+        anchor_ts: str | None = None,
     ) -> list[SearchResult]:
         if limit <= 0 or per_query_limit <= 0:
             return []
@@ -721,8 +722,34 @@ class MemoryCore:
             for memory, score in fused.values()
         ]
         ranked.sort(key=lambda result: result.score, reverse=True)
+        # Lever 5: temporal window pruning — the query's time window acts as a
+        # PRIOR on the final ranking (anchored to the question date, not now).
+        # Applied AFTER the CE rerank: rerank() re-sorts by its own CE score,
+        # so any pre-rerank ordering adjustment would be washed out (the
+        # lever-2 lesson). We adjust the effective ordering key (CE score when
+        # present) instead of fusing into base scores.
+        window = None
+        if anchor_ts:
+            try:
+                anchor = datetime.fromisoformat(anchor_ts.replace("Z", "+00:00"))
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=UTC)
+                window = SearchHeuristics.parse_temporal_window(query, anchor)
+            except (ValueError, TypeError):
+                window = None
         if use_cross_encoder:
             ranked = rerank(query, ranked)
+        if window is not None:
+            def _wkey(r: SearchResult) -> float:
+                base = getattr(r, "_ce_score", None)
+                if base is None:
+                    base = r.score
+                return base * SearchHeuristics._window_factor(
+                    window,
+                    r.memory.ts.isoformat() if r.memory.ts else None,
+                )
+            ranked.sort(key=_wkey, reverse=True)
+        if session_cap > 1 and use_cross_encoder:
             if session_cap > 1:
                 return self._select_with_session_cap(
                     query, ranked, limit=limit, cap=session_cap,
