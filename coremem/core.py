@@ -53,7 +53,7 @@ _batch_embed_lock = threading.Lock()
 # Embedding model used for both ingest (batched encode) and query (hybriddb's
 # embedding fn). Swap via COREMEM_EMBEDDING_MODEL (e.g. bge-small-en-v1.5);
 # both sides must use the same model or vectors are incomparable.
-DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 def _embedding_model_name() -> str:
