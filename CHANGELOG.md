@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.13.4] — bge-small default embedder (+0.010 recall), CoN reading helper
+
+Five-lever improvement program concluded (docs/retrieval-experiments.md). One lever
+validated and folded in; two falsified; two kept as opt-in modes. All A/Bs paired
+with blind judges on identical contexts, one variable at a time.
+
+### Changed
+- **Default embedding model: all-MiniLM-L6-v2 → BAAI/bge-small-en-v1.5** (lever 3).
+  Full-S paired A/B (n=500, only embedder differs): message_recall@5 0.618 → 0.628
+  (+0.010), session_recall 0.952 → 0.957, session_map +0.005, **zero regressions**.
+  Biggest gain on the weakest type: single-session-preference +0.066 (0.367 → 0.433);
+  multi-session +0.011, temporal +0.008. 9 questions better / 2 worse / 459 identical
+  (exact binomial p=0.065). Type pattern matches the MemDelta controlled study.
+  Bonus: bge-small batch-encodes 2× faster than MiniLM (1225 vs 648 texts/s), same
+  384 dimensions. **Existing stores must be re-embedded** (vectors differ) — the
+  `COREMEM_EMBEDDING_MODEL` env var can pin the old model for migration windows.
+
+### Added
+- **`coremem.reading` module** — answer-prompt builders for consuming bundles (RAG
+  reading strategies, consumer-side choice): `build_answer_prompt(chain_of_note=)`
+  ships the Chain-of-Note reading prompt validated at +0.018 accuracy on full S
+  (0.674 → 0.692, 17/8 flips, p=0.108) with `extract_final_answer()` for CoN
+  replies and documented guidance (enable for synthesis-heavy questions; direct
+  prompt when abstention fidelity or token cost dominates — CoN carries ~50%
+  more output tokens).
+- `COREMEM_EMBEDDING_MODEL` env var to pin/swap the embedding model (ingest and
+  query sides forced to the same model).
+- Eval harness: `memorycore_episodic_reranked_{factaug,timeprune}` modes,
+  conversation_id-aware shared instance stores (LoCoMo per-conversation cache).
+
+### Falsified (documented, code retained as opt-in)
+- Fact-augmented key expansion (LongMemEval §5.3): retrieval-neutral on S — the
+  CE reranker restores the identical top-5 from a perturbed candidate pool
+  (13/56 questions changed pre-rerank, recall delta 0.000 per type).
+- BGE-reranker-v2-m3: −0.040 message recall at 7× latency (same failure
+  signature as the earlier L-12 A/B); keep ms-marco-MiniLM-L-6-v2.
+- Deterministic temporal window pruning: only 4/133 temporal questions carry a
+  parseable range — LongMemEval temporal questions are inter-event arithmetic,
+  not range queries. No-op.
+
 ## [0.13.3] — hybriddb 0.5.8 floor, version-string consistency
 
 Dependency + packaging hygiene release, validated by an A/B eval on the 20-question
