@@ -259,3 +259,18 @@ gain, single-session flat) AND fixes the weakest type (preference). The
 stratified-56 signal (+0.011) held at full scale. Remaining question before
 folding in: does the retrieval gain survive the reader (answer eval) — the
 lever-1/2 lesson — and ingest cost (bge ~2.4x MiniLM encode time).
+
+## Lever 4 — BGE-reranker-v2-m3: NEGATIVE (falsified)
+
+Zero-code A/B (COREMEM_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3) on
+stratified-56, memorycore_episodic_reranked k=5:
+
+- message_recall@5 0.526 → 0.486 (−0.040); session_recall 0.964 → 0.958
+- Damage concentrated in cross-session types: multi-session 0.488→0.365
+  (−0.123), temporal 0.525→0.438 (−0.088); others flat
+- Latency: 109ms/candidate vs L-6's ~15ms (~7x slower, ~2.2s/query overhead)
+
+Same failure signature as the L-12 A/B (AGENTS.md: "cancels the temporal
+decomposition win"): the 568M reranker scores by general semantic relevance,
+displacing verbatim evidence in synthesis-heavy types. VERDICT: keep L-6.
+The MS-MARCO NDCG advantage does not transfer to conversational memory.
