@@ -234,3 +234,28 @@ Direction matches MemDelta exactly (gains on temporal + multi-session, flat on
 single-session types). Magnitude small at n=56 — needs full-S to confirm
 significance. bge-small-en-v1.5 is 384-dim (no collection-dimension risk) and
 ~130MB download. Not folded in yet.
+
+## Lever 3 — Full-S validation (n=500, paired): CONFIRMED, right at significance edge
+
+bge-small-en-v1.5 vs MiniLM, same harness/questions, fresh bge stores
+(data/instances_s500_bge, 4.0GB):
+
+| metric | minilm | bge | delta |
+|---|---:|---:|---:|
+| message_recall@5 | 0.618 | 0.628 | +0.010 |
+| session_recall@5 | 0.952 | 0.957 | +0.005 |
+| session_map | 0.923 | 0.928 | +0.005 |
+| message_hit@5 | 0.770 | 0.774 | +0.004 |
+
+Per-type (message recall): preference 0.367→0.433 (**+0.066** — weakest type,
+biggest gain), multi-session 0.523→0.534 (+0.011), temporal 0.573→0.581
+(+0.008), all others 0.000. **Zero regressions.**
+
+Significance: 9 questions better / 2 worse / 459 same → exact binomial
+p = 0.065 (right at the edge, not α=0.05).
+
+Status: promising — the type pattern matches MemDelta (cross-session types
+gain, single-session flat) AND fixes the weakest type (preference). The
+stratified-56 signal (+0.011) held at full scale. Remaining question before
+folding in: does the retrieval gain survive the reader (answer eval) — the
+lever-1/2 lesson — and ingest cost (bge ~2.4x MiniLM encode time).
