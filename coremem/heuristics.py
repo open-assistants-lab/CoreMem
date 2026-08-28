@@ -5,9 +5,14 @@ All heuristics are zero-LLM, purely pattern-based.
 
 import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
+
+_MONTH_NAMES = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+]
 
 # ── MMR Diversity ──────────────────────────────────────────────────────────
 
@@ -206,6 +211,161 @@ class SearchHeuristics:
             return month_match.group(1)
 
         return None
+
+    # ── Lever 5: deterministic time-aware range pruning ─────────────────
+
+    @classmethod
+    def parse_temporal_window(
+        cls, query: str, anchor: datetime,
+    ) -> tuple[datetime, datetime] | None:
+        """Parse an explicit/relative temporal window from the query.
+
+        Returns ``(start, end)`` anchored to ``anchor`` (the question's date,
+        NOT now — eval haystacks are historical), or None when the query has
+        no resolvable time range. Deterministic: regex + calendar arithmetic
+        only, zero LLM.
+        """
+        q = query.lower()
+
+        def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
+            start = anchor.replace(year=year, month=month, day=1,
+                                   hour=0, minute=0, second=0, microsecond=0)
+            if month == 12:
+                end = start.replace(year=year + 1, month=1)
+            else:
+                end = start.replace(month=month + 1)
+            return start, end
+
+        # "between <month> and <month> (year?)" / "from <month> to <month>"
+        m = re.search(
+            r"\b(?:between|from)\s+(january|february|march|april|may|june|july|"
+            r"august|september|october|november|december)\s*(?:(\d{4})\s*)?"
+            r"(?:and|to)\s+(january|february|march|april|may|june|july|"
+            r"august|september|october|november|december)\s*(\d{4})?",
+            q, re.IGNORECASE,
+        )
+        if m:
+            months = [mn for mn in _MONTH_NAMES]
+            try:
+                start_m = months.index(m.group(1).lower()) + 1
+                end_m = months.index(m.group(3).lower()) + 1
+                year = int(m.group(4) or m.group(2) or anchor.year)
+                s, _ = month_bounds(year, start_m)
+                _, e = month_bounds(year, end_m)
+                return min(s, e), max(e, s)
+            except ValueError:
+                pass
+
+        # "in the past N months/weeks/days" / "within the last N ..."
+        m = re.search(
+            r"\b(?:in the past|within the last|over the last|the last)\s+"
+            r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+            r"(day|week|month|year)s?\b", q, re.IGNORECASE,
+        )
+        if m:
+            raw_n = m.group(1)
+            word_map = {w: i + 1 for i, w in enumerate(
+                ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"]
+            )}
+            n = int(raw_n) if raw_n.isdigit() else word_map.get(raw_n.lower(), 1)
+            unit = m.group(2)
+            days = {"day": n, "week": 7 * n, "month": 30 * n, "year": 365 * n}[unit]
+            end = anchor
+            start = anchor - timedelta(days=days)
+            return start, end
+
+        # "last month" / "last week" / "last year" (anchored to question date)
+        m = re.search(r"\blast\s+(month|week|year)\b", q)
+        if m:
+            unit = m.group(1)
+            if unit == "month":
+                first = anchor.replace(day=1, hour=0, minute=0, microsecond=0)
+                start = (first - timedelta(days=1)).replace(day=1)
+                end = first
+                return start, end
+            if unit == "week":
+                return anchor - timedelta(days=13), anchor + timedelta(days=1)
+            return anchor.replace(year=anchor.year - 1, month=1, day=1), anchor
+
+        # "<Month> <year>" explicit
+        m = re.search(
+            r"\b(january|february|march|april|may|june|july|august|september|"
+            r"october|november|december)\s+(\d{4})\b", q, re.IGNORECASE,
+        )
+        if m:
+            try:
+                start, end = month_bounds(int(m.group(2)), _MONTH_NAMES.index(m.group(1).lower()) + 1)
+                return start, end
+            except ValueError:
+                pass
+
+        # "N days/weeks/months ago" counting questions: the event date is
+        # unknown a priori (anywhere in the past), so a window filter adds no
+        # signal on historical haystacks — deliberately no window here.
+
+        return None
+
+    @classmethod
+    def has_temporal_cues(cls, query: str) -> bool:
+        """True when the query references dates/relative time windows."""
+        return cls.parse_temporal_window(query, datetime.now(UTC)) is not None or bool(
+            re.search(
+                r"\b(?:how\s+many\s+(?:days|weeks|months|years)\s+ago|"
+                r"how\s+many\s+(?:days|weeks|months|years)\s+(?:have\s+)?passed|"
+                r"last\s+(?:month|week|year)|in\s+the\s+past\s+\d+|"
+                r"between\s+\w+\s+\d{4}|before\s+\w+)",
+                query, re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def temporal_window_boost(
+        cls,
+        query: str,
+        content_ts: str | None,
+        score: float,
+        anchor: datetime,
+        *,
+        inside_factor: float = 1.30,
+        outside_factor: float = 0.75,
+    ) -> float:
+        """Boost candidates inside the query's temporal window, penalize far
+        outside ones (lever 5: deterministic time-aware range pruning).
+
+        Anchored to the question date (not now). Applied to temporal-window
+        queries only; all other queries pass through untouched.
+        """
+        window = cls.parse_temporal_window(query, anchor)
+        if window is None or not content_ts:
+            return score
+        return score * cls._window_factor(window, content_ts, inside_factor=inside_factor,
+                                          outside_factor=outside_factor)
+
+    @staticmethod
+    def _window_factor(
+        window: tuple[datetime, datetime],
+        content_ts: str | None,
+        *,
+        inside_factor: float = 1.30,
+        outside_factor: float = 0.75,
+    ) -> float:
+        """Multiplicative prior for one candidate given a temporal window:
+        1.30 inside, 0.75 beyond a 30-day grace margin, 1.0 otherwise."""
+        if not content_ts:
+            return 1.0
+        try:
+            ts = datetime.fromisoformat(content_ts)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            start, end = window
+            if start <= ts <= end:
+                return inside_factor
+            margin = timedelta(days=30)
+            if ts < start - margin or ts > end + margin:
+                return outside_factor
+            return 1.0
+        except (ValueError, TypeError):
+            return 1.0
 
     @classmethod
     def apply_all(cls, query: str, content: str, score: float, ts: str | None = None) -> float:
