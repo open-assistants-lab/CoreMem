@@ -270,6 +270,13 @@ class MemoryCore:
         core.ingest("assistant", "Great!", session_id="s1")
         await core.compile_turn(turn_id=tid)
         results = core.recall("coffee")
+
+    With ``versioned=True`` the messages and journal_records tables carry a
+    tamper-evident hash chain (hybriddb 0.6.0): every insert/delete is
+    recorded, checkpoints/rollbacks are supported, and the governance methods
+    (``checkpoint_memory``, ``rollback_memory``, ``memory_history``, ...) are
+    available. Versioning applies to NEW stores — an existing store opened
+    with ``versioned=True`` stays un-versioned (see docs/versioned-memory-design.md).
     """
 
     def __init__(
@@ -278,8 +285,13 @@ class MemoryCore:
         llm_provider: LLMProvider | None = None,
         agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
         fact_augment: bool = False,
+        versioned: bool = False,
+        author: str | None = None,
     ):
         self._db = HybridDB(path=path, embedding_fn=_query_embedding_fn)
+        self._versioned = versioned
+        if author:
+            self._db.author = author
         self._heuristics = SearchHeuristics()
         self._llm_provider = llm_provider
         self._fact_augment = fact_augment
@@ -300,7 +312,19 @@ class MemoryCore:
         )
 
     def _ensure_tables(self) -> None:
-        if "messages" not in self._db.list_tables():
+        # Versioned stores: messages + journal_records carry the tamper-evident
+        # hash chain. Versioning is create-time only (hybriddb 0.6.0) — a store
+        # that predates the flag stays un-versioned (warn, don't fail).
+        first_run = "messages" not in self._db.list_tables()
+        if not first_run and self._versioned and not self._db.is_versioned("messages"):
+            logger.warning(
+                "versioned=True requested but this store predates it; "
+                "tables stay un-versioned (no in-place upgrade). See "
+                "docs/versioned-memory-design.md — rebuild into a new store "
+                "to gain memory history."
+            )
+            self._versioned = False
+        if first_run:
             self._db.create_table("messages", {
                 "id": "TEXT PRIMARY KEY",
                 "role": "TEXT NOT NULL",
@@ -312,7 +336,7 @@ class MemoryCore:
                 "metadata": "TEXT DEFAULT '{}'",
                 "ts": "TEXT",
                 "embedding": "TEXT",
-            })
+            }, versioned=self._versioned)
         cols = {r["name"] for r in self._db.raw_query("PRAGMA table_info(messages)")}
         if "turn_id" not in cols:
             self._db.raw_query("ALTER TABLE messages ADD COLUMN turn_id TEXT DEFAULT ''")
@@ -335,7 +359,7 @@ class MemoryCore:
                 "content": "LONGTEXT",
                 "compiled_at": "TEXT NOT NULL",
                 "embedding": "TEXT",
-            })
+            }, versioned=self._versioned)
         self._db.raw_query(
             "CREATE INDEX IF NOT EXISTS idx_journal_records_session ON journal_records(session_id)"
         )
@@ -1161,13 +1185,31 @@ class MemoryCore:
                 params.append(f'$."{escaped}"')
                 params.append(v)
         where = " AND ".join(where_parts) if where_parts else "1=1"
+        if self._versioned:
+            rows = self._db.raw_query(f"SELECT id FROM messages WHERE {where}", tuple(params))
+            return self._tracked_delete([str(r["id"]) for r in rows])
         before = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
         self._db.raw_query(f"DELETE FROM messages WHERE {where}", tuple(params))
         after = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
         return (before[0]["c"] - after[0]["c"]) if before and after else 0
 
+    def _tracked_delete(self, message_ids: list[str], *, sync: bool = True) -> int:
+        """Delete through the CRUD layer so versioned stores record tombstones
+        (raw_query writes bypass history — docs/versioned-memory-design.md §5)."""
+        deleted = 0
+        for mid in message_ids:
+            if self._db.delete("messages", mid, sync=False):
+                deleted += 1
+        if sync:
+            self._db.process_journal()
+        return deleted
+
     def clear(self) -> None:
         self._ensure_open()
+        if self._versioned:
+            rows = self._db.raw_query("SELECT id FROM messages")
+            self._tracked_delete([str(r["id"]) for r in rows])
+            return
         self._db.raw_query("DELETE FROM messages")
 
     # ── Session inventory, memory hygiene, lifecycle ────────────────────
@@ -1193,10 +1235,15 @@ class MemoryCore:
         )
 
     def delete_messages(self, message_ids: list[str]) -> int:
-        """Delete specific messages by id. Returns the number deleted."""
+        """Delete specific messages by id. Returns the number deleted.
+
+        On versioned stores every deletion is recorded as a tombstone in the
+        tamper-evident history (governance audit trail)."""
         self._ensure_open()
         if not message_ids:
             return 0
+        if self._versioned:
+            return self._tracked_delete([str(mid) for mid in message_ids])
         placeholders = ",".join("?" * len(message_ids))
         before = self._db.raw_query("SELECT COUNT(*) AS c FROM messages")
         self._db.raw_query(
@@ -1229,6 +1276,87 @@ class MemoryCore:
             "users": row.get("users", 0) if row.get("users") else 0,
             "last_ts": row.get("last_ts"),
             "journal_pending": pending,
+        }
+
+    # ── Memory governance (versioned stores; docs/versioned-memory-design.md) ──
+
+    def _require_versioned(self) -> None:
+        if not self._versioned or not self._db.is_versioned("messages"):
+            raise RuntimeError(
+                "versioned=True was not set for this store (or the store "
+                "predates it); memory governance methods require a store "
+                "created with MemoryCore(path, versioned=True)"
+            )
+
+    def _ensure_both_versioned(self) -> None:
+        self._ensure_open()
+        self._require_versioned()
+
+    def checkpoint_memory(self, label: str) -> dict[str, Any]:
+        """Create a named restore point over messages and journal_records.
+
+        The recommended workflow around risky writes:
+        ``checkpoint_memory("pre-import")`` -> ingest -> ``verify_memory_chain()``
+        -> ``rollback_memory("pre-import")`` if the import was bad.
+        """
+        self._ensure_both_versioned()
+        return {
+            "messages": self._db.checkpoint("messages", label),
+            "journal_records": self._db.checkpoint("journal_records", label),
+        }
+
+    def rollback_memory(
+        self,
+        label: str | None = None,
+        *,
+        seq: int | None = None,
+    ) -> dict[str, Any]:
+        """Restore messages/journal_records to a checkpoint or log position.
+
+        The hash chain never rewinds: the rollback itself is recorded as new
+        versions, so the audit trail stays complete (hybriddb semantics).
+        """
+        self._ensure_both_versioned()
+        if label is None and seq is None:
+            raise ValueError("rollback_memory requires a label or seq")
+        kwargs = {"checkpoint": label} if label is not None else {"at_seq": seq}
+        return {
+            "messages": self._db.rollback("messages", **kwargs),
+            "journal_records": self._db.rollback("journal_records", **kwargs),
+        }
+
+    def memory_log(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Change log for the messages table (op, id, author, ts, seq),
+        newest last. journal_records history is accessible via ``core.db.log``."""
+        self._ensure_both_versioned()
+        return self._db.log("messages", limit=limit)
+
+    def memory_history(self, message_id: str) -> list[dict[str, Any]]:
+        """Full version timeline of one message (provenance: what changed,
+        when, by whom — and what the prior content looked like)."""
+        self._ensure_both_versioned()
+        return self._db.history("messages", message_id)
+
+    def memory_diff(self, from_seq: int, to_seq: int) -> dict[str, Any]:
+        """Added/removed/changed messages between two log positions."""
+        self._ensure_both_versioned()
+        return self._db.diff("messages", from_seq, to_seq)
+
+    def as_of_memory(self, seq: int) -> list[dict[str, Any]]:
+        """Point-in-time read of the messages table at log position ``seq``."""
+        self._ensure_both_versioned()
+        return self._db.as_of("messages", seq)
+
+    def verify_memory_chain(self) -> dict[str, Any]:
+        """Recompute both hash chains and report the first broken link.
+
+        Detects direct tampering with the history store. O(chain length) —
+        do not call per-request; suitable for periodic audits and the CLI.
+        """
+        self._ensure_both_versioned()
+        return {
+            "messages": self._db.verify_chain("messages"),
+            "journal_records": self._db.verify_chain("journal_records"),
         }
 
     def close(self) -> None:

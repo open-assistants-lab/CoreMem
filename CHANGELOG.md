@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.14.0] — versioned memory (git-like governance), hybriddb 0.6.0 floor
+
+Memory governance via hybriddb 0.6.0's versioned tables: a tamper-evident hash
+chain over every memory change, point-in-time reads, checkpoints, and rollback.
+Design + measured performance gate in docs/versioned-memory-design.md; this
+release ships it as **opt-in** (`MemoryCore(path, versioned=True)`). Default
+flip pending one more release cycle (gate already passed — see below).
+
+⚠️ **Breaking: hybriddb floor raised `>=0.5.8` → `>=0.6.0`.** hybriddb 0.6.0 is
+retrieval-neutral (S stratified-56 metrics identical on 0.5.8 vs 0.6.0).
+
+### Added
+- **`MemoryCore(path, versioned=True, author=...)`** — NEW stores only: messages
+  and journal_records carry a `SHA256(prev_hash | op | pk | row_json)` chain.
+  Opened-on-legacy-store warns and stays un-versioned (versioning is
+  create-time only; no in-place migration in v1).
+- **Governance API**: `checkpoint_memory(label)`, `rollback_memory(label|seq)`
+  (chain never rewinds — rollback is recorded as new versions),
+  `memory_log(limit)`, `memory_history(message_id)` (provenance timeline),
+  `memory_diff(from, to)`, `as_of_memory(seq)`, `verify_memory_chain()`.
+- **MCP tools**: `memory_history`, `memory_rollback` (requires `confirm=true`),
+  `memory_verify` — agents and operators can self-audit.
+- `delete_messages`/`clear`/filtered deletes now route through the CRUD layer on
+  versioned stores so tombstones land in history (`raw_query` writes bypass it
+  — found by spike, fixed).
+- `scripts/bench_versioned_memory.py` — the perf-gate benchmark.
+
+### Performance gate (10k messages, median of 3, docs/versioned-memory-design.md §7)
+- Ingest overhead **+8.2%** (gate ≤15%)
+- Recall latency unchanged (63.5 → 66.7 ms warm)
+- Recall metrics identical (0.965/0.537); storage **1.13×**
+- Rollback 3.85 s / 1k rows (~4 ms/row, interactive op — above the strictest
+  self-imposed bound, documented; hybriddb batch-rollback follow-up)
+- verify_chain 0.05 s @ 12k events
+- **→ `versioned=True` becomes the default in 0.15.0** (legacy stores
+  unaffected).
+
 ## [0.13.4] — bge-small default embedder (+0.010 recall), CoN reading helper
 
 Five-lever improvement program concluded (docs/retrieval-experiments.md). One lever
