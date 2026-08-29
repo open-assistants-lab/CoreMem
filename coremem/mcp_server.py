@@ -146,6 +146,50 @@ def run_mcp_server(path: str | None = None) -> None:
         return f"deleted: {n} messages"
 
     @mcp.tool()
+    async def memory_history(message_id: str) -> str:
+        """Provenance timeline of one memory (versioned stores only): every
+        recorded change — insert/update/delete tombstones — with timestamps
+        and author. Use to check what a memory looked like before it changed,
+        or who wrote it.
+
+        Example: memory_history(message_id="a1b2c3d4e5f6")
+        """
+        events = core.memory_history(message_id)
+        if not events:
+            return f"no history for message {message_id}"
+        return json.dumps(events, indent=1, default=str)
+
+    @mcp.tool()
+    async def memory_rollback(label: str = "", seq: int = 0, confirm: bool = False) -> str:
+        """Restore memory to a named checkpoint or log position (versioned
+        stores only). The audit chain never rewinds — the rollback itself is
+        recorded, so nothing is erased from history. DESTRUCTIVE: requires
+        confirm=true. Requires checkpoint_memory(label) to have been set
+        beforehand; use memory_verify first to confirm the chain is intact.
+
+        Example: memory_rollback(label="pre-import", confirm=true)
+        """
+        if not confirm:
+            return "rollback requires confirm=true"
+        if not label and not seq:
+            return "rollback requires a checkpoint label or a seq"
+        result = core.rollback_memory(label or None, seq=seq or None)
+        return f"rolled back: {result}"
+
+    @mcp.tool()
+    async def memory_verify() -> str:
+        """Verify the tamper-evident memory chains (versioned stores only):
+        recompute the hash chain and report the first broken link if the
+        history store was modified outside the API. O(chain length).
+
+        Example: memory_verify()
+        """
+        result = core.verify_memory_chain()
+        ok = result["messages"]["valid"] and result["journal_records"]["valid"]
+        verdict = "VALID" if ok else "TAMPERED"
+        return json.dumps({"verdict": verdict, "detail": result}, indent=1, default=str)
+
+    @mcp.tool()
     async def fetch_session(session_id: str, limit: int = 50) -> str:
         """Fetch messages from one session (newest first). Use to read the
         full conversation context of a session found via recall or
