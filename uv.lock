@@ -517,7 +517,7 @@ wheels = [
 
 [[package]]
 name = "coremem"
-version = "0.14.0"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
@@ -551,7 +551,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "hybriddb", specifier = ">=0.6.0" },
+    { name = "hybriddb", specifier = ">=0.7.0" },
     { name = "ijson", specifier = ">=3.5.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
     { name = "numpy", specifier = ">=1.24.0,<3.0.0" },
@@ -1079,14 +1079,14 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/c7/35c7d32fab49d7b76aadb5b7c80f6f6d00206aaa9c37f71f0f4c6c1cc220/hybriddb-0.6.0.tar.gz", hash = "sha256:12a25811f2d4a47a0b96aa1f7a70156d047123bcd6a88fa4a2ec2c2a75dec372", size = 370080, upload-time = "2026-08-27T14:56:52.24Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/c8/e394145405789d493a16ad5ebfc12f5c1b98a5cbe61abe122594bbae44b5/hybriddb-0.7.0.tar.gz", hash = "sha256:bfb02f890f5638a72b03bc0303d1b0388d07f30ad27ff3e2e03cdcb940b19d88", size = 391176, upload-time = "2026-09-01T17:21:25.941Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/09/174a33671ec272391e50e75d4443feb57c4f73b15fb72da2241046720b18/hybriddb-0.6.0-py3-none-any.whl", hash = "sha256:17a71627981d6d494d29348d2074483f85be96bb0799881bd24d00723713bcf3", size = 51042, upload-time = "2026-08-27T14:56:50.152Z" },
+    { url = "https://files.pythonhosted.org/packages/65/77/d58979b0c99296ad018267c2d320671384b0604de5b81ebfc980b41dcee7/hybriddb-0.7.0-py3-none-any.whl", hash = "sha256:dbb5b8abd40edd497637a5c3b24c84d4428343a467dc8ea19b8b402726b01e14", size = 56465, upload-time = "2026-09-01T17:21:24.052Z" },
 ]
 
 [[package]]

@@ -271,12 +271,14 @@ class MemoryCore:
         await core.compile_turn(turn_id=tid)
         results = core.recall("coffee")
 
-    With ``versioned=True`` the messages and journal_records tables carry a
-    tamper-evident hash chain (hybriddb 0.6.0): every insert/delete is
-    recorded, checkpoints/rollbacks are supported, and the governance methods
-    (``checkpoint_memory``, ``rollback_memory``, ``memory_history``, ...) are
-    available. Versioning applies to NEW stores — an existing store opened
-    with ``versioned=True`` stays un-versioned (see docs/versioned-memory-design.md).
+    With ``versioned=True`` (the default since 0.15.0) the messages and
+    journal_records tables carry a tamper-evident hash chain (hybriddb 0.6.0+):
+    every insert/delete is recorded, checkpoints/rollbacks are supported, and
+    the governance methods (``checkpoint_memory``, ``rollback_memory``,
+    ``memory_history``, ...) are available. Versioning applies to NEW stores —
+    an existing store opened without it stays un-versioned and the governance
+    methods are unavailable there (see docs/versioned-memory-design.md).
+    Pass ``versioned=False`` to opt out (plain store, no history overhead).
     """
 
     def __init__(
@@ -285,7 +287,7 @@ class MemoryCore:
         llm_provider: LLMProvider | None = None,
         agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
         fact_augment: bool = False,
-        versioned: bool = False,
+        versioned: bool = True,
         author: str | None = None,
     ):
         self._db = HybridDB(path=path, embedding_fn=_query_embedding_fn)
