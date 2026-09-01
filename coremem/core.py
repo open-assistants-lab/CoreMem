@@ -208,6 +208,31 @@ def _row_to_memory(row: dict[str, Any]) -> Memory:
     )
 
 
+def _scalar_where(
+    *,
+    role: str | None,
+    session_id: str | None,
+    user_id: str | None,
+    agent_id: str | None,
+) -> dict[str, str]:
+    """Build a hybriddb `where=` dict from the scalar equality filters.
+
+    Mirrors ``_matches_filters`` truthiness (empty values = no filter). Only
+    scalar columns mirrored into Chroma metadata are pushable — ``ts_*``
+    (lexical range) and ``metadata`` (JSON) stay Python post-filter only.
+    """
+    where: dict[str, str] = {}
+    if role:
+        where["role"] = role
+    if session_id:
+        where["session_id"] = session_id
+    if user_id:
+        where["user_id"] = user_id
+    if agent_id:
+        where["agent_id"] = agent_id
+    return where
+
+
 def _matches_filters(
     mem: Memory,
     *,
@@ -604,7 +629,12 @@ class MemoryCore:
     ) -> list[SearchResult]:
         has_filters = any((role, session_id, user_id, agent_id, ts_after, ts_before, metadata))
         hybrid_limit = max(limit * 20, 100) if has_filters else limit * 3
-        rows = self._db.search("messages", "content", query, limit=hybrid_limit)
+        # hybriddb 0.7.0: push scalar equality filters into the Chroma scan
+        # (pre-filter before ANN); the Python post-filter below stays the
+        # authority for ts/metadata and as defense in depth.
+        where = _scalar_where(role=role, session_id=session_id,
+                              user_id=user_id, agent_id=agent_id) or None
+        rows = self._db.search("messages", "content", query, limit=hybrid_limit, where=where or None)
         results: list[SearchResult] = []
         for row in rows:
             mem = _row_to_memory(row)
@@ -655,8 +685,10 @@ class MemoryCore:
         all_results: list[SearchResult] = []
         seen_ids: set[str] = set()
         seen_content: set[int] = set()
+        where = _scalar_where(role=role, session_id=session_id,
+                              user_id=user_id, agent_id=agent_id) or None
         for q in queries:
-            rows = self._db.search("messages", "content", q, limit=effective_limit)
+            rows = self._db.search("messages", "content", q, limit=effective_limit, where=where)
             if rows:
                 max_score = max(r.get("_score", r.get("score", 0.0)) for r in rows)
                 min_score = min(r.get("_score", r.get("score", 0.0)) for r in rows)

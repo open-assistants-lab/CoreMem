@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.16.0] — metadata pre-filtering: recall filters pushed into the Chroma scan
+
+Adopts hybriddb 0.7.0's `search(where=)` — CoreMem's equality filters
+(`role`, `session_id`, `user_id`, `agent_id`) are now pushed into the Chroma
+query **before** the vector scan instead of relying on over-fetch + Python
+post-filtering.
+
+### Changed
+- **Filtered recall no longer starves.** Previously a filtered recall fetched
+  the top-`max(limit×20, 100)` rows *unfiltered* and post-filtered in Python —
+  ≥100 more-relevant non-matching rows could push the answer out of the window
+  entirely. Now the vector scan only sees matching rows. Demonstrated: with
+  150 same-phrase rows in a noise session, the old path returned **empty** for
+  `recall(session_id="target")` while the pushdown returns the target as the
+  top hit (`tests/test_filter_pushdown.py::test_session_filter_finds_message_beyond_overfetch_window`).
+- The Python post-filter (`_matches_filters`) remains the authority (defense in
+  depth, unchanged semantics) — `where=` matches its truthiness exactly.
+- Query-side: the pushdown applies to every strategy (`direct`, `episodic`
+  per-variant, `llm_expansion`, `fusion`, preference union) since they all
+  funnel through the two `db.search` call sites.
+
+### Not pushed down (by design)
+- `ts_after`/`ts_before` (lexical ISO range — mixed-format caveat; stays
+  Python post-filter) and `metadata={}` (JSON inside a TEXT column, not a
+  scalar Chroma key). These filter identically to 0.15.x.
+- Unfiltered recall is byte-identical (S stratified-56: 0.965/0.537 —
+  pushdown only activates with filters).
+
 ## [0.15.0] — versioned memory becomes the default, hybriddb 0.7.0 floor
 
 ⚠️ **Breaking: `versioned=True` is now the default** for newly created stores,
