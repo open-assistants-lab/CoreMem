@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.15.0] — versioned memory becomes the default, hybriddb 0.7.0 floor
+
+⚠️ **Breaking: `versioned=True` is now the default** for newly created stores,
+and the hybriddb floor is `>=0.7.0`.
+
+### Changed
+- **`MemoryCore(path)` now creates versioned stores by default** (0.14.0
+  shipped it opt-in; the performance gate passed and hybriddb 0.7.0 resolved
+  the one open finding). New stores carry the tamper-evident hash chain:
+  `checkpoint_memory` / `rollback_memory` / `memory_history` / `verify_memory_chain`
+  work out of the box, and MCP gains `memory_history` / `memory_rollback` /
+  `memory_verify`. Pass `versioned=False` to opt out. **Stores created before
+  this release have no memory history** (open + rebuild to gain it); opening
+  one logs a warning.
+- **hybriddb floor `>=0.6.0` → `>=0.7.0`** — picks up the batched rollback
+  (removal-heavy rollback 3.85s → 0.32s at 1k rows, resolving the one missed
+  gate from 0.14.0; handoff note at HybridDB
+  docs/specs/2026-08-28-rollback-performance-report.md), metadata
+  pre-filtering for search (`where=`), lazy DuckDB registration (stores never
+  queried with olap skip the mirror), and the keyword-mode where operator fix.
+
+### Performance (10k messages, scripts/bench_versioned_memory.py, hybriddb 0.7.0)
+- Versioned ingest overhead: **+0.2%** (was +8.2% on 0.6.0 — lazy DuckDB
+  offsets the chain cost)
+- Recall latency unchanged (65.6 vs 65.8 ms); storage 1.14×
+- **Rollback 1k removed rows: 0.32 s** (was 3.85 s on 0.6.0 — now 4× faster
+  than ingesting those rows; gate ≤1.25 s ✅); verify_chain 0.05 s @12k events
+- Retrieval metrics identical on 0.5.8/0.6.0/0.7.0 (S stratified-56:
+  0.965/0.537 all three)
+
 ## [0.14.0] — versioned memory (git-like governance), hybriddb 0.6.0 floor
 
 Memory governance via hybriddb 0.6.0's versioned tables: a tamper-evident hash

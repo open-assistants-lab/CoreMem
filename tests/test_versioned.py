@@ -98,7 +98,7 @@ def test_rollback_requires_label_or_seq():
         core._test_cleanup()
 
 def test_governance_methods_require_versioned_flag():
-    core = _make_core()  # flag off
+    core = _make_core(versioned=False)  # explicit opt-out
     try:
         with pytest.raises(RuntimeError, match="versioned=True"):
             core.memory_log()
@@ -111,7 +111,7 @@ def test_governance_methods_require_versioned_flag():
 
 def test_versioned_flag_on_legacy_store_warns_and_stays_unversioned(caplog):
     d = tempfile.mkdtemp()
-    legacy = MemoryCore(path=d)
+    legacy = MemoryCore(path=d, versioned=False)  # simulate pre-0.15.0 store
     legacy.ingest_many(_sample(2))
     legacy.close()
     with caplog.at_level("WARNING", logger="coremem.core"):
@@ -157,15 +157,25 @@ def test_author_recorded():
     finally:
         core._test_cleanup()
 
-def test_default_store_unchanged():
-    # flag off: no governance methods, delete path unchanged, tests green
-    core = _make_core()
+def test_default_store_is_versioned_since_0_15():
+    # default flip (0.15.0): a plain MemoryCore() gets versioned stores
+    core = _make_core()  # default versioned=True
     try:
         core.ingest_many(_sample(2))
         assert core.count() == 2
         assert core.delete_messages(["m0"]) == 1
         assert core.count() == 1
-        with pytest.raises(RuntimeError):
-            core.memory_history("m1")
+        events = core.memory_history("m0")
+        ops = [e["op"] for e in events]
+        assert "insert" in ops and "delete" in ops
+        assert core.verify_memory_chain()["messages"]["valid"]
+        # opt-out still available for plain stores
+        plain = _make_core(versioned=False)
+        try:
+            plain.ingest_many(_sample(1))
+            with pytest.raises(RuntimeError):
+                plain.memory_history("m0")
+        finally:
+            plain._test_cleanup()
     finally:
         core._test_cleanup()

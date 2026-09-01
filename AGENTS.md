@@ -123,7 +123,7 @@ results = core.recall(query, role="user", session_id="abc", ts_after="2024-01-01
 
 - **No verbatim compiler** — removed; only LLM compiler for daily journals
 - **Daily pages use hybriddb timestamps** — `daily/{actual_date}.md`, not `datetime.now(UTC)`
-- **hybriddb floor `>=0.6.0`** — pinned for versioned tables (0.14.0 memory governance); 0.5.8 floor validated retrieval-neutral by A/B, 0.6.0 re-verified on the stratified-56 (0.965/0.537 identical). `coremem.__version__` must match `pyproject.toml` exactly (0.13.3 fixed a 0.13.1/0.13.2 drift, same class as hybriddb 0.5.8).
+- **hybriddb floor `>=0.7.0`** — versioned tables are the DEFAULT since 0.15.0 (memory governance; 0.7.0 batched rollback 3.85s→0.32s per the rollback perf report); 0.5.8 floor validated retrieval-neutral by A/B, 0.6.0/0.7.0 re-verified on the stratified-56 (0.965/0.537 identical). `coremem.__version__` must match `pyproject.toml` exactly (0.13.3 fixed a 0.13.1/0.13.2 drift, same class as hybriddb 0.5.8).
 - **`DEFAULT_AGENT_JOURNAL_MODEL`** = `"openai:gpt-4o-mini"` (ollama-cloud not in library default)
 - **Per-question haystack** — canonical LongMemEval setup
 - **Resume/checkpoint** via sidecar `{output}.checkpoint.json`
