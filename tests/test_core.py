@@ -61,7 +61,7 @@ def test_search_messages_llm_expansion_normalizes_scores(monkeypatch):
                 "_score": score,
             }
 
-        def fake_search(table, col, q, limit=10):
+        def fake_search(table, col, q, limit=10, where=None):
             if q == "coffee creamer sugar milk honey":
                 return [_row("a", "alpha content", 0.9), _row("c", "charlie content", 0.8)]
             return [_row("b", "bravo content", 0.2), _row("a", "alpha content", 0.1)]
