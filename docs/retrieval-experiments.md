@@ -305,3 +305,33 @@ dominate; the paper's own extractor returns N/A when no range exists.
 VERDICT: no-op on this benchmark. Code retained (zero-LLM, opt-in via
 anchor_ts) — the window prior is correct-by-construction and may matter on
 range-heavy real-world queries, but it cannot move LongMemEval S.
+
+## Cross-benchmark transfer — LoCoMo stratified-30 answer eval (2026-09-02)
+
+Same harness/models as the S runs (`ollama:gpt-oss:120b-cloud`, blind judge,
+LoCoMo stratified-30: 6/type × 5 types). Paired, same contexts:
+
+| mode | acc |
+|---|---:|
+| `episodic_cap2` | **0.533** (+4/−0 vs direct, p=0.125) |
+| direct / con / con_json / factaug | **0.400** (identical judgments) |
+| `memorycore` | 0.233 |
+
+Findings:
+- **Lever 1 (CoN) does NOT transfer to LoCoMo** — zero paired flips (+0/−0),
+  abstention unchanged (0.83 both). On S it was +0.018 (p=0.108). Verdict:
+  benchmark-dependent, stays opt-in. The 0.16.0 `coremem.reading` guidance
+  stands (enable for synthesis-heavy questions).
+- **Lever 2 (factaug) doubly-falsified** — zero flips on LoCoMo too; context
+  chars identical on 23/30 questions (CE reranker normalization confirmed
+  cross-benchmark). CLOSED.
+- **New signal: `session_cap=2` is the standout on LoCoMo** (+0.133 over
+  direct, 4/0 flips) — consistent with LoCoMo's turn-level evidence inside
+  ~22-turn sessions: a second message of a found session often carries the
+  evidence. Stays opt-in (`session_cap=2`); worth remembering for
+  conversation-memory deployments with turn-heavy sessions.
+- Overall accuracy is far lower than S (0.40 vs 0.674) — LoCoMo's
+  open-domain/adversarial categories and turn-level evidence granularity are
+  genuinely harder for the reader.
+
+Artifacts: results/eval_answer_locomo_stratified30_con.json (+ .log)
