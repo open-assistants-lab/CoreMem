@@ -123,3 +123,26 @@ def test_metadata_and_ts_filters_still_work_python_side():
         assert all((h.memory.metadata or {}).get("topic") != "hardware" for h in hits)
     finally:
         core._test_cleanup()
+
+def test_ts_filters_chronological_across_mixed_formats():
+    """Mixed naive/aware timestamps compare chronologically, not lexically.
+
+    Old lexical behavior wrongly excluded a naive-23:00 message against an
+    aware-02:00 cutoff ('23:...' >= '02:...+00:00' as strings)."""
+    core = _make_core()
+    try:
+        core.ingest_many([
+            {"id": "naive_late", "role": "user", "content": "evening note about the concert.",
+             "session_id": "s1", "ts": "2024-01-01T23:00:00"},          # naive
+            {"id": "early", "role": "user", "content": "morning note about the concert.",
+             "session_id": "s1", "ts": "2024-01-01T01:00:00+00:00"},    # aware
+        ])
+        hits_after = core.recall("concert", ts_after="2024-01-01T02:00:00+00:00", limit=5)
+        assert [h.memory.id for h in hits_after] == ["naive_late"]
+        hits_before = core.recall("concert", ts_before="2024-01-01T02:00:00+00:00", limit=5)
+        assert [h.memory.id for h in hits_before] == ["early"]
+        # date-only cutoff parses
+        hits_day = core.recall("concert", ts_after="2024-01-01", limit=5)
+        assert {h.memory.id for h in hits_day} == {"naive_late", "early"}
+    finally:
+        core._test_cleanup()
