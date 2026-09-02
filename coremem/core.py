@@ -233,6 +233,23 @@ def _scalar_where(
     return where
 
 
+def _parse_ts_filter(value: str) -> datetime | None:
+    """Parse a filter timestamp into an aware datetime (naive → UTC).
+
+    Tolerant of ``Z`` suffixes and date-only values; returns None when
+    unparseable (callers fall back to the legacy lexical comparison).
+    """
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 def _matches_filters(
     mem: Memory,
     *,
@@ -252,10 +269,24 @@ def _matches_filters(
         return False
     if agent_id and mem.agent_id != agent_id:
         return False
-    if ts_after and (mem.ts is None or mem.ts.isoformat() <= ts_after):
-        return False
-    if ts_before and (mem.ts is None or mem.ts.isoformat() >= ts_before):
-        return False
+    if ts_after:
+        if mem.ts is None:
+            return False
+        cutoff = _parse_ts_filter(ts_after)
+        mem_dt = _to_utc(mem.ts)
+        # Chronological comparison (mixed naive/aware formats used to compare
+        # incorrectly as raw strings). Same boundary semantics as the legacy
+        # lexical check: keep strictly-after; fall back to lexical when the
+        # filter value is unparseable.
+        if (mem_dt <= cutoff) if cutoff is not None else (mem_dt.isoformat() <= ts_after):
+            return False
+    if ts_before:
+        if mem.ts is None:
+            return False
+        cutoff = _parse_ts_filter(ts_before)
+        mem_dt = _to_utc(mem.ts)
+        if (mem_dt >= cutoff) if cutoff is not None else (mem_dt.isoformat() >= ts_before):
+            return False
     if metadata:
         for key, value in metadata.items():
             if (mem.metadata or {}).get(key) != value:

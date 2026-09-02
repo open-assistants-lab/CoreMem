@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.16.1] — timestamp filters compare chronologically (mixed-format fix)
+
+### Fixed
+- **`ts_after`/`ts_before` filters now compare chronologically** across mixed
+  naive/aware timestamp formats — the documented known limitation since 0.13.2.
+  A naive `2024-01-01T23:00:00` message was previously **excluded** by
+  `ts_after="2024-01-01T02:00:00+00:00"` (lexically `"23:…" >= "02:…+00:00"`);
+  chronologically 23:00 > 02:00, so it is now correctly **kept**. Filter
+  values parse via ISO (tolerant of `Z` and date-only forms, naive → UTC);
+  unparseable values fall back to the legacy lexical comparison. Boundary
+  semantics unchanged (both filters exclusive).
+- `pyproject.toml`: the wheel now ships `CHANGELOG.md` (force-include).
+
+### Known limitations (updated)
+- Timestamp **pushdown into the Chroma scan** remains deferred: stored `ts`
+  strings in pre-existing stores keep arbitrary formats, so lexical comparison
+  inside Chroma would repeat the same bug at the engine layer. The Python
+  post-filter is now chronologically correct; storage-side normalization is a
+  prerequisite for pushing ts ranges down.
+
 ## [0.16.0] — metadata pre-filtering: recall filters pushed into the Chroma scan
 
 Adopts hybriddb 0.7.0's `search(where=)` — CoreMem's equality filters

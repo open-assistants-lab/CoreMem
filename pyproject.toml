@@ -1,6 +1,6 @@
 [project]
 name = "coremem"
-version = "0.16.0"
+version = "0.16.1"
 description = "Zero-LLM memory for AI agents — semantic search, cross-encoder reranking, and deterministic heuristics"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -52,6 +52,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["coremem"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"CHANGELOG.md" = "CHANGELOG.md"
 
 [tool.ruff]
 target-version = "py311"
