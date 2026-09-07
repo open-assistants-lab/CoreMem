@@ -187,18 +187,20 @@ def build_memorycore(
     *,
     llm_provider: Any = None,
     fact_augment: bool = False,
+    extract_facts: bool = False,
 ) -> MemoryCore:
     """Build a MemoryCore with the provided LongMemEval haystack messages.
 
     Uses batch ingest (single journal flush with batched embedding) —
-    ~5-15x faster than per-message inserts. With ``fact_augment=True``,
-    user-role messages get LLM-extracted facts prepended to their embedded
-    document (LongMemEval §5.3 key expansion); SQLite content stays verbatim.
+    ~5-15x faster than per-message inserts. With ``extract_facts=True``,
+    LLM-extracted facts land in the versioned facts table (Phase 2 of the
+    fact layer — docs/superpowers/plans/2026-09-07-fact-layer.md).
     """
     core = MemoryCore(
         path=str(root / "hybrid"),
         llm_provider=llm_provider,
         fact_augment=fact_augment,
+        extract_facts=extract_facts,
     )
     for instance in instances:
         for session in instance.sessions:
