@@ -464,13 +464,19 @@ Expected: FAIL with `AttributeError`
         return True
 
     def supersede_fact(self, fact_id: str, new_value: str) -> str:
-        """Replace a fact's value: old fact expires (superseded_by link), a new
-        fact is recorded. Both events live on the audit chain."""
+        """Replace a fact's value: the old fact expires (valid_to +
+        superseded_by link, set by add_fact's automatic supersession), a new
+        fact is recorded. Both events live on the audit chain.
+
+        Self-review defect #5 correction: do NOT call `_expire` before
+        `add_fact` — an expired fact no longer matches add_fact's supersession
+        query (`valid_to = '' AND superseded_by = ''`), so the link would
+        never land. Let add_fact set both fields."""
         self._require_facts()
         old = self.get_fact(fact_id)
         if old is None:
             raise ValueError(f"unknown fact: {fact_id}")
-        if not self._expire(fact_id):
+        if old["valid_to"]:
             raise ValueError(f"fact {fact_id} is already expired")
         # NOTE: the new fact's valid_from is NOW (when the superseding
         # statement was made) — do NOT inherit the old fact's valid_from,
