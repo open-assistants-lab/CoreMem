@@ -165,7 +165,7 @@ git commit -m "feat: fact-layer attribute ontology (cardinality-configurable, TO
 
 **Interfaces:**
 - Consumes: `FactOntology` (Task 1), `self._versioned`, `_flush_journal_batched`, `_require_versioned`
-- Produces: `MemoryCore.add_fact(entity: str, attribute: str, value: str, *, user_id: str = "", source_message_id: str = "", valid_from: str | None = None) -> str`; instance attr `self._ontology: FactOntology`
+- Produces: `MemoryCore.add_fact(entity: str, attribute: str, value: str, *, user_id: str = "", source_message_id: str = "", valid_from: str | None = None) -> str`; instance attr `self._ontology: FactOntology`; **`verify_memory_chain`/`checkpoint_memory`/`rollback_memory` extended to cover `facts`**
 
 - [ ] **Step 1: Write the failing test**
 
@@ -291,6 +291,12 @@ New methods (place after `verify_memory_chain`):
         return fid
 ```
 
+**Also extend the three governance methods to cover `facts`** (the tests assert
+this): `verify_memory_chain` gains `"facts": self._db.verify_chain("facts")`;
+`checkpoint_memory` gains `"facts": self._db.checkpoint("facts", label)`;
+`rollback_memory` gains `"facts": self._db.rollback("facts", **kwargs)`.
+```
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run python3 -m pytest tests/test_fact_layer.py -v`
@@ -313,7 +319,7 @@ git commit -m "feat: facts versioned table + add_fact with ontology cardinality 
 
 **Interfaces:**
 - Consumes: facts table (Task 2)
-- Produces: `MemoryCore.list_facts(*, entity=None, attribute=None, user_id=None, include_expired=False, limit=200) -> list[dict]`; `MemoryCore.get_fact(fact_id: str) -> dict | None`
+- Produces: `MemoryCore.list_facts(*, entity=None, attribute=None, user_id=None, include_expired=False, limit=200) -> list[dict]`; `MemoryCore.get_fact(fact_id: str) -> dict | None`; `MemoryCore.fact_history(fact_id: str) -> list[dict]` (per-row chain events — Task 6's MCP tool consumes this)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -379,6 +385,11 @@ Expected: FAIL with `AttributeError`
         self._require_facts()
         rows = self._db.raw_query("SELECT * FROM facts WHERE id = ?", [fact_id])
         return rows[0] if rows else None
+
+    def fact_history(self, fact_id: str) -> list[dict[str, Any]]:
+        """Provenance timeline of one fact (every chain event, oldest first)."""
+        self._require_facts()
+        return self._db.history("facts", fact_id)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -461,11 +472,13 @@ Expected: FAIL with `AttributeError`
             raise ValueError(f"unknown fact: {fact_id}")
         if not self._expire(fact_id):
             raise ValueError(f"fact {fact_id} is already expired")
+        # NOTE: the new fact's valid_from is NOW (when the superseding
+        # statement was made) — do NOT inherit the old fact's valid_from,
+        # that would falsify the bi-temporal timeline.
         return self.add_fact(
             old["entity"], old["attribute"], new_value,
             user_id=old["user_id"],
             source_message_id=old["source_message_id"],
-            valid_from=old["valid_from"],  # lifecycle verb: keep original validity start
         )
 
     def expire_fact(self, fact_id: str) -> bool:
