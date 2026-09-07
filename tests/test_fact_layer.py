@@ -118,3 +118,20 @@ def test_merge_facts_expires_sources():
         assert core.verify_memory_chain()["facts"]["valid"]
     finally:
         core._test_cleanup()
+
+
+def test_facts_digest_groups_budget_caps_and_handles_empty():
+    from coremem.reading import build_facts_digest
+    assert build_facts_digest([]) == ""
+    facts = [
+        {"entity": "user", "attribute": "dog", "value": "Max",
+         "valid_from": "2024-05-01T00:00:00+00:00"},
+        {"entity": "user", "attribute": "employer", "value": "Acme",
+         "valid_from": "2024-03-01T00:00:00+00:00"},
+    ]
+    out = build_facts_digest(facts)
+    assert out.startswith("[FACTS]")
+    assert "user.dog = Max (since 2024-05-01)" in out
+    assert "user.employer = Acme (since 2024-03-01)" in out
+    tiny = build_facts_digest(facts, budget_chars=40)
+    assert len(tiny) <= 40 + len("- …(facts truncated)")
