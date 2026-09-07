@@ -53,3 +53,38 @@ def test_add_fact_requires_versioned_store():
             core.add_fact("user", "dog", "Max")
     finally:
         core._test_cleanup()
+
+def test_list_facts_filters_and_hides_expired():
+    core = _make_core(versioned=True)
+    try:
+        core.add_fact("user", "employer", "Acme")
+        core.add_fact("user", "employer", "Globex")   # supersedes Acme
+        core.add_fact("user", "pet", "Max")
+        values = {f["value"] for f in core.list_facts(entity="user")}
+        assert "Globex" in values and "Acme" not in values and "Max" in values
+        expired = core.list_facts(entity="user", include_expired=True)
+        assert any(f["value"] == "Acme" and f["valid_to"] for f in expired)
+        assert all(f["user_id"] == "" for f in expired)
+    finally:
+        core._test_cleanup()
+
+
+def test_get_fact_returns_row_or_none():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "dog", "Max")
+        assert core.get_fact(fid)["value"] == "Max"
+        assert core.get_fact("nonexistent") is None
+    finally:
+        core._test_cleanup()
+
+
+def test_fact_history_shows_chain_events():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "dog", "Max")
+        events = core.fact_history(fid)
+        assert len(events) >= 1
+        assert all(e.get("op") in ("insert", "add", "update", "delete") for e in events)
+    finally:
+        core._test_cleanup()

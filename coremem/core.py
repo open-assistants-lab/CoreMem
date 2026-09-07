@@ -1516,6 +1516,18 @@ class MemoryCore:
         params.append(limit)
         return self._db.raw_query(sql, tuple(params))
 
+    def get_fact(self, fact_id: str) -> dict[str, Any] | None:
+        """Fetch one fact row by id (deterministic, zero-LLM), or None."""
+        self._require_facts()
+        rows = self._db.raw_query("SELECT * FROM facts WHERE id = ?", [fact_id])
+        return rows[0] if rows else None
+
+    def fact_history(self, fact_id: str) -> list[dict[str, Any]]:
+        """Provenance timeline of one fact: every chain event (insert/update),
+        oldest first — the audit trail Task 6's MCP tool exposes."""
+        self._require_facts()
+        return self._db.history("facts", fact_id)
+
     def close(self) -> None:
         """Release Chroma/hybrid resources held by this instance.
 
