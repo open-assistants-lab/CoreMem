@@ -582,9 +582,13 @@ def build_facts_digest(facts: list[dict], *, budget_chars: int = FACTS_DIGEST_BU
             line += f" (since {str(f['valid_from'])[:10]})"
         lines.append(f"- {line}")
     body = "\n".join(lines)
-    if len(body) > budget_chars:
-        body = body[:budget_chars].rsplit("\n", 1)[0] + "\n- …(facts truncated)"
-    return "[FACTS]\n" + body
+    # Budget applies to the WHOLE digest including the header (defect #6:
+    # capping only the body then prepending the header exceeds the cap).
+    header = "[FACTS]\n"
+    if len(header) + len(body) > budget_chars:
+        keep = budget_chars - len(header) - len("\n- …(facts truncated)")
+        body = body[:keep].rsplit("\n", 1)[0] + "\n- …(facts truncated)"
+    return header + body
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
