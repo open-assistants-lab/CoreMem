@@ -190,6 +190,48 @@ def run_mcp_server(path: str | None = None) -> None:
         return json.dumps({"verdict": verdict, "detail": result}, indent=1, default=str)
 
     @mcp.tool()
+    async def add_fact(entity: str, attribute: str, value: str, user_id: str = "") -> str:
+        """Record a governed fact about an entity (versioned stores only).
+        Facts are deterministic lookups with provenance — prefer this over
+        free-text memories when the agent learns a durable, structured truth.
+        Single-valued attributes (per the attribute ontology) supersede their
+        old value; multi-valued ones append.
+
+        Example: add_fact(entity="user", attribute="dog", value="Max")
+        """
+        fid = core.add_fact(entity, attribute, value, user_id=user_id)
+        return f"fact recorded: {fid}"
+
+    @mcp.tool()
+    async def list_facts(entity: str = "", attribute: str = "", user_id: str = "") -> str:
+        """List current governed facts (versioned stores only), optionally by
+        entity/attribute. Deterministic, zero-LLM — use for direct questions
+        like "what do you know about the user's pets?".
+
+        Example: list_facts(entity="user")
+        """
+        facts = core.list_facts(
+            entity=entity or None, attribute=attribute or None,
+            user_id=user_id if user_id else None,
+        )
+        if not facts:
+            return "no facts recorded"
+        return "\n".join(
+            f"{f['id']}: {f['entity']}.{f['attribute']} = {f['value']} "
+            f"(since {f['valid_from'][:10]})"
+            for f in facts
+        )
+
+    @mcp.tool()
+    async def fact_history(fact_id: str) -> str:
+        """Provenance timeline of one governed fact (versioned stores only):
+        every recorded change on the audit chain, with timestamps and author.
+
+        Example: fact_history(fact_id="a1b2c3d4e5f6")
+        """
+        return json.dumps(core.fact_history(fact_id), indent=1, default=str)
+
+    @mcp.tool()
     async def fetch_session(session_id: str, limit: int = 50) -> str:
         """Fetch messages from one session (newest first). Use to read the
         full conversation context of a session found via recall or
