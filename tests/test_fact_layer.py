@@ -135,3 +135,42 @@ def test_facts_digest_groups_budget_caps_and_handles_empty():
     assert "user.employer = Acme (since 2024-03-01)" in out
     tiny = build_facts_digest(facts, budget_chars=40)
     assert len(tiny) <= 40 + len("- …(facts truncated)")
+
+
+class _FactStubProvider:
+    async def chat(self, messages):
+        import json as _json
+        payload = _json.loads(
+            messages[0]["content"].split("Messages (JSON list of")[1]
+            .split(":", 1)[1].rsplit("Return ONLY", 1)[0]
+        )
+        out = {}
+        for m in payload:
+            if "Denver" in m["content"]:
+                out[m["id"]] = [{"entity": "user", "attribute": "home_city",
+                                 "value": "Denver"}]
+        return type("R", (), {"content": _json.dumps(out)})()
+
+
+def test_extract_facts_ingests_candidates_flag_on():
+    core = _make_core(versioned=True, llm_provider=_FactStubProvider(), extract_facts=True)
+    try:
+        core.ingest_many([
+            {"id": "a1", "role": "user", "content": "I live in Denver.", "session_id": "s1"},
+        ])
+        facts = core.list_facts(entity="user")
+        assert any(f["value"] == "Denver" and f["source_message_id"] == "a1" for f in facts)
+        assert core.get_fact(facts[0]["id"])["attribute"] == "home_city"
+    finally:
+        core._test_cleanup()
+
+
+def test_extract_facts_off_by_default():
+    core = _make_core(versioned=True, llm_provider=_FactStubProvider())
+    try:
+        core.ingest_many([
+            {"id": "a1", "role": "user", "content": "I live in Denver.", "session_id": "s1"},
+        ])
+        assert core.list_facts(entity="user") == []
+    finally:
+        core._test_cleanup()

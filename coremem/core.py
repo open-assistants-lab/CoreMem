@@ -344,11 +344,13 @@ class MemoryCore:
         llm_provider: LLMProvider | None = None,
         agent_journal_model: str = DEFAULT_AGENT_JOURNAL_MODEL,
         fact_augment: bool = False,
+        extract_facts: bool = False,
         versioned: bool = True,
         author: str | None = None,
     ):
         self._db = HybridDB(path=path, embedding_fn=_query_embedding_fn)
         self._versioned = versioned
+        self._extract_facts = extract_facts
         if author:
             self._db.author = author
         self._heuristics = SearchHeuristics()
@@ -580,6 +582,8 @@ class MemoryCore:
                     "fact_augment=True but no usable LLM provider; "
                     "ingesting without fact augmentation"
                 )
+        if self._extract_facts:
+            self._extract_fact_candidates(rows)
         _flush_journal_batched(self._db, augment=augment)
         return ids
 
@@ -1527,6 +1531,69 @@ class MemoryCore:
         oldest first — the audit trail Task 6's MCP tool exposes."""
         self._require_facts()
         return self._db.history("facts", fact_id)
+
+    def _extract_fact_candidates(self, rows: list[dict[str, Any]]) -> None:
+        """Phase 2 (gated): LLM-extract candidate facts from user-role rows
+        at ingest, landing them in the governed facts table with per-message
+        provenance. Opt-in (``extract_facts=True``); zero-LLM read path is
+        untouched. Degrade-to-no-facts contract: provider errors or
+        unparseable output log a warning and never raise into ingest.
+        """
+        provider = self._llm_provider
+        if provider is None:
+            logger.warning(
+                "extract_facts=True but no usable LLM provider; "
+                "skipping fact extraction"
+            )
+            return
+        user_rows = [row for row in rows if row.get("role") == "user"]
+        if not user_rows:
+            return
+        user_id_by_mid = {row["id"]: row.get("user_id", "") for row in user_rows}
+        try:
+            for start in range(0, len(user_rows), self._FACT_EXTRACT_CHUNK):
+                chunk = [
+                    {"id": row["id"], "content": row["content"]}
+                    for row in user_rows[start:start + self._FACT_EXTRACT_CHUNK]
+                ]
+                prompt = (
+                    "You will be given messages from a human user to an AI assistant. For each "
+                    "message, extract durable structured facts about the user as "
+                    "{\"entity\", \"attribute\", \"value\"} objects — for example "
+                    "{\"entity\": \"user\", \"attribute\": \"home_city\", \"value\": \"Denver\"}. "
+                    "Include life events, preferences, belongings, and relationships with "
+                    "specific numbers, names, or dates. Use short lowercase attribute names "
+                    "and standalone values (no pronouns, no sentences). If a message "
+                    "contains no extractable facts, use an empty list for it.\n\n"
+                    f"Messages (JSON list of {{\"id\", \"content\"}}):\n{json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    "Return ONLY a JSON object mapping each id to an array of "
+                    "{\"entity\", \"attribute\", \"value\"} objects."
+                )
+                response = asyncio.run(provider.chat([{"role": "user", "content": prompt}]))
+                text = str(response.content if hasattr(response, "content") else response).strip()
+                match = re.search(r"\{.*\}", text, re.DOTALL)
+                if not match:
+                    continue
+                parsed = json.loads(match.group(0))
+                if not isinstance(parsed, dict):
+                    continue
+                for mid, candidates in parsed.items():
+                    if not isinstance(candidates, list):
+                        continue
+                    for cand in candidates:
+                        if not isinstance(candidates, list) or not isinstance(cand, dict):
+                            continue
+                        entity = str(cand.get("entity", "")).strip()
+                        attribute = str(cand.get("attribute", "")).strip()
+                        value = str(cand.get("value", "")).strip()
+                        if entity and attribute and value:
+                            self.add_fact(
+                                entity, attribute, value,
+                                user_id=user_id_by_mid.get(mid, ""),
+                                source_message_id=mid,
+                            )
+        except Exception as exc:
+            logger.warning("fact extraction produced no facts for this batch: %s", exc)
 
     # ── Lifecycle verbs (operator intent on top of add_fact) ────────────
 
