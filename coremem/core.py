@@ -31,6 +31,7 @@ from coremem.agent_journal import (
 )
 from coremem.agent_journal.llm_compiler import DEFAULT_AGENT_JOURNAL_MODEL
 from coremem.heuristics import SearchHeuristics, _mmr_diversify
+from coremem.ontology import FactOntology
 from coremem.query import LLMProvider, decompose_queries, expand_queries
 from coremem.retrieval import _is_preference_query, search_messages_preference_union
 from coremem.rerank import get_cross_encoder, rerank
@@ -354,6 +355,7 @@ class MemoryCore:
         self._llm_provider = llm_provider
         self._fact_augment = fact_augment
         self._fact_augment_warned = False
+        self._ontology = FactOntology()
         self._ensure_tables()
         workspace_root = Path(path).resolve().parent
         self._agent_journal_root = workspace_root / "agent_journal"
@@ -421,6 +423,25 @@ class MemoryCore:
         self._db.raw_query(
             "CREATE INDEX IF NOT EXISTS idx_journal_records_session ON journal_records(session_id)"
         )
+        # Governed fact layer (docs/superpowers/plans/2026-09-07-fact-layer.md):
+        # versioned {entity, attribute, value} facts with provenance. search_text
+        # (LONGTEXT) is the only embedded column — semantic fact lookup through
+        # the existing hybrid search; scalar columns stay out of the vector store.
+        # Versioned table → every fact write lands on the audit chain.
+        if self._versioned and "facts" not in self._db.list_tables():
+            self._db.create_table("facts", {
+                "id": "TEXT PRIMARY KEY",
+                "user_id": "TEXT DEFAULT ''",
+                "entity": "TEXT NOT NULL",
+                "attribute": "TEXT NOT NULL",
+                "value": "TEXT NOT NULL",
+                "valid_from": "TEXT NOT NULL",
+                "valid_to": "TEXT DEFAULT ''",
+                "superseded_by": "TEXT DEFAULT ''",
+                "source_message_id": "TEXT DEFAULT ''",
+                "created_at": "TEXT NOT NULL",
+                "search_text": "LONGTEXT",
+            }, versioned=True)
         # Fact-augmented key expansion side table (LongMemEval §5.3): LLM-extracted
         # user facts per message, prepended to the encoded document at flush time.
         # SQLite content stays verbatim; only the embedding input changes.
@@ -1368,6 +1389,7 @@ class MemoryCore:
         return {
             "messages": self._db.checkpoint("messages", label),
             "journal_records": self._db.checkpoint("journal_records", label),
+            "facts": self._db.checkpoint("facts", label),
         }
 
     def rollback_memory(
@@ -1388,6 +1410,7 @@ class MemoryCore:
         return {
             "messages": self._db.rollback("messages", **kwargs),
             "journal_records": self._db.rollback("journal_records", **kwargs),
+            "facts": self._db.rollback("facts", **kwargs),
         }
 
     def memory_log(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -1413,7 +1436,7 @@ class MemoryCore:
         return self._db.as_of("messages", seq)
 
     def verify_memory_chain(self) -> dict[str, Any]:
-        """Recompute both hash chains and report the first broken link.
+        """Recompute the hash chains and report the first broken link.
 
         Detects direct tampering with the history store. O(chain length) —
         do not call per-request; suitable for periodic audits and the CLI.
@@ -1422,7 +1445,76 @@ class MemoryCore:
         return {
             "messages": self._db.verify_chain("messages"),
             "journal_records": self._db.verify_chain("journal_records"),
+            "facts": self._db.verify_chain("facts"),
         }
+
+    # ── Fact layer (docs/superpowers/plans/2026-09-07-fact-layer.md) ──────
+
+    def _require_facts(self) -> None:
+        self._ensure_open()
+        self._require_versioned()
+
+    def add_fact(
+        self, entity: str, attribute: str, value: str, *,
+        user_id: str = "", source_message_id: str = "",
+        valid_from: str | None = None,
+    ) -> str:
+        """Record a governed fact. Supersedes the current fact for
+        single-cardinality attributes (per the attribute ontology); appends
+        for multi-valued ones. Provenance rides the versioned chain: every
+        write lands on the facts hash chain and is reversible via
+        ``rollback_memory``."""
+        self._require_facts()
+        if not entity or not attribute or not value:
+            raise ValueError("add_fact requires non-empty entity, attribute, value")
+        attr_def = self._ontology.attribute(attribute)
+        now = datetime.now(UTC).isoformat()
+        fid = str(uuid.uuid4())[:12]
+        if attr_def.cardinality == "single":
+            # single-cardinality: the new value supersedes — the old fact gets
+            # valid_to + superseded_by, both events verifiable on the chain
+            current = self._db.raw_query(
+                "SELECT id FROM facts WHERE user_id = ? AND entity = ? "
+                "AND attribute = ? AND valid_to = '' AND superseded_by = ''",
+                [user_id, entity, attribute],
+            )
+            for row in current:
+                self._db.update("facts", row["id"],
+                                {"valid_to": now, "superseded_by": fid}, sync=False)
+        self._db.insert_batch("facts", [{
+            "id": fid, "user_id": user_id, "entity": entity,
+            "attribute": attribute, "value": value,
+            "valid_from": valid_from or now, "valid_to": "",
+            "superseded_by": "", "source_message_id": source_message_id,
+            "created_at": now,
+            "search_text": f"{entity}.{attribute} = {value}",
+        }], sync=False)
+        _flush_journal_batched(self._db)
+        return fid
+
+    def list_facts(
+        self, *, entity: str | None = None, attribute: str | None = None,
+        user_id: str | None = None, include_expired: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Current facts (deterministic, zero-LLM). Expired facts (superseded
+        or expired) hidden unless include_expired=True."""
+        self._require_facts()
+        clauses, params = [], []
+        if entity:
+            clauses.append("entity = ?"); params.append(entity)
+        if attribute:
+            clauses.append("attribute = ?"); params.append(attribute)
+        if user_id is not None:
+            clauses.append("user_id = ?"); params.append(user_id)
+        if not include_expired:
+            clauses.append("valid_to = '' AND superseded_by = ''")
+        sql = "SELECT * FROM facts"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return self._db.raw_query(sql, tuple(params))
 
     def close(self) -> None:
         """Release Chroma/hybrid resources held by this instance.
