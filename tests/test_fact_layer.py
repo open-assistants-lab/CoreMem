@@ -88,3 +88,33 @@ def test_fact_history_shows_chain_events():
         assert all(e.get("op") in ("insert", "add", "update", "delete") for e in events)
     finally:
         core._test_cleanup()
+
+
+def test_supersede_fact_sets_valid_to_and_link():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "employer", "Acme")
+        new_id = core.supersede_fact(fid, "Globex")
+        old = core.get_fact(fid)
+        assert old["valid_to"] and old["superseded_by"] == new_id
+        assert core.get_fact(new_id)["value"] == "Globex"
+        # bi-temporal correctness: the new value's validity STARTS now — it
+        # must not inherit the superseded fact's valid_from
+        assert core.get_fact(new_id)["valid_from"] != old["valid_from"]
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()
+
+
+def test_merge_facts_expires_sources():
+    core = _make_core(versioned=True)
+    try:
+        f1 = core.add_fact("user", "pet", "Max")
+        f2 = core.add_fact("user", "pet", "Bella")
+        merged = core.merge_facts([f1, f2], "Max and Bella")
+        assert core.get_fact(f1)["valid_to"] and core.get_fact(f2)["valid_to"]
+        pets = {f["value"] for f in core.list_facts(entity="user", attribute="pet")}
+        assert "Max and Bella" in pets
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()

@@ -1528,6 +1528,62 @@ class MemoryCore:
         self._require_facts()
         return self._db.history("facts", fact_id)
 
+    # ── Lifecycle verbs (operator intent on top of add_fact) ────────────
+
+    def _expire(self, fact_id: str) -> bool:
+        """Soft-expire one fact (set valid_to). Returns False for unknown or
+        already-expired facts. Tracked write: db.update + journal flush —
+        the versioned chain records the expiry, nothing is erased."""
+        now = datetime.now(UTC).isoformat()
+        row = self.get_fact(fact_id)
+        if row is None or row["valid_to"]:
+            return False
+        self._db.update("facts", fact_id, {"valid_to": now}, sync=False)
+        _flush_journal_batched(self._db)
+        return True
+
+    def supersede_fact(self, fact_id: str, new_value: str) -> str:
+        """Replace a fact's value: the old fact expires (valid_to + superseded_by
+        link, set by add_fact's automatic supersession), a new fact is recorded.
+        Both events live on the audit chain."""
+        self._require_facts()
+        old = self.get_fact(fact_id)
+        if old is None:
+            raise ValueError(f"unknown fact: {fact_id}")
+        if old["valid_to"]:
+            raise ValueError(f"fact {fact_id} is already expired")
+        # NOTE: the new fact's valid_from is NOW (when the superseding statement
+        # was made) — do NOT inherit the old fact's valid_from.
+        return self.add_fact(
+            old["entity"], old["attribute"], new_value,
+            user_id=old["user_id"],
+            source_message_id=old["source_message_id"],
+        )
+
+    def expire_fact(self, fact_id: str) -> bool:
+        """Soft-expire one fact. Returns False for unknown or already-expired
+        facts; the audit chain never rewinds (the expiry itself is history)."""
+        self._require_facts()
+        return self._expire(fact_id)
+
+    def merge_facts(self, fact_ids: list[str], merged_value: str) -> str:
+        """Combine duplicate facts ('Max' + 'my dog Max') into one; the sources
+        stay expired-and-auditable on the chain."""
+        self._require_facts()
+        if len(fact_ids) < 2:
+            raise ValueError("merge_facts requires at least two fact ids")
+        facts = [self.get_fact(f) for f in fact_ids]
+        if any(f is None for f in facts):
+            raise ValueError("merge_facts: unknown fact id in list")
+        first = facts[0]
+        for f in facts:
+            self._expire(f["id"])
+        return self.add_fact(
+            first["entity"], first["attribute"], merged_value,
+            user_id=first["user_id"],
+            source_message_id=first["source_message_id"],
+        )
+
     def close(self) -> None:
         """Release Chroma/hybrid resources held by this instance.
 
