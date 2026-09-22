@@ -280,6 +280,13 @@ Docker deployment — no leaderboard key). The platform runs the smoke suite
 ScriptMem, BEAM, CLBench, and LoCoMo-Refined — an independent,
 reader-matched, multi-judge measurement of CoreMem's end-to-end QA accuracy.
 
+## Roadmap and backlog
+
+Open improvement ideas — each with its evidence, and a recorded reason when an
+item was tried and closed — live in **[docs/backlog.md](docs/backlog.md)**.
+Concluded experiments (retrieval levers, A/B results, falsifications) are in
+[docs/retrieval-experiments.md](docs/retrieval-experiments.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

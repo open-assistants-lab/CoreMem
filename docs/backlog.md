@@ -1,9 +1,11 @@
-# Micro-Improvements Log
+# CoreMem Backlog
 
-2026-06-01
+Open work queue: improvement ideas identified during benchmarking, research, and
+competitor analysis — not blocking, not urgent. Each entry carries its evidence
+and a reason when closed, so items are not re-litigated without new data.
 
-Low-effort, high-impact improvements identified during benchmarking and
-competitor analysis. Not blocking, not urgent — queue for a future sprint.
+Related records: `docs/retrieval-experiments.md` (concluded levers),
+`docs/versioned-memory-design.md`, `docs/laya-routing-spike.md`.
 
 ---
 
