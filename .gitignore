@@ -30,3 +30,5 @@ worktrees/
 data/instances_s500/
 data/instances_locomo/
 data/locomo/locomo_longmemeval.json
+
+data/locomo/
