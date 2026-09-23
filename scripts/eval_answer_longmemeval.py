@@ -404,6 +404,20 @@ def run(
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # Release per-question MemoryCore resources (Chroma clients, SQLite
+        # handles). Without this, each question leaks a pooled Chroma client
+        # (2 with the factaug arm); long runs exhaust memory around question
+        # ~10 (observed as MPS/OOM and 'vector store readonly'). Results are
+        # already computed, so closing changes nothing about the measurement.
+        try:
+            core.close()
+        except Exception:
+            pass
+        if core_factaug is not None:
+            try:
+                core_factaug.close()
+            except Exception:
+                pass
         if not reuse:
             shutil.rmtree(instance_root, ignore_errors=True)
 
