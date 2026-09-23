@@ -59,6 +59,14 @@ From the LangChain/Jev article + the Laya spike (`docs/laya-routing-spike.md`,
 - **Reranker replacement**: contraindicated by the falsification record (L-12, BGE-reranker-v2-m3 both hurt; relevance scoring is where size doesn't help).
 - **MCP destructive-op risk gating**: the versioned chain makes ops reversible; low value for a memory library.
 
+### Alternatives evaluated (System One models)
+
+| Model | Verdict | Why |
+|---|---|---|
+| **Laya** (Apache-2.0, 421M) | **spiked** — see `docs/laya-routing-spike.md` | Fits our decision points (text classification), runs locally on this Mac, 181ms/call CPU, measured ECE 0.081. Only the *temporal* routing probe beat our regex; preference/synthesis did not |
+| **NanoJev** (MIT, 0.6B, [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev)) | **parked — not a fit for current use cases** | (1) Domain: trained on **game/embodied decision questions** (ViZDoom aim-fire, maze, snake), not text classification — our decision points are all text-over-memory; zero-shot text transfer is unpromising. (2) Footprint: **2.4 GB** safetensors (13× Laya) — this machine is already OOMing at ~1 GB eval footprints. (3) Serving is **CUDA/triton-first** (`--disable-native-triton` fallback exists; MPS/CPU path unclaimed). **Exception worth remembering:** its **Choice primitive takes 2–255 dynamic candidates** — the right structural shape for *action selection* (e.g. "which retrieval strategy?") if we ever fine-tune a router on labelled outcomes (MIT license, dataset + training recipe shipped) |
+| Von, SemIf/openjev, Decider, OpenDecision, mini-jev, … | not evaluated | Survey (systemonemodels.org) found no calibration metric or explicitly disclaimed calibration for these; Von is the latency standout (sub-15ms, MPS) if latency ever becomes the binding constraint |
+
 ### Constraints for any System One adoption
 
 - **Latency**: 181 ms/call CPU (recall is ~65 ms warm) + ~190 s cold load → **batch/ingest only**; hot-path needs MPS (~20–35 ms) verification.
