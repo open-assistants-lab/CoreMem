@@ -394,3 +394,35 @@ need ~10 restart cycles.
 
 Artifacts: `results/eval_answer_s56_factdigest.json` (+ `.log`), worktree
 `fact-layer`, data `data/longmemeval_s_stratified_56.json`.
+
+### Pre-registered: full-S confirmation of the fact digest (NOT YET RUN)
+
+Written before any full-S data is seen. Do not run this until the host has
+memory headroom (the 56-question run needed six process restarts).
+
+**Question.** Does the fact digest beat the 4k bundle on full LongMemEval S
+(500 questions), or was stratified-56's +0.017 a small-sample artifact?
+
+**Design.** `scripts/eval_answer_longmemeval.py`, S cleaned, all 500
+questions, `episodic_4k_reranked` vs `episodic_4k_reranked_factdigest`, same
+reader/judge (`ollama:gpt-oss:120b-cloud`), blind, paired per question.
+Retrieval is identical by construction (facts never enter message search), so
+the comparison isolates the digest's contribution to the prompt.
+
+**Pre-registered kill criteria** (decided before the run):
+- net ≤ 0 paired flips → Phase 2 extraction is CLOSED. Record as a second
+  negative for the fact-augmentation family (lever 2 was neutral on S and on
+  LoCoMo; the digest sibling would close the write-side variant too). The
+  Phase 1 governance API still ships — it is useful without extraction.
+- net > 0 but p ≥ 0.10 → stays opt-in-off, recorded as "promising,
+  unconfirmed". Only a second independent confirmation would justify
+  revisiting the default.
+- net > 0 and p < 0.10 → scale to LoCoMo stratified-30 (cross-benchmark, as
+  lever 1 required) before any default discussion.
+- Any regression in abstention accuracy → opt-in-off regardless of net
+  accuracy; a fact layer that talks the reader out of abstaining is harmful.
+
+**Cost warning.** ~8–10 min/question (15–25 extraction LLM calls/question)
+→ 70–80 h serial. Not feasible on the memory-starved host. Prerequisite:
+stop the 8 Docker containers (or move to a bigger machine) so the run is a
+single clean pass rather than ~10 restart cycles.
