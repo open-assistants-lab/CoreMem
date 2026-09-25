@@ -75,8 +75,11 @@ def test_mcp_server_full_protocol_roundtrip():
                 tools = await session.list_tools()
                 names = [t.name for t in tools.tools]
                 assert names == [
-                    "recall", "ingest", "delete", "fetch_session",
-                    "list_sessions", "stats", "compile", "rebuild_index",
+                    "recall", "ingest", "delete",
+                    "memory_history", "memory_rollback", "memory_verify",
+                    "add_fact", "list_facts", "fact_history",
+                    "fetch_session", "list_sessions", "stats",
+                    "compile", "rebuild_index",
                 ], names
 
                 text = lambda r: r.content[0].text

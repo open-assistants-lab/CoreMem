@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from coremem import MemoryCore
+from coremem.reading import build_facts_digest
 from coremem.providers import create_provider
 from eval_agent_journal_longmemeval import build_memorycore, load_longmemeval_instances, prepare_instances
 
@@ -34,6 +35,10 @@ MODES = (
     # (LongMemEval §5.5: CoN+JSON is the strongest reader configuration).
     "episodic_4k_reranked_con",
     "episodic_4k_reranked_con_json",
+    # Phase 2 kill-gate: identical bundles context + budget-capped [FACTS]
+    # digest (extracted at ingest via extract_facts=True). Tests whether a
+    # governed facts section lifts answer accuracy or just adds noise.
+    "episodic_4k_reranked_factdigest",
     # Fact-augmented key expansion (LongMemEval §5.3): a second core instance
     # ingests with LLM-extracted user facts prepended to embedded documents.
     # Same retrieval chain as episodic_4k_reranked; only the index differs.
@@ -221,6 +226,7 @@ def run(
                 instance_root,
                 [instance],
                 llm_provider=answer_provider,
+                extract_facts=True,  # Phase 2: facts table for the factdigest arm
             )
         else:
             core = MemoryCore(
@@ -316,6 +322,14 @@ def run(
         contexts["episodic_4k_reranked_con_json"] = _format_bundles_json(reranked_bundles)
         retrieval_seconds["episodic_4k_reranked_con"] = retrieval_seconds["episodic_4k_reranked"]
         retrieval_seconds["episodic_4k_reranked_con_json"] = retrieval_seconds["episodic_4k_reranked"]
+        # Phase 2 kill-gate: same bundles + budget-capped [FACTS] digest.
+        # Empty digest -> context identical to control (paired by construction).
+        _digest = build_facts_digest(core.list_facts(limit=200))
+        contexts["episodic_4k_reranked_factdigest"] = (
+            contexts["episodic_4k_reranked"] + "\n\n" + _digest
+            if _digest else contexts["episodic_4k_reranked"]
+        )
+        retrieval_seconds["episodic_4k_reranked_factdigest"] = retrieval_seconds["episodic_4k_reranked"]
 
         if core_factaug is not None:
             started = time.perf_counter()
@@ -390,6 +404,20 @@ def run(
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # Release per-question MemoryCore resources (Chroma clients, SQLite
+        # handles). Without this, each question leaks a pooled Chroma client
+        # (2 with the factaug arm); long runs exhaust memory around question
+        # ~10 (observed as MPS/OOM and 'vector store readonly'). Results are
+        # already computed, so closing changes nothing about the measurement.
+        try:
+            core.close()
+        except Exception:
+            pass
+        if core_factaug is not None:
+            try:
+                core_factaug.close()
+            except Exception:
+                pass
         if not reuse:
             shutil.rmtree(instance_root, ignore_errors=True)
 

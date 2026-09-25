@@ -187,18 +187,20 @@ def build_memorycore(
     *,
     llm_provider: Any = None,
     fact_augment: bool = False,
+    extract_facts: bool = False,
 ) -> MemoryCore:
     """Build a MemoryCore with the provided LongMemEval haystack messages.
 
     Uses batch ingest (single journal flush with batched embedding) —
-    ~5-15x faster than per-message inserts. With ``fact_augment=True``,
-    user-role messages get LLM-extracted facts prepended to their embedded
-    document (LongMemEval §5.3 key expansion); SQLite content stays verbatim.
+    ~5-15x faster than per-message inserts. With ``extract_facts=True``,
+    LLM-extracted facts land in the versioned facts table (Phase 2 of the
+    fact layer — docs/superpowers/plans/2026-09-07-fact-layer.md).
     """
     core = MemoryCore(
         path=str(root / "hybrid"),
         llm_provider=llm_provider,
         fact_augment=fact_augment,
+        extract_facts=extract_facts,
     )
     for instance in instances:
         for session in instance.sessions:
@@ -252,6 +254,23 @@ def _search_messages_llm_expansion_mode(core: MemoryCore, query: str, k: int) ->
         for r in results
     ]
 
+
+def _close_cores(*cores: object) -> None:
+    """Release per-question cores so pooled Chroma clients/SQLite handles close.
+
+    Each question builds 1-2 MemoryCore instances; without close() the pooled
+    Chroma clients accumulate for the life of the process (the failure mode
+    documented on MemoryCore.close), which is what kills long S-scale runs.
+    Best-effort: rows are already scored, so a close error must not abort the
+    eval.
+    """
+    for core in cores:
+        if core is None:
+            continue
+        try:
+            core.close()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - cleanup must never fail the eval
+            pass
 
 
 def run_eval(
@@ -418,6 +437,7 @@ def run_eval(
                             jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
                             jsonl_file.flush()
                 completed_question_ids.add(instance.question_id)
+                _close_cores(core, core_factaug)
                 if cleanup_instances and instance_root.exists() and instance.conversation_id is None:
                     shutil.rmtree(instance_root, ignore_errors=True)
                 if resume_path is not None:
@@ -588,6 +608,7 @@ def _run_streaming(
         completed_question_ids.add(instance.question_id)
         total_yielded += 1
 
+        _close_cores(core, core_factaug)
         if cleanup_instances and instance_root.exists():
             shutil.rmtree(instance_root, ignore_errors=True)
         if resume_path is not None:

@@ -1,0 +1,176 @@
+"""Tests for the fact layer — facts versioned table + add_fact with
+ontology-cardinality supersession (docs/superpowers/plans/2026-09-07-fact-layer.md Task 2)."""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+
+import pytest
+
+from coremem import MemoryCore
+
+
+def _make_core(**kwargs) -> MemoryCore:
+    d = tempfile.mkdtemp()
+    core = MemoryCore(path=d, author="test", **kwargs)
+    core._test_cleanup = lambda: shutil.rmtree(d, ignore_errors=True)
+    return core
+
+
+def test_add_fact_records_on_chain_and_lists_current():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "dog", "Max", source_message_id="a1")
+        facts = core.list_facts(entity="user", attribute="dog")
+        assert len(facts) == 1 and facts[0]["value"] == "Max"
+        assert facts[0]["valid_to"] == "" and facts[0]["source_message_id"] == "a1"
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()
+
+
+def test_single_cardinality_supersedes_multi_appends():
+    core = _make_core(versioned=True)
+    try:
+        core.add_fact("user", "employer", "Acme")
+        core.add_fact("user", "employer", "Globex")
+        current = core.list_facts(entity="user", attribute="employer")
+        assert len(current) == 1 and current[0]["value"] == "Globex"
+        core.add_fact("user", "child", "Emma")
+        core.add_fact("user", "child", "Leo")
+        kids = core.list_facts(entity="user", attribute="child")
+        assert {k["value"] for k in kids} == {"Emma", "Leo"}
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()
+
+
+def test_add_fact_requires_versioned_store():
+    core = _make_core(versioned=False)
+    try:
+        with pytest.raises(RuntimeError, match="versioned"):
+            core.add_fact("user", "dog", "Max")
+    finally:
+        core._test_cleanup()
+
+def test_list_facts_filters_and_hides_expired():
+    core = _make_core(versioned=True)
+    try:
+        core.add_fact("user", "employer", "Acme")
+        core.add_fact("user", "employer", "Globex")   # supersedes Acme
+        core.add_fact("user", "pet", "Max")
+        values = {f["value"] for f in core.list_facts(entity="user")}
+        assert "Globex" in values and "Acme" not in values and "Max" in values
+        expired = core.list_facts(entity="user", include_expired=True)
+        assert any(f["value"] == "Acme" and f["valid_to"] for f in expired)
+        assert all(f["user_id"] == "" for f in expired)
+    finally:
+        core._test_cleanup()
+
+
+def test_get_fact_returns_row_or_none():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "dog", "Max")
+        assert core.get_fact(fid)["value"] == "Max"
+        assert core.get_fact("nonexistent") is None
+    finally:
+        core._test_cleanup()
+
+
+def test_fact_history_shows_chain_events():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "dog", "Max")
+        events = core.fact_history(fid)
+        assert len(events) >= 1
+        assert all(e.get("op") in ("insert", "add", "update", "delete") for e in events)
+    finally:
+        core._test_cleanup()
+
+
+def test_supersede_fact_sets_valid_to_and_link():
+    core = _make_core(versioned=True)
+    try:
+        fid = core.add_fact("user", "employer", "Acme")
+        new_id = core.supersede_fact(fid, "Globex")
+        old = core.get_fact(fid)
+        assert old["valid_to"] and old["superseded_by"] == new_id
+        assert core.get_fact(new_id)["value"] == "Globex"
+        # bi-temporal correctness: the new value's validity STARTS now — it
+        # must not inherit the superseded fact's valid_from
+        assert core.get_fact(new_id)["valid_from"] != old["valid_from"]
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()
+
+
+def test_merge_facts_expires_sources():
+    core = _make_core(versioned=True)
+    try:
+        f1 = core.add_fact("user", "pet", "Max")
+        f2 = core.add_fact("user", "pet", "Bella")
+        merged = core.merge_facts([f1, f2], "Max and Bella")
+        assert core.get_fact(f1)["valid_to"] and core.get_fact(f2)["valid_to"]
+        pets = {f["value"] for f in core.list_facts(entity="user", attribute="pet")}
+        assert "Max and Bella" in pets
+        assert core.verify_memory_chain()["facts"]["valid"]
+    finally:
+        core._test_cleanup()
+
+
+def test_facts_digest_groups_budget_caps_and_handles_empty():
+    from coremem.reading import build_facts_digest
+    assert build_facts_digest([]) == ""
+    facts = [
+        {"entity": "user", "attribute": "dog", "value": "Max",
+         "valid_from": "2024-05-01T00:00:00+00:00"},
+        {"entity": "user", "attribute": "employer", "value": "Acme",
+         "valid_from": "2024-03-01T00:00:00+00:00"},
+    ]
+    out = build_facts_digest(facts)
+    assert out.startswith("[FACTS]")
+    assert "user.dog = Max (since 2024-05-01)" in out
+    assert "user.employer = Acme (since 2024-03-01)" in out
+    tiny = build_facts_digest(facts, budget_chars=40)
+    assert len(tiny) <= 40 + len("- …(facts truncated)")
+
+
+class _FactStubProvider:
+    async def chat(self, messages):
+        import json as _json
+        payload = _json.loads(
+            messages[0]["content"].split("Messages (JSON list of")[1]
+            .split(":", 1)[1].rsplit("Return ONLY", 1)[0]
+        )
+        out = {}
+        for m in payload:
+            if "Denver" in m["content"]:
+                out[m["id"]] = [{"entity": "user", "attribute": "home_city",
+                                 "value": "Denver"}]
+        return type("R", (), {"content": _json.dumps(out)})()
+
+
+def test_extract_facts_ingests_candidates_flag_on():
+    core = _make_core(versioned=True, llm_provider=_FactStubProvider(), extract_facts=True)
+    try:
+        core.ingest_many([
+            {"id": "a1", "role": "user", "content": "I live in Denver.", "session_id": "s1"},
+        ])
+        facts = core.list_facts(entity="user")
+        assert any(f["value"] == "Denver" and f["source_message_id"] == "a1" for f in facts)
+        assert core.get_fact(facts[0]["id"])["attribute"] == "home_city"
+    finally:
+        core._test_cleanup()
+
+
+def test_extract_facts_off_by_default():
+    core = _make_core(versioned=True, llm_provider=_FactStubProvider())
+    try:
+        core.ingest_many([
+            {"id": "a1", "role": "user", "content": "I live in Denver.", "session_id": "s1"},
+        ])
+        assert core.list_facts(entity="user") == []
+    finally:
+        core._test_cleanup()

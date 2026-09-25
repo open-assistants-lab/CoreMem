@@ -104,3 +104,37 @@ def extract_final_answer(response: str) -> str:
     if idx == -1:
         return response.strip()
     return response[idx + len(_FINAL_ANSWER_PREFIX):].strip()
+
+FACTS_DIGEST_BUDGET_CHARS = 800
+
+
+def build_facts_digest(facts: list[dict], *, budget_chars: int = FACTS_DIGEST_BUDGET_CHARS) -> str:
+    """Render current facts as a grouped, budget-capped [FACTS] digest.
+
+    Appended AFTER the bundle context — it grows the reader prompt, it never
+    evicts verbatim evidence (fact-layer plan, Background §4). Empty input →
+    empty string: the dual path is inert unless facts exist.
+    """
+    if not facts:
+        return ""
+    header = "[FACTS]\n"
+    marker = "\n- …(facts truncated)"
+    lines: list[str] = []
+    for f in sorted(facts, key=lambda f: (f.get("entity", ""), f.get("attribute", ""))):
+        line = f"{f.get('entity', '')}.{f.get('attribute', '')} = {f.get('value', '')}"
+        if f.get("valid_from"):
+            line += f" (since {str(f['valid_from'])[:10]})"
+        lines.append(f"- {line}")
+    body = "\n".join(lines)
+    if len(header) + len(body) + len(marker) <= budget_chars:
+        return header + body
+    # Plan defect #6 correction: the budget applies to the TOTAL returned
+    # string (header + body + marker), not just the body — otherwise the
+    # digest exceeds its cap by the header/marker length. Truncate the body
+    # to whole lines (rsplit on newline) and always end with the marker.
+    max_body = budget_chars - len(header) - len(marker)
+    if max_body <= 0:
+        return (header + marker).strip()
+    partial = body[:max_body]
+    partial = partial.rsplit("\n", 1)[0] if "\n" in partial else ""
+    return (header + partial + marker).rstrip()

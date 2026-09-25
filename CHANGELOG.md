@@ -1,5 +1,94 @@
 # Changelog
 
+## [0.17.0] — fact layer (semantic layer v0): governed facts, zero-LLM lookups
+
+A shallow, **closed-vocabulary fact layer** over the versioned memory store.
+Facts are ordinary rows in a versioned HybridDB table, so every write lands on
+the audit chain and is reversible with `rollback_memory` — no second source of
+truth, no new persistence layer. The read path stays **zero-LLM**: fact lookups
+are deterministic queries, and the fact table never enters message search, so
+recall behavior is byte-identical with facts present or absent.
+
+Deliberately **not** a knowledge graph: relation-graph traversal was falsified
+twice (PPR, query-guided v2 — see `docs/retrieval-experiments.md`). Ontology is
+a flat attribute vocabulary with cardinality, not entities and edges.
+
+### Added
+- **Attribute ontology** (`coremem/ontology.py`, extensible via
+  `ontology.toml`): per-attribute `cardinality` (`single` | `multi`),
+  `value_type` (`text` | `number` | `date`). Unknown attributes default to
+  `multi`/`text` — the safe direction (append, never silently supersede).
+- **Governed fact CRUD** (requires `versioned=True`, the default since 0.15.0):
+  - `add_fact(entity, attribute, value, *, user_id="", source_message_id="", valid_from=None) -> str`
+    — a write to a `single`-cardinality attribute **supersedes** the current
+    fact: the old row gets `valid_to` + `superseded_by`, and both events are
+    verifiable on the chain. `multi` attributes append.
+  - `list_facts(*, entity=None, attribute=None, user_id=None, include_expired=False, limit=200) -> list[dict]`
+    — current facts only by default; expired/superseded are hidden.
+  - `get_fact(fact_id) -> dict | None`
+  - `fact_history(fact_id) -> list[dict]` — the full audit trail, oldest first.
+- **Lifecycle verbs**: `supersede_fact(fact_id, new_value) -> str` (does *not*
+  pre-expire — `add_fact`'s supersession records both events),
+  `expire_fact(fact_id) -> bool` (soft-expire; the expiry is itself history, the
+  chain never rewinds), `merge_facts(fact_ids, merged_value) -> str` (dedupe
+  "Max" + "my dog Max"; sources stay expired-and-auditable).
+- **Budget-capped fact digest** — `coremem.reading.build_facts_digest(facts, *, budget_chars=800)`.
+  Renders current facts as a grouped `[FACTS]` block for the reader prompt.
+  Appended **after** the bundle context: it grows the prompt and never evicts
+  verbatim evidence. Empty input → empty string, so the dual path is inert
+  unless facts exist.
+- **Three MCP tools**: `add_fact`, `list_facts`, `fact_history`.
+- **Opt-in LLM fact extraction at ingest** — `MemoryCore(..., extract_facts=True)`
+  (default **False**). Extracts candidate facts from user-role messages, each
+  landing in the governed table with per-message provenance. Degrade-to-no-facts
+  contract: provider errors or unparseable output log a warning and never raise
+  into ingest. This is the only LLM in the feature, and it is off by default.
+
+### Extraction stays opt-in-off — the kill-gate result, quoted
+`extract_facts` is **not** enabled by default. Pre-registered paired A/B,
+LongMemEval S stratified-56, blind judge (`gpt-oss:120b-cloud` for reader and
+judge), `episodic_4k_reranked` vs `episodic_4k_reranked_factdigest` (same 4k
+bundle + ≤800-char fact digest appended; retrieval identical by construction,
+1.981 s in both arms), 56/56 rows:
+
+> control **0.554** accuracy vs factdigest **0.571**; answerable 0.500 → 0.521;
+> abstention 0.875 → 0.875; context 5,114 → 5,889 chars mean.
+> **Paired answer flips +2 / −1 (net +1), exact two-sided binomial p = 1.000.**
+> Per type (n=8 each): multi-session 0.38 → 0.50, single-session-preference
+> 0.12 → 0.25, single-session-user 0.88 → 0.75; temporal-reasoning,
+> knowledge-update, single-session-assistant and abstention all unchanged.
+
+Directionally positive with the wins exactly where the mechanism predicts
+(cross-session synthesis, preference consolidation) and the single regression
+being the predicted distraction case — **but p = 1.000 on 3 discordant pairs is
+not evidence of a working lever.** The checkpoint trajectory (n=18: −0.056;
+n=45: +0.019; n=56: +0.017) is the argument for the pre-registered rule: early
+stopping would have returned the wrong call in both directions. Per the
+pre-registered criterion, net > 0 means *scale up*, not *flip the default*:
+full-S confirmation is specified in `docs/retrieval-experiments.md` with its
+kill criteria fixed before any full-S data is seen. Phase 1 (the governance
+API) is useful without extraction and ships on its own merits.
+
+### Fixed
+- **Eval harnesses leaked a pooled Chroma client per question.**
+  `eval_answer_longmemeval.py` and `eval_agent_journal_longmemeval.py` (both the
+  standard and `--stream` paths) build 1–2 `MemoryCore` instances per question
+  and never called `close()` — the exact accumulation documented on
+  `MemoryCore.close`. On the 56-question fact-digest run this was the primary
+  cause of death-by-OOM around question 9–18 (six process deaths total, five
+  MPS OOM, one proxy 502). Closing the cores per question doubled process
+  lifespan; measurements are unaffected (rows are already scored when the close
+  happens).
+
+### Notes
+- `extract_facts` was evaluated as the write-side sibling of lever 2
+  (fact-augmented embeddings), which was neutral on S and LoCoMo. The digest
+  variant is the read-side sibling; it has now been measured once, at
+  stratified-56 scale, with the result above.
+- 208 tests pass. (Four `tests/test_cli.py` subprocess tests time out on
+  memory-starved hosts — a cold CLI `recall` takes ~50 s there versus the test's
+  30 s timeout; unrelated to this release and reproducible on 0.16.1.)
+
 ## [0.16.1] — timestamp filters compare chronologically (mixed-format fix)
 
 ### Fixed

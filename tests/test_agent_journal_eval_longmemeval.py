@@ -183,6 +183,71 @@ def test_longmemeval_eval_memorycore_uses_per_question_haystacks(tmp_path):
     assert all(sid.startswith("lme_0001_") for sid in rows["q_update"]["retrieved_session_ids"])
 
 
+def test_longmemeval_eval_closes_every_memorycore_it_builds(tmp_path, monkeypatch):
+    """Per-question cores must be closed or pooled Chroma clients leak.
+
+    Without close(), each question leaks a pooled client + SQLite handles;
+    long S-scale runs then die partway through (observed: answer eval died at
+    question 9/18 from MPS/system OOM with the leak present).
+    """
+    from coremem.core import MemoryCore as RealMemoryCore
+
+    built: list[object] = []  # strong refs so ids can't be reused after GC
+    closed: set[int] = set()
+    original_init = RealMemoryCore.__init__
+    original_close = RealMemoryCore.close
+
+    def tracking_init(self, *args, **kwargs):
+        built.append(self)
+        original_init(self, *args, **kwargs)
+
+    def tracking_close(self, *args, **kwargs):
+        closed.add(id(self))
+        original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(RealMemoryCore, "__init__", tracking_init)
+    monkeypatch.setattr(RealMemoryCore, "close", tracking_close)
+
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    run_eval(data_path, tmp_path / "memorycore", mode="memorycore", k=3, limit=2)
+
+    assert len(built) == 2, "expected one core per question"
+    assert closed == {id(core) for core in built}, (
+        "every per-question MemoryCore must be closed: "
+        f"leaked {len(built) - len(closed)} of {len(built)}"
+    )
+
+
+def test_longmemeval_eval_streaming_closes_every_memorycore_it_builds(tmp_path, monkeypatch):
+    """The --stream path (used for the 265 MB S dataset) must close cores too."""
+    from coremem.core import MemoryCore as RealMemoryCore
+
+    built: list[object] = []
+    closed: set[int] = set()
+    original_init = RealMemoryCore.__init__
+    original_close = RealMemoryCore.close
+
+    def tracking_init(self, *args, **kwargs):
+        built.append(self)
+        original_init(self, *args, **kwargs)
+
+    def tracking_close(self, *args, **kwargs):
+        closed.add(id(self))
+        original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(RealMemoryCore, "__init__", tracking_init)
+    monkeypatch.setattr(RealMemoryCore, "close", tracking_close)
+
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    run_eval(data_path, tmp_path / "streamed", mode="memorycore", k=3, limit=2, stream=True)
+
+    assert len(built) == 2, "expected one core per question"
+    assert closed == {id(core) for core in built}, (
+        "every per-question MemoryCore must be closed: "
+        f"leaked {len(built) - len(closed)} of {len(built)}"
+    )
+
+
 def test_longmemeval_eval_memorycore_resume_checkpoint(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     root = tmp_path / "memorycore"
