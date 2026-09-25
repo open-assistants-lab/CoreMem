@@ -169,10 +169,13 @@ uv run python3 -m pytest tests/ -q   # 175 pass
 #    a stale string there ships in the wheel (0.13.2 published 0.13.1).
 # 2. Sync lockfile (should only change the coremem version) and build
 uv lock && uv build
-# 3. Publish — PYPI_TOKEN lives in .env (with or without an `export ` prefix;
-#    the sed strips it if present). Rotate the token on 403 Invalid auth:
+# 3. Publish — PYPI_TOKEN lives in .env (with or without an `export` prefix).
+#    The sed MUST strip both forms: a bare `PYPI_TOKEN=` line otherwise survives
+#    into the token value and PyPI answers 403 Invalid auth (hit on 0.17.0 —
+#    the token was valid, the extraction was not). Rotate the token on a 403
+#    that reproduces with a clean extraction:
 #    https://pypi.org/manage/account/token/
-uv publish --token "$(grep PYPI_TOKEN .env | sed 's/^export PYPI_TOKEN=//' | tr -d '\"')"
+uv publish --token "$(grep '^PYPI_TOKEN=' .env | sed -E 's/^export[[:space:]]+PYPI_TOKEN=//; s/^PYPI_TOKEN=//' | tr -d '\"\r')"
 ```
 
 Keep `[project.urls]` and all other tables at the END of their TOML section —
