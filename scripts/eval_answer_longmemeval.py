@@ -219,205 +219,207 @@ def run(
             print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: resumed", flush=True)
             continue
         print(f"[{index + 1}/{len(prepared)}] {instance.question_id}: running", flush=True)
-        instance_root = root / f"{index:04d}_{instance.question_id[:8]}"
-        if not (reuse and (instance_root / "hybrid").exists()):
-            shutil.rmtree(instance_root, ignore_errors=True)
-            core = build_memorycore(
-                instance_root,
-                [instance],
-                llm_provider=answer_provider,
-                extract_facts=True,  # Phase 2: facts table for the factdigest arm
-            )
-        else:
-            core = MemoryCore(
-                path=str(instance_root / "hybrid"),
-                llm_provider=answer_provider,
-            )
-
-        # Fact-augmented key expansion: a second instance ingests the same
-        # haystack with LLM-extracted user facts prepended to embedded docs.
-        # Built lazily only when the mode is active (saves ingest + LLM cost).
+        core = None
         core_factaug = None
-        if "episodic_4k_reranked_factaug" in MODES:
-            fa_root = instance_root / "fa"
-            if reuse and (fa_root / "hybrid").exists():
-                core_factaug = MemoryCore(
-                    path=str(fa_root / "hybrid"),
-                    llm_provider=answer_provider,
-                    fact_augment=True,
-                )
-            else:
-                shutil.rmtree(fa_root, ignore_errors=True)
-                core_factaug = build_memorycore(
-                    fa_root,
+        try:
+            instance_root = root / f"{index:04d}_{instance.question_id[:8]}"
+            if not (reuse and (instance_root / "hybrid").exists()):
+                shutil.rmtree(instance_root, ignore_errors=True)
+                core = build_memorycore(
+                    instance_root,
                     [instance],
                     llm_provider=answer_provider,
-                    fact_augment=True,
+                    extract_facts=True,  # Phase 2: facts table for the factdigest arm
+                )
+            else:
+                core = MemoryCore(
+                    path=str(instance_root / "hybrid"),
+                    llm_provider=answer_provider,
                 )
 
-        contexts: dict[str, str] = {}
-        retrieval_seconds: dict[str, float] = {}
+            # Fact-augmented key expansion: a second instance ingests the same
+            # haystack with LLM-extracted user facts prepended to embedded docs.
+            # Built lazily only when the mode is active (saves ingest + LLM cost).
+            core_factaug = None
+            if "episodic_4k_reranked_factaug" in MODES:
+                fa_root = instance_root / "fa"
+                if reuse and (fa_root / "hybrid").exists():
+                    core_factaug = MemoryCore(
+                        path=str(fa_root / "hybrid"),
+                        llm_provider=answer_provider,
+                        fact_augment=True,
+                    )
+                else:
+                    shutil.rmtree(fa_root, ignore_errors=True)
+                    core_factaug = build_memorycore(
+                        fa_root,
+                        [instance],
+                        llm_provider=answer_provider,
+                        fact_augment=True,
+                    )
 
-        started = time.perf_counter()
-        basic = core._search_messages(instance.query, limit=5)
-        retrieval_seconds["memorycore"] = time.perf_counter() - started
-        contexts["memorycore"] = _format_messages([result.memory for result in basic])
+            contexts: dict[str, str] = {}
+            retrieval_seconds: dict[str, float] = {}
 
-        started = time.perf_counter()
-        primary = core._search_messages_decomposed(instance.query, limit=5, per_query_limit=20)
-        retrieval_seconds["decomposition_only"] = time.perf_counter() - started
-        contexts["decomposition_only"] = _format_messages([result.memory for result in primary])
-
-        started = time.perf_counter()
-        basic_bundles = core._reconstruct_sessions(
-            instance.query,
-            session_limit=5,
-            max_context_chars=16_000,
-            primary_results=basic,
-        )
-        retrieval_seconds["reconstruction_only"] = time.perf_counter() - started
-        contexts["reconstruction_only"] = _format_bundles(basic_bundles)
-
-        started = time.perf_counter()
-        bundles = core._reconstruct_sessions(
-            instance.query,
-            session_limit=5,
-            max_context_chars=16_000,
-            primary_results=primary,
-        )
-        episodic_retrieval_seconds = time.perf_counter() - started
-        retrieval_seconds["episodic_no_headers"] = episodic_retrieval_seconds
-        retrieval_seconds["memorycore_episodic"] = episodic_retrieval_seconds
-        contexts["episodic_no_headers"] = _format_bundles_without_headers(bundles)
-        contexts["memorycore_episodic"] = _format_bundles(bundles)
-
-        started = time.perf_counter()
-        small_bundles = core._reconstruct_sessions(
-            instance.query,
-            session_limit=5,
-            max_context_chars=4_000,
-            primary_results=primary,
-        )
-        retrieval_seconds["episodic_4k"] = time.perf_counter() - started
-        contexts["episodic_4k"] = _format_bundles(small_bundles)
-
-        started = time.perf_counter()
-        reranked_primary = core._search_messages_decomposed(
-            instance.query,
-            limit=5,
-            per_query_limit=20,
-            use_cross_encoder=True,
-        )
-        reranked_bundles = core._reconstruct_sessions(
-            instance.query,
-            session_limit=5,
-            max_context_chars=4_000,
-            primary_results=reranked_primary,
-        )
-        retrieval_seconds["episodic_4k_reranked"] = time.perf_counter() - started
-        contexts["episodic_4k_reranked"] = _format_bundles(reranked_bundles)
-        # Reading-strategy ablation reuses this exact context; only the answer
-        # prompt (and for _json, the serialization) differs.
-        contexts["episodic_4k_reranked_con"] = contexts["episodic_4k_reranked"]
-        contexts["episodic_4k_reranked_con_json"] = _format_bundles_json(reranked_bundles)
-        retrieval_seconds["episodic_4k_reranked_con"] = retrieval_seconds["episodic_4k_reranked"]
-        retrieval_seconds["episodic_4k_reranked_con_json"] = retrieval_seconds["episodic_4k_reranked"]
-        # Phase 2 kill-gate: same bundles + budget-capped [FACTS] digest.
-        # Empty digest -> context identical to control (paired by construction).
-        _digest = build_facts_digest(core.list_facts(limit=200))
-        contexts["episodic_4k_reranked_factdigest"] = (
-            contexts["episodic_4k_reranked"] + "\n\n" + _digest
-            if _digest else contexts["episodic_4k_reranked"]
-        )
-        retrieval_seconds["episodic_4k_reranked_factdigest"] = retrieval_seconds["episodic_4k_reranked"]
-
-        if core_factaug is not None:
             started = time.perf_counter()
-            fa_primary = core_factaug._search_messages_decomposed(
+            basic = core._search_messages(instance.query, limit=5)
+            retrieval_seconds["memorycore"] = time.perf_counter() - started
+            contexts["memorycore"] = _format_messages([result.memory for result in basic])
+
+            started = time.perf_counter()
+            primary = core._search_messages_decomposed(instance.query, limit=5, per_query_limit=20)
+            retrieval_seconds["decomposition_only"] = time.perf_counter() - started
+            contexts["decomposition_only"] = _format_messages([result.memory for result in primary])
+
+            started = time.perf_counter()
+            basic_bundles = core._reconstruct_sessions(
+                instance.query,
+                session_limit=5,
+                max_context_chars=16_000,
+                primary_results=basic,
+            )
+            retrieval_seconds["reconstruction_only"] = time.perf_counter() - started
+            contexts["reconstruction_only"] = _format_bundles(basic_bundles)
+
+            started = time.perf_counter()
+            bundles = core._reconstruct_sessions(
+                instance.query,
+                session_limit=5,
+                max_context_chars=16_000,
+                primary_results=primary,
+            )
+            episodic_retrieval_seconds = time.perf_counter() - started
+            retrieval_seconds["episodic_no_headers"] = episodic_retrieval_seconds
+            retrieval_seconds["memorycore_episodic"] = episodic_retrieval_seconds
+            contexts["episodic_no_headers"] = _format_bundles_without_headers(bundles)
+            contexts["memorycore_episodic"] = _format_bundles(bundles)
+
+            started = time.perf_counter()
+            small_bundles = core._reconstruct_sessions(
+                instance.query,
+                session_limit=5,
+                max_context_chars=4_000,
+                primary_results=primary,
+            )
+            retrieval_seconds["episodic_4k"] = time.perf_counter() - started
+            contexts["episodic_4k"] = _format_bundles(small_bundles)
+
+            started = time.perf_counter()
+            reranked_primary = core._search_messages_decomposed(
                 instance.query,
                 limit=5,
                 per_query_limit=20,
                 use_cross_encoder=True,
             )
-            fa_bundles = core_factaug._reconstruct_sessions(
+            reranked_bundles = core._reconstruct_sessions(
                 instance.query,
                 session_limit=5,
                 max_context_chars=4_000,
-                primary_results=fa_primary,
+                primary_results=reranked_primary,
             )
-            retrieval_seconds["episodic_4k_reranked_factaug"] = time.perf_counter() - started
-            contexts["episodic_4k_reranked_factaug"] = _format_bundles(fa_bundles)
+            retrieval_seconds["episodic_4k_reranked"] = time.perf_counter() - started
+            contexts["episodic_4k_reranked"] = _format_bundles(reranked_bundles)
+            # Reading-strategy ablation reuses this exact context; only the answer
+            # prompt (and for _json, the serialization) differs.
+            contexts["episodic_4k_reranked_con"] = contexts["episodic_4k_reranked"]
+            contexts["episodic_4k_reranked_con_json"] = _format_bundles_json(reranked_bundles)
+            retrieval_seconds["episodic_4k_reranked_con"] = retrieval_seconds["episodic_4k_reranked"]
+            retrieval_seconds["episodic_4k_reranked_con_json"] = retrieval_seconds["episodic_4k_reranked"]
+            # Phase 2 kill-gate: same bundles + budget-capped [FACTS] digest.
+            # Empty digest -> context identical to control (paired by construction).
+            _digest = build_facts_digest(core.list_facts(limit=200))
+            contexts["episodic_4k_reranked_factdigest"] = (
+                contexts["episodic_4k_reranked"] + "\n\n" + _digest
+                if _digest else contexts["episodic_4k_reranked"]
+            )
+            retrieval_seconds["episodic_4k_reranked_factdigest"] = retrieval_seconds["episodic_4k_reranked"]
 
-        started = time.perf_counter()
-        cap2_primary = core._search_messages_decomposed(
-            instance.query,
-            limit=5,
-            per_query_limit=20,
-            use_cross_encoder=True,
-            session_cap=2,
-        )
-        cap2_bundles = core._reconstruct_sessions(
-            instance.query,
-            session_limit=5,
-            max_context_chars=16_000,
-            primary_results=cap2_primary,
-        )
-        retrieval_seconds["episodic_cap2"] = time.perf_counter() - started
-        contexts["episodic_cap2"] = _format_bundles(cap2_bundles)
+            if core_factaug is not None:
+                started = time.perf_counter()
+                fa_primary = core_factaug._search_messages_decomposed(
+                    instance.query,
+                    limit=5,
+                    per_query_limit=20,
+                    use_cross_encoder=True,
+                )
+                fa_bundles = core_factaug._reconstruct_sessions(
+                    instance.query,
+                    session_limit=5,
+                    max_context_chars=4_000,
+                    primary_results=fa_primary,
+                )
+                retrieval_seconds["episodic_4k_reranked_factaug"] = time.perf_counter() - started
+                contexts["episodic_4k_reranked_factaug"] = _format_bundles(fa_bundles)
 
-        started = time.perf_counter()
-        deep = core._search_messages_llm_expansion(instance.query, limit=5)
-        retrieval_seconds["memorycore_llm_expansion"] = time.perf_counter() - started
-        contexts["memorycore_llm_expansion"] = _format_messages([result.memory for result in deep])
-
-        answers: dict[str, str] = {}
-        answer_seconds: dict[str, float] = {}
-        for mode in MODES:
             started = time.perf_counter()
-            if mode in _CON_MODES:
-                answers[mode] = _answer_con(answer_provider, instance.query, contexts[mode])
-            else:
-                answers[mode] = _answer(answer_provider, instance.query, contexts[mode])
-            answer_seconds[mode] = time.perf_counter() - started
-        judgments = _judge(
-            judge_provider,
-            instance.query,
-            references[instance.question_id],
-            answers,
-        )
-        rows.append({
-            "question_id": instance.question_id,
-            "question_type": instance.question_type,
-            "question": instance.query,
-            "reference_answer": references[instance.question_id],
-            "answers": answers,
-            "judgments": judgments,
-            "context_chars": {mode: len(contexts[mode]) for mode in MODES},
-            "retrieval_seconds": retrieval_seconds,
-            "answer_seconds": answer_seconds,
-        })
-        result = {
-            "answer_model": answer_model,
-            "judge_model": judge_model,
-            "results": rows,
-            "metrics": {mode: _metrics(rows, mode) for mode in MODES},
-        }
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        # Release per-question MemoryCore resources (Chroma clients, SQLite
-        # handles). Without this, each question leaks a pooled Chroma client
-        # (2 with the factaug arm); long runs exhaust memory around question
-        # ~10 (observed as MPS/OOM and 'vector store readonly'). Results are
-        # already computed, so closing changes nothing about the measurement.
-        try:
-            core.close()
-        except Exception:
-            pass
-        if core_factaug is not None:
-            try:
-                core_factaug.close()
-            except Exception:
-                pass
+            cap2_primary = core._search_messages_decomposed(
+                instance.query,
+                limit=5,
+                per_query_limit=20,
+                use_cross_encoder=True,
+                session_cap=2,
+            )
+            cap2_bundles = core._reconstruct_sessions(
+                instance.query,
+                session_limit=5,
+                max_context_chars=16_000,
+                primary_results=cap2_primary,
+            )
+            retrieval_seconds["episodic_cap2"] = time.perf_counter() - started
+            contexts["episodic_cap2"] = _format_bundles(cap2_bundles)
+
+            started = time.perf_counter()
+            deep = core._search_messages_llm_expansion(instance.query, limit=5)
+            retrieval_seconds["memorycore_llm_expansion"] = time.perf_counter() - started
+            contexts["memorycore_llm_expansion"] = _format_messages([result.memory for result in deep])
+
+            answers: dict[str, str] = {}
+            answer_seconds: dict[str, float] = {}
+            for mode in MODES:
+                started = time.perf_counter()
+                if mode in _CON_MODES:
+                    answers[mode] = _answer_con(answer_provider, instance.query, contexts[mode])
+                else:
+                    answers[mode] = _answer(answer_provider, instance.query, contexts[mode])
+                answer_seconds[mode] = time.perf_counter() - started
+            judgments = _judge(
+                judge_provider,
+                instance.query,
+                references[instance.question_id],
+                answers,
+            )
+            rows.append({
+                "question_id": instance.question_id,
+                "question_type": instance.question_type,
+                "question": instance.query,
+                "reference_answer": references[instance.question_id],
+                "answers": answers,
+                "judgments": judgments,
+                "context_chars": {mode: len(contexts[mode]) for mode in MODES},
+                "retrieval_seconds": retrieval_seconds,
+                "answer_seconds": answer_seconds,
+            })
+            result = {
+                "answer_model": answer_model,
+                "judge_model": judge_model,
+                "results": rows,
+                "metrics": {mode: _metrics(rows, mode) for mode in MODES},
+            }
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        finally:
+            # finally, not the happy path: each question builds 1-2 cores, and a
+            # provider or ingest failure must not leak a pooled Chroma client
+            # (2 with the factaug arm) — see MemoryCore.close. Results are
+            # already computed when this runs, so closing cannot affect the
+            # measurement. Best-effort by design: cleanup never fails the eval.
+            for handle in (core, core_factaug):
+                if handle is None:
+                    continue
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
         if not reuse:
             shutil.rmtree(instance_root, ignore_errors=True)
 

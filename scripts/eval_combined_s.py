@@ -218,38 +218,50 @@ def main(argv: list[str] | None = None) -> int:
         qid = instance.question_id
         t_q = time.perf_counter()
 
-        root = args.root / f"{index:04d}_{qid[:8]}"
-        if not (args.reuse and (root / "hybrid").exists()):
-            if root.exists():
-                shutil.rmtree(root)
-            core = MemoryCore(path=str(root / "hybrid"))
+        core = None
+        try:
+            root = args.root / f"{index:04d}_{qid[:8]}"
+            if not (args.reuse and (root / "hybrid").exists()):
+                if root.exists():
+                    shutil.rmtree(root)
+                core = MemoryCore(path=str(root / "hybrid"))
 
-            t0 = time.perf_counter()
-            n_msgs = _ingest_instance(core, instance)
-            ingest_s = time.perf_counter() - t0
-        else:
-            core = MemoryCore(path=str(root / "hybrid"))
-            n_msgs = 0
-            ingest_s = 0.0
+                t0 = time.perf_counter()
+                n_msgs = _ingest_instance(core, instance)
+                ingest_s = time.perf_counter() - t0
+            else:
+                core = MemoryCore(path=str(root / "hybrid"))
+                n_msgs = 0
+                ingest_s = 0.0
 
-        row, search_s = _score(core, instance, truth, k=args.k)
-        total_s = time.perf_counter() - t_q
+            row, search_s = _score(core, instance, truth, k=args.k)
+            total_s = time.perf_counter() - t_q
 
-        record = {
-            "question_id": qid,
-            "question_type": instance.question_type,
-            "mode": MODE,
-            "messages": n_msgs,
-            "sessions": len(instance.sessions),
-            "ingest_s": ingest_s,
-            "ingest_msgs_per_s": n_msgs / ingest_s if ingest_s else 0.0,
-            "search_s": search_s,
-            "question_total_s": total_s,
-            **row,
-        }
-        rows.append(record)
-        with open(jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            record = {
+                "question_id": qid,
+                "question_type": instance.question_type,
+                "mode": MODE,
+                "messages": n_msgs,
+                "sessions": len(instance.sessions),
+                "ingest_s": ingest_s,
+                "ingest_msgs_per_s": n_msgs / ingest_s if ingest_s else 0.0,
+                "search_s": search_s,
+                "question_total_s": total_s,
+                **row,
+            }
+            rows.append(record)
+            with open(jsonl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        finally:
+            # finally, not the happy path: one core per question, so an
+            # error mid-question would leak a pooled Chroma client for the
+            # rest of a 500-question run (see MemoryCore.close). The record
+            # is already written, so closing cannot affect the measurement.
+            if core is not None:
+                try:
+                    core.close()
+                except Exception:  # noqa: BLE001 - cleanup never fails the eval
+                    pass
 
         completed.add(index)
         checkpoint_path.write_text(

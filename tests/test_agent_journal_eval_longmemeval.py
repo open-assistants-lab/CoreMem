@@ -248,6 +248,117 @@ def test_longmemeval_eval_streaming_closes_every_memorycore_it_builds(tmp_path, 
     )
 
 
+def test_longmemeval_eval_closes_cores_even_when_scoring_raises(tmp_path, monkeypatch):
+    """A mid-question failure must not leak: the close belongs in a finally.
+
+    Today an exception aborts the whole process so the leak is invisible — but
+    the moment per-question error tolerance is added ("skip and continue"),
+    happy-path-only closes leak silently again, which is the exact bug the
+    happy-path test cannot see.
+    """
+    from coremem.core import MemoryCore as RealMemoryCore
+    from scripts import eval_agent_journal_longmemeval as harness
+
+    built: list[object] = []
+    closed: set[int] = set()
+    original_init = RealMemoryCore.__init__
+    original_close = RealMemoryCore.close
+
+    def tracking_init(self, *args, **kwargs):
+        built.append(self)
+        original_init(self, *args, **kwargs)
+
+    def tracking_close(self, *args, **kwargs):
+        closed.add(id(self))
+        original_close(self, *args, **kwargs)
+
+    def exploding_score(*args, **kwargs):
+        raise RuntimeError("simulated scoring failure")
+
+    monkeypatch.setattr(RealMemoryCore, "__init__", tracking_init)
+    monkeypatch.setattr(RealMemoryCore, "close", tracking_close)
+    monkeypatch.setattr(harness, "_score_question", exploding_score)
+
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    with pytest.raises(RuntimeError, match="simulated scoring failure"):
+        run_eval(data_path, tmp_path / "memorycore", mode="memorycore", k=3, limit=2)
+
+    assert built, "expected the harness to build a core before scoring"
+    assert closed == {id(core) for core in built}, (
+        f"leaked {len(built) - len(closed)} of {len(built)} cores on the error path"
+    )
+
+
+def test_longmemeval_eval_closes_both_cores_when_a_second_core_is_built(tmp_path, monkeypatch):
+    """The factaug arm builds a second core per question; both must close."""
+    from coremem.core import MemoryCore as RealMemoryCore
+    from scripts import eval_agent_journal_longmemeval as harness
+
+    built: list[object] = []
+    closed: set[int] = set()
+    original_init = RealMemoryCore.__init__
+    original_close = RealMemoryCore.close
+
+    def tracking_init(self, *args, **kwargs):
+        built.append(self)
+        original_init(self, *args, **kwargs)
+
+    def tracking_close(self, *args, **kwargs):
+        closed.add(id(self))
+        original_close(self, *args, **kwargs)
+
+    def fake_factaug_core(instance_root, instance, llm_provider, reuse_instances, active_modes):
+        # A real second core, without needing an LLM provider for fact extraction.
+        return RealMemoryCore(path=str(instance_root / "fa" / "hybrid"))
+
+    monkeypatch.setattr(RealMemoryCore, "__init__", tracking_init)
+    monkeypatch.setattr(RealMemoryCore, "close", tracking_close)
+    monkeypatch.setattr(harness, "_maybe_build_factaug_core", fake_factaug_core)
+
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    run_eval(data_path, tmp_path / "memorycore", mode="memorycore", k=3, limit=2)
+
+    assert len(built) == 4, f"expected 2 cores per question, built {len(built)}"
+    assert closed == {id(core) for core in built}, (
+        f"leaked {len(built) - len(closed)} of {len(built)} cores"
+    )
+
+
+def test_longmemeval_eval_streaming_closes_cores_even_when_scoring_raises(tmp_path, monkeypatch):
+    """The --stream loop has its own try/finally; prove the error path too."""
+    from coremem.core import MemoryCore as RealMemoryCore
+    from scripts import eval_agent_journal_longmemeval as harness
+
+    built: list[object] = []
+    closed: set[int] = set()
+    original_init = RealMemoryCore.__init__
+    original_close = RealMemoryCore.close
+
+    def tracking_init(self, *args, **kwargs):
+        built.append(self)
+        original_init(self, *args, **kwargs)
+
+    def tracking_close(self, *args, **kwargs):
+        closed.add(id(self))
+        original_close(self, *args, **kwargs)
+
+    def exploding_score(*args, **kwargs):
+        raise RuntimeError("simulated streaming failure")
+
+    monkeypatch.setattr(RealMemoryCore, "__init__", tracking_init)
+    monkeypatch.setattr(RealMemoryCore, "close", tracking_close)
+    monkeypatch.setattr(harness, "_score_question", exploding_score)
+
+    data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
+    with pytest.raises(RuntimeError, match="simulated streaming failure"):
+        run_eval(data_path, tmp_path / "streamed", mode="memorycore", k=3, limit=2, stream=True)
+
+    assert built, "expected the harness to build a core before scoring"
+    assert closed == {id(core) for core in built}, (
+        f"leaked {len(built) - len(closed)} of {len(built)} cores on the streaming error path"
+    )
+
+
 def test_longmemeval_eval_memorycore_resume_checkpoint(tmp_path):
     data_path = _write_fixture(tmp_path / "longmemeval_fixture.json")
     root = tmp_path / "memorycore"

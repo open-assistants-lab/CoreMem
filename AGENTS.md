@@ -210,13 +210,18 @@ uv run --extra dev --extra mcp python3 -m pytest tests/ -q   # 210 pass (0 skipp
 #    a stale string there ships in the wheel (0.13.2 published 0.13.1).
 # 2. Sync lockfile (should only change the coremem version) and build
 uv lock && uv build
-# 3. Publish — PYPI_TOKEN lives in .env (with or without an `export` prefix).
-#    The sed MUST strip both forms: a bare `PYPI_TOKEN=` line otherwise survives
-#    into the token value and PyPI answers 403 Invalid auth (hit on 0.17.0 —
-#    the token was valid, the extraction was not). Rotate the token on a 403
-#    that reproduces with a clean extraction:
+# 3. Publish — PYPI_TOKEN lives in .env, with or without an `export` prefix,
+#    quoted or not, at any indentation. The extraction must handle all of
+#    those: the original `grep PYPI_TOKEN | sed 's/^export PYPI_TOKEN=//'`
+#    passed the literal string "PYPI_TOKEN=" as part of the token whenever the
+#    line had no `export ` prefix, and PyPI answered 403 Invalid auth (hit on
+#    0.17.0 — the token was valid, the extraction was not).
+#    UV_PUBLISH_TOKEN keeps the secret out of argv (--token is visible in `ps`).
+#    Rotate the token on a 403 that reproduces with a clean extraction:
 #    https://pypi.org/manage/account/token/
-uv publish --token "$(grep '^PYPI_TOKEN=' .env | sed -E 's/^export[[:space:]]+PYPI_TOKEN=//; s/^PYPI_TOKEN=//' | tr -d '\"\r')"
+UV_PUBLISH_TOKEN="$(grep -E '^[[:space:]]*(export[[:space:]]+)?PYPI_TOKEN=' .env | head -1 \
+  | sed -E "s/^[[:space:]]*(export[[:space:]]+)?PYPI_TOKEN=//; s/[\"']//g; s/^[[:space:]]+//; s/[[:space:]]+\$//" \
+  | tr -d '\r')" uv publish
 ```
 
 Keep `[project.urls]` and all other tables at the END of their TOML section —

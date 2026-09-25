@@ -198,35 +198,46 @@ def main(argv: list[str] | None = None) -> int:
         qid = instance.question_id
         t_q = time.perf_counter()
 
-        root = args.root / f"{index:04d}_{qid[:8]}"
-        if root.exists():
-            shutil.rmtree(root)
-        core = MemoryCore(path=str(root / "hybrid"))
+        core = None
+        try:
+            root = args.root / f"{index:04d}_{qid[:8]}"
+            if root.exists():
+                shutil.rmtree(root)
+            core = MemoryCore(path=str(root / "hybrid"))
 
-        t0 = time.perf_counter()
-        n_msgs = _ingest_instance(core, instance)
-        ingest_s = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            n_msgs = _ingest_instance(core, instance)
+            ingest_s = time.perf_counter() - t0
 
-        scored = _score_question(core, instance, truth, k=args.k)
-        stats = _graph_stats(core)
-        total_s = time.perf_counter() - t_q
+            scored = _score_question(core, instance, truth, k=args.k)
+            stats = _graph_stats(core)
+            total_s = time.perf_counter() - t_q
 
-        for mode, row in scored.items():
-            record = {
-                "question_id": qid,
-                "question_type": instance.question_type,
-                "mode": mode,
-                "messages": n_msgs,
-                "sessions": len(instance.sessions),
-                "ingest_s": ingest_s,
-                "ingest_msgs_per_s": n_msgs / ingest_s if ingest_s else 0.0,
-                "question_total_s": total_s,
-                **stats,
-                **row,
-            }
-            rows.append(record)
-            with open(jsonl_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            for mode, row in scored.items():
+                record = {
+                    "question_id": qid,
+                    "question_type": instance.question_type,
+                    "mode": mode,
+                    "messages": n_msgs,
+                    "sessions": len(instance.sessions),
+                    "ingest_s": ingest_s,
+                    "ingest_msgs_per_s": n_msgs / ingest_s if ingest_s else 0.0,
+                    "question_total_s": total_s,
+                    **stats,
+                    **row,
+                }
+                rows.append(record)
+                with open(jsonl_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        finally:
+            # finally, not the happy path: one core per question (see
+            # MemoryCore.close). The records are already written, so closing
+            # cannot affect the measurement.
+            if core is not None:
+                try:
+                    core.close()
+                except Exception:  # noqa: BLE001 - cleanup never fails the eval
+                    pass
 
         completed.add(index)
         checkpoint_path.write_text(

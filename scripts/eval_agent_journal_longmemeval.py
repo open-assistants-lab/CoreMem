@@ -399,45 +399,51 @@ def run_eval(
                         print(f"[{index + 1}/{total}] {instance.question_id}: resumed", flush=True)
                     continue
                 instance_root = _instance_dir(root, index, instance)
-                if not (reuse_instances and (instance_root / "hybrid").exists()):
-                    if instance_root.exists():
-                        _safe_reset_root(instance_root)
-                    core = build_memorycore(
-                        instance_root,
-                        instances=(instance,),
-                        llm_provider=llm_provider,
+                core = None
+                core_factaug = None
+                try:
+                    if not (reuse_instances and (instance_root / "hybrid").exists()):
+                        if instance_root.exists():
+                            _safe_reset_root(instance_root)
+                        core = build_memorycore(
+                            instance_root,
+                            instances=(instance,),
+                            llm_provider=llm_provider,
+                        )
+                    else:
+                        core = MemoryCore(
+                            path=str(instance_root / "hybrid"),
+                            llm_provider=llm_provider,
+                        )
+                    core_factaug = _maybe_build_factaug_core(
+                        instance_root, instance, llm_provider, reuse_instances,
+                        active_modes,
                     )
-                else:
-                    core = MemoryCore(
-                        path=str(instance_root / "hybrid"),
-                        llm_provider=llm_provider,
-                    )
-                core_factaug = _maybe_build_factaug_core(
-                    instance_root, instance, llm_provider, reuse_instances,
-                    active_modes,
-                )
-                if progress:
-                    print(f"[{index + 1}/{total}] {instance.question_id}: running", flush=True)
-                question_start = time.time()
-                truth = truth_by_question_id[instance.question_id]
+                    if progress:
+                        print(f"[{index + 1}/{total}] {instance.question_id}: running", flush=True)
+                    question_start = time.time()
+                    truth = truth_by_question_id[instance.question_id]
 
-                new_rows = _score_question(
-                    core, instance, truth,
-                    active_modes=active_modes, k=k, core_factaug=core_factaug,
-                )
-                question_elapsed = time.time() - question_start
-                instance_disk_mb = _dir_size_mb(instance_root)
-                for m in active_modes:
-                    row = new_rows.get(m)
-                    if row is not None:
-                        row["question_time_seconds"] = round(question_elapsed, 1)
-                        row["instance_disk_mb"] = round(instance_disk_mb, 1)
-                        mode_rows[m].append(row)
-                        if jsonl_file is not None:
-                            jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
-                            jsonl_file.flush()
-                completed_question_ids.add(instance.question_id)
-                _close_cores(core, core_factaug)
+                    new_rows = _score_question(
+                        core, instance, truth,
+                        active_modes=active_modes, k=k, core_factaug=core_factaug,
+                    )
+                    question_elapsed = time.time() - question_start
+                    instance_disk_mb = _dir_size_mb(instance_root)
+                    for m in active_modes:
+                        row = new_rows.get(m)
+                        if row is not None:
+                            row["question_time_seconds"] = round(question_elapsed, 1)
+                            row["instance_disk_mb"] = round(instance_disk_mb, 1)
+                            mode_rows[m].append(row)
+                            if jsonl_file is not None:
+                                jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
+                                jsonl_file.flush()
+                    completed_question_ids.add(instance.question_id)
+                finally:
+                    # finally, not the happy path: a per-question failure must
+                    # not leak a pooled Chroma client (see _close_cores).
+                    _close_cores(core, core_factaug)
                 if cleanup_instances and instance_root.exists() and instance.conversation_id is None:
                     shutil.rmtree(instance_root, ignore_errors=True)
                 if resume_path is not None:
@@ -569,46 +575,51 @@ def _run_streaming(
             continue
 
         instance_root = _instance_dir(root, index, instance)
-        if not (reuse_instances and (instance_root / "hybrid").exists()):
-            if instance_root.exists():
-                _safe_reset_root(instance_root)
-            core = build_memorycore(
-                instance_root,
-                instances=(instance,),
-                llm_provider=llm_provider,
+        core = None
+        core_factaug = None
+        try:
+            if not (reuse_instances and (instance_root / "hybrid").exists()):
+                if instance_root.exists():
+                    _safe_reset_root(instance_root)
+                core = build_memorycore(
+                    instance_root,
+                    instances=(instance,),
+                    llm_provider=llm_provider,
+                )
+            else:
+                core = MemoryCore(
+                    path=str(instance_root / "hybrid"),
+                    llm_provider=llm_provider,
+                )
+            core_factaug = _maybe_build_factaug_core(
+                instance_root, instance, llm_provider, reuse_instances,
+                active_modes,
             )
-        else:
-            core = MemoryCore(
-                path=str(instance_root / "hybrid"),
-                llm_provider=llm_provider,
-            )
-        core_factaug = _maybe_build_factaug_core(
-            instance_root, instance, llm_provider, reuse_instances,
-            active_modes,
-        )
-        if progress:
-            print(f"[{index + 1}] {instance.question_id}: running", flush=True)
+            if progress:
+                print(f"[{index + 1}] {instance.question_id}: running", flush=True)
 
-        question_start = time.time()
-        new_rows = _score_question(
-            core, instance, truth,
-            active_modes=active_modes, k=k, core_factaug=core_factaug,
-        )
-        question_elapsed = time.time() - question_start
-        instance_disk_mb = _dir_size_mb(instance_root)
-        for m in active_modes:
-            row = new_rows.get(m)
-            if row is not None:
-                row["question_time_seconds"] = round(question_elapsed, 1)
-                row["instance_disk_mb"] = round(instance_disk_mb, 1)
-                mode_rows[m].append(row)
-                if jsonl_file is not None:
-                    jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
-                    jsonl_file.flush()
+            question_start = time.time()
+            new_rows = _score_question(
+                core, instance, truth,
+                active_modes=active_modes, k=k, core_factaug=core_factaug,
+            )
+            question_elapsed = time.time() - question_start
+            instance_disk_mb = _dir_size_mb(instance_root)
+            for m in active_modes:
+                row = new_rows.get(m)
+                if row is not None:
+                    row["question_time_seconds"] = round(question_elapsed, 1)
+                    row["instance_disk_mb"] = round(instance_disk_mb, 1)
+                    mode_rows[m].append(row)
+                    if jsonl_file is not None:
+                        jsonl_file.write(json.dumps(_public_row(row), sort_keys=True) + "\n")
+                        jsonl_file.flush()
+        finally:
+            # finally, not the happy path (see _close_cores).
+            _close_cores(core, core_factaug)
         completed_question_ids.add(instance.question_id)
         total_yielded += 1
 
-        _close_cores(core, core_factaug)
         if cleanup_instances and instance_root.exists():
             shutil.rmtree(instance_root, ignore_errors=True)
         if resume_path is not None:
