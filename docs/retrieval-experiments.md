@@ -335,3 +335,62 @@ Findings:
   genuinely harder for the reader.
 
 Artifacts: results/eval_answer_locomo_stratified30_con.json (+ .log)
+
+## Fact layer Phase 2 — fact-digest kill-gate (stratified-56, paired, blind judge)
+
+Pre-registered criterion (read before the run): **net ≤ 0 (wins − losses on
+paired answer flips) → `extract_facts` stays opt-in-off; net > 0 → scale to
+full S, then LoCoMo stratified-30, before any default discussion.**
+
+Arms (one core serves both by construction — the facts table does not affect
+message search, so retrieval is byte-identical; `retrieval_seconds_mean` =
+1.981s in both arms confirms it):
+- control: `episodic_4k_reranked`
+- treatment: `episodic_4k_reranked_factdigest` (same 4k bundle, then a ≤800-char
+  ontology-tagged fact digest appended — never displaces verbatim evidence)
+
+Reader + judge: `ollama:gpt-oss:120b-cloud`, blind, 56/56 rows, 13 modes judged
+per row.
+
+| mode | acc | answerable acc | abstention acc | context chars |
+|---|---:|---:|---:|---:|
+| `episodic_4k_reranked` | 0.554 | 0.500 | 0.875 | 5,114 |
+| `..._factdigest` | **0.571** | **0.521** | 0.875 | 5,889 |
+
+Paired answer flips: **+2 / −1** (net +1), exact two-sided binomial
+**p = 1.000**. The three discordant questions:
+- `3a704032` multi-session — digest correct, control wrong
+- `32260d93` single-session-preference — digest correct, control wrong
+- `51a45a95` single-session-user — digest wrong, control correct (one regression:
+  the digest distracts on a simple single-session fact)
+
+Per type (n=8 each): multi-session 0.38 → 0.50, single-session-preference
+0.12 → 0.25, single-session-user 0.88 → 0.75, temporal 0.38 = 0.38,
+knowledge-update 0.75 = 0.75, single-session-assistant 0.50 = 0.50,
+abstention 0.88 = 0.88.
+
+**VERDICT: net > 0 → criterion met, but directionally positive only** (+0.017
+accuracy, p=1.000, 3 discordant pairs). Wins land exactly where the mechanism
+predicts (cross-session synthesis, preference consolidation) and the single
+regression is the predicted distraction case — the pattern is coherent, the
+sample is far too small to call. Per the pre-registered rule, this is NOT a
+default flip: `extract_facts` remains opt-in-off pending full-S confirmation.
+
+The trajectory across checkpoints is itself the lesson: n=18 read **negative**
+(0.722 vs 0.778), n=45 read +0.019, n=56 read +0.017. Early-stopping at the
+first checkpoint would have produced the wrong call in both directions.
+
+**Infrastructure cost (worth fixing before the full-S run):** six process
+deaths over this run — 5 × MPS OOM, 1 × proxy 502 — each recovered by
+`--resume` (only the in-flight question lost). Root causes: (1) the answer
+eval never called `MemoryCore.close()` on its 1–2 per-question cores, leaking
+a pooled Chroma client + SQLite handles per question — fixed in a05ab4a, which
+doubled process lifespan (9 → 18 questions); (2) host memory exhaustion (8
+Docker containers + desktop apps left ~74 MB free), worked around with
+`PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` (18 → 45 questions). The same `.close()`
+gap exists in `eval_agent_journal_longmemeval.py` (1 close for 5 construction
+sites) and must be fixed before the 500-question run, which would otherwise
+need ~10 restart cycles.
+
+Artifacts: `results/eval_answer_s56_factdigest.json` (+ `.log`), worktree
+`fact-layer`, data `data/longmemeval_s_stratified_56.json`.
