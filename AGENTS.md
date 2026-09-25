@@ -117,11 +117,48 @@ results = core.recall(query, session_cap=2)
 
 # With filter params
 results = core.recall(query, role="user", session_id="abc", ts_after="2024-01-01")
+
+# Fact layer (0.17.0, semantic layer v0) — governed rows on the versioned
+# chain, zero-LLM deterministic lookups. Requires versioned=True (the default).
+fid = core.add_fact("user", "home_city", "Melbourne", source_message_id="m1")
+core.list_facts(entity="user")            # current facts; expired hidden
+core.get_fact(fid)
+core.fact_history(fid)                    # full audit trail, oldest first
+core.supersede_fact(fid, "Sydney")        # single-cardinality attribute
+core.expire_fact(fid)                     # soft-expire; the chain never rewinds
+core.merge_facts([fid_a, fid_b], "Berlin")
+
+# LLM fact extraction at ingest — OPT-IN, default False (kill-gate p=1.000)
+core = MemoryCore(path, llm_provider=..., extract_facts=True)
+
+# Budget-capped [FACTS] digest for the reader prompt (appended AFTER the
+# bundle, so it never evicts verbatim evidence; empty when no facts exist)
+from coremem.reading import build_facts_digest
+prompt_suffix = build_facts_digest(core.list_facts(), budget_chars=800)
 ```
 
 ## Key Design Decisions
 
 - **No verbatim compiler** — removed; only LLM compiler for daily journals
+- **Fact layer is ontology-as-tags, not a graph** (0.17.0) — shallow closed
+  attribute vocabulary (`ontology.toml`) with cardinality; relation-graph
+  traversal falsified twice (PPR, query-guided v2). Unknown attributes default
+  to `multi`/text so nothing is silently superseded. Facts are rows in a
+  versioned table, so every write is on the audit chain and reversible via
+  `rollback_memory`; the facts table never enters message search, so recall is
+  byte-identical with or without facts. Digest budget is 800 chars appended
+  AFTER the bundle context — grows the prompt, never evicts verbatim evidence.
+- **`extract_facts` stays opt-in-off** — the stratified-56 kill-gate read
+  0.554 (control) vs 0.571 (factdigest), paired flips +2/−1, **p=1.000**:
+  directionally positive with wins in the predicted types, but not evidence of
+  a working lever. Full-S confirmation is pre-registered with kill criteria
+  fixed in advance (`docs/retrieval-experiments.md`); net ≤ 0 closes Phase 2,
+  while Phase 1's governance API ships on its own merits.
+- **Eval harnesses must close per-question `MemoryCore`s** — both
+  `eval_answer_longmemeval.py` and `eval_agent_journal_longmemeval.py` build
+  1–2 cores per question; without `close()` the pooled Chroma clients
+  accumulate and long runs die by OOM (this was the primary cause of six
+  process deaths in the 56-question gate run).
 - **Daily pages use hybriddb timestamps** — `daily/{actual_date}.md`, not `datetime.now(UTC)`
 - **hybriddb floor `>=0.7.0`** — versioned tables are the DEFAULT since 0.15.0 (memory governance; 0.7.0 batched rollback 3.85s→0.32s per the rollback perf report); 0.5.8 floor validated retrieval-neutral by A/B, 0.6.0/0.7.0 re-verified on the stratified-56 (0.965/0.537 identical). `coremem.__version__` must match `pyproject.toml` exactly (0.13.3 fixed a 0.13.1/0.13.2 drift, same class as hybriddb 0.5.8).
 - **`DEFAULT_AGENT_JOURNAL_MODEL`** = `"openai:gpt-4o-mini"` (ollama-cloud not in library default)
@@ -158,7 +195,11 @@ uv run scripts/eval_combined_s.py data/longmemeval_s_cleaned.json \
 ## Tests
 
 ```bash
-uv run python3 -m pytest tests/ -q   # 175 pass
+uv run --extra dev --extra mcp python3 -m pytest tests/ -q   # 210 pass (0 skipped)
+
+# The 4 tests/test_cli.py subprocess tests time out on memory-starved hosts
+# (a cold CLI `recall` takes ~50 s vs the test's 30 s timeout). Environmental,
+# not a regression — they pass on an unloaded machine and reproduce on 0.16.1.
 ```
 
 ## Release
