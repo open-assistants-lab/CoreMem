@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
 import re
 import shutil
@@ -406,7 +407,16 @@ def run(
                 "metrics": {mode: _metrics(rows, mode) for mode in MODES},
             }
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            # Atomic checkpoint: this file IS the resume state (--resume reads
+            # it back), and a 500-question run will be killed and restarted many
+            # times. write_text truncates before writing, so a death mid-write
+            # would leave invalid JSON and permanently break resume. Serialize
+            # to a sibling temp file, then rename — the rename is atomic, so the
+            # checkpoint is either the old one or the new one, never half of one.
+            payload = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+            tmp_output = output.with_name(output.name + ".tmp")
+            tmp_output.write_text(payload, encoding="utf-8")
+            os.replace(tmp_output, output)
         finally:
             # finally, not the happy path: each question builds 1-2 cores, and a
             # provider or ingest failure must not leak a pooled Chroma client

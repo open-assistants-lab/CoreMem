@@ -96,6 +96,49 @@ def _track_cores(monkeypatch) -> tuple[list[object], set[int]]:
     return built, closed
 
 
+def test_answer_eval_writes_the_checkpoint_atomically(tmp_path, monkeypatch):
+    """The checkpoint IS the resume state; a kill mid-write must not corrupt it.
+
+    ``write_text`` truncates before writing, so a process death during the
+    write leaves invalid JSON and ``--resume`` can no longer load it. Over a
+    500-question run that tail risk is worth removing.
+    """
+    built, _ = _track_cores(monkeypatch)
+    monkeypatch.setattr(harness, "create_provider", lambda model: FakeProvider())
+    data_path = _write_fixture(tmp_path / "fixture.json")
+    output = tmp_path / "out.json"
+
+    harness.run(data_path, output, tmp_path / "instances",
+                answer_model="fake:answer", judge_model="fake:judge")
+    good = output.read_text(encoding="utf-8")
+    assert json.loads(good)["results"], "expected a first checkpoint"
+
+    # Simulate the process dying mid-write: the file is truncated and only
+    # partially written before the exception escapes.
+    def truncating_write_text(self, data, **kwargs):
+        with open(self, "w", encoding=kwargs.get("encoding")) as handle:
+            handle.write(data[:20])
+            handle.flush()
+        raise RuntimeError("simulated kill mid-write")
+
+    monkeypatch.setattr(Path, "write_text", truncating_write_text)
+    with pytest.raises(RuntimeError, match="simulated kill mid-write"):
+        harness.run(data_path, output, tmp_path / "instances",
+                    answer_model="fake:answer", judge_model="fake:judge")
+    monkeypatch.undo()
+
+    # The resume state must still be loadable and unchanged.
+    assert output.read_text(encoding="utf-8") == good, (
+        "checkpoint was truncated by an interrupted write — resume would break"
+    )
+    assert len(json.loads(output.read_text(encoding="utf-8"))["results"]) == 1
+
+    # And a real resume off that checkpoint still completes.
+    result = harness.run(data_path, output, tmp_path / "instances",
+                         answer_model="fake:answer", judge_model="fake:judge", resume=True)
+    assert len(result["results"]) == 1
+
+
 def test_answer_eval_closes_its_memorycore(tmp_path, monkeypatch):
     built, closed = _track_cores(monkeypatch)
     monkeypatch.setattr(harness, "create_provider", lambda model: FakeProvider())
