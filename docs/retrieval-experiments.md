@@ -275,6 +275,65 @@ decomposition win"): the 568M reranker scores by general semantic relevance,
 displacing verbatim evidence in synthesis-heavy types. VERDICT: keep L-6.
 The MS-MARCO NDCG advantage does not transfer to conversational memory.
 
+## Dependency floor validation — hybriddb 0.7.0 → 0.10.0 (2026-10-01)
+
+Floor raised to `hybriddb>=0.10.0`. What the three intervening minors change
+for CoreMem:
+
+- **0.8.0** — Chroma vectors re-keyed from physical rowid to the logical pk,
+  with a per-collection identity marker. **Opt-in**: "upgrading changes nothing
+  until you opt in" via `migrate_vector_identity()`. It deletes the rowid→pk
+  bug class (0.5.4/0.5.5/CoreMem) at the root, and our existing per-question
+  instance caches stay rowid-keyed — no migration needed, none performed.
+- **0.9.0** — `FTS5UnavailableError` + a cached capability probe (a missing
+  FTS5 module used to surface as raw DDL), an interpreter/SQLite matrix gate,
+  and a 3x looser rollback perf allowance.
+- **0.10.0** — bundled quantized MiniLM becomes the **default** engine, the
+  silent hash-embedding fallback is removed (it measured a 5.3x accuracy cliff
+  on BEIR and provoked a chromadb segfault), and a numeric-looking TEXT pk
+  bug that silently returned zero semantic rows is fixed.
+
+**Two compatibility questions checked empirically rather than assumed:**
+
+1. *Does the new default embedder change our vectors?* No — CoreMem always
+   passes its own `embedding_fn` (`coremem/core.py:351`), so 0.10.0's bundled
+   MiniLM never runs. Verified: 0.10.0 records `embedding_model='custom'`,
+   `embedding_dim=384` (bge-small) for all four CoreMem tables.
+2. *Do stores written by ≤0.9 reopen under 0.10.0?* Yes. All of 0.7.0/0.8.0/
+   0.9.0/0.10.0 write `'custom'` for a custom embedding fn, so the
+   model-mismatch guard is satisfied across the whole range (cross-open tested
+   0.7.0/0.8.0/0.9.0 stores under 0.10.0: all open, all return hits). The
+   MiniLM-mislabelling hazard in the 0.10.0 changelog applies to
+   hash-fallback stores, which CoreMem never creates.
+
+**Retrieval neutrality — paired A/B, stratified-56, `memorycore_episodic_reranked` k=5,
+identical data, one arm per version:**
+
+| metric | 0.7.0 | 0.10.0 | Δ |
+|---|---:|---:|---:|
+| session_recall@5 | 0.9650 | 0.9650 | +0.0000 |
+| message_recall@5 | 0.5370 | 0.5370 | +0.0000 |
+| session_hit@5 | 1.0000 | 1.0000 | +0.0000 |
+| message_hit@5 | 0.6460 | 0.6460 | +0.0000 |
+| session_mrr | 0.9650 | 0.9650 | +0.0000 |
+| empty_retrieval_rate | 0.1430 | 0.1430 | +0.0000 |
+
+Per-question: **55/56 rows byte-identical**. The one difference is rank 4 of a
+knowledge-update question swapping to a different message *within the same
+session* (`session_0007_turn_0002_user` → `session_0007_turn_0009_assistant`);
+retrieved sessions and every metric are unchanged. A within-session tie-break,
+not a ranking change.
+
+**Versioned-memory perf gate** (`scripts/bench_versioned_memory.py --rows
+10000`, 4 runs): ingest overhead −1.5% to +0.9% (gate: +0.2%), rollback
+0.29–0.33 s per 1k rows (gate: 0.32 s), versioned recall latency equal to
+unversioned. One run in four returned +11.8% overhead and 130 ms versioned
+recall — host contention (the machine ran with ~80 MB free), not a regression;
+the other three bracket the documented baseline. **Timings from this host are
+noisy; the per-question diff above is the load-bearing evidence.**
+
+Artifacts: `results/hdb_0.7.0_s56.json`, `results/hdb_0.10.0_s56.json` (+ logs).
+
 ## Lever 5 — Deterministic time-aware range pruning: NO-OP (closed)
 
 Implemented deterministic temporal window parsing (coremem/heuristics.py:
