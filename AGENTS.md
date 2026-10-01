@@ -209,6 +209,8 @@ uv run --extra dev --extra mcp python3 -m pytest tests/ -q   # 210 pass (0 skipp
 #    Also bump `__version__` in coremem/__init__.py to the SAME version —
 #    a stale string there ships in the wheel (0.13.2 published 0.13.1).
 # 2. Sync lockfile (should only change the coremem version) and build
+rm -rf dist   # stale wheels from earlier releases: `uv publish` uploads
+               # EVERYTHING in dist/, and PyPI rejects the duplicates
 uv lock && uv build
 # 3. Publish — PYPI_TOKEN lives in .env, with or without an `export` prefix,
 #    quoted or not, at any indentation. The extraction must handle all of

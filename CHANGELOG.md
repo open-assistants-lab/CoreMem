@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.17.1] — raise the hybriddb floor to 0.10.0 (validated retrieval-neutral)
+
+No library behaviour change. The floor moves from `hybriddb>=0.7.0` to
+`hybriddb>=0.10.0`; what the three intervening minors do to CoreMem, and the
+evidence they are safe, are recorded in full in `docs/retrieval-experiments.md`.
+
+### What 0.8.0 → 0.10.0 changes
+- **0.8.0** — Chroma vectors re-keyed from physical rowid to the logical
+  primary key, deleting the rowid→pk bug class (0.5.4/0.5.5/CoreMem) at the
+  root. **Opt-in**: upgrading changes nothing until
+  `migrate_vector_identity()` is called, and CoreMem has not called it.
+- **0.9.0** — `FTS5UnavailableError` plus a cached FTS5 capability probe (a
+  missing SQLite FTS5 module used to surface as a raw `no such module: fts5`
+  from the DDL), an interpreter/SQLite matrix release gate, and a 3x looser
+  rollback perf allowance.
+- **0.10.0** — the bundled quantized MiniLM becomes the **default** embedding
+  engine, the silent hash-embedding fallback is removed (it measured a 5.3x
+  accuracy cliff on BEIR and provoked a chromadb segfault), and a
+  numeric-looking TEXT primary key no longer makes semantic search silently
+  return zero rows.
+
+### Why it is safe for CoreMem specifically
+- **The new default embedder never runs here.** CoreMem always passes its own
+  `embedding_fn` (`coremem/core.py`), so the bundled MiniLM engine is bypassed
+  entirely. Verified: 0.10.0 records `embedding_model='custom'`,
+  `embedding_dim=384` (bge-small) for the `messages`, `journal_records`,
+  `facts` and `message_facts` tables.
+- **Existing stores still open.** All of 0.7.0 / 0.8.0 / 0.9.0 / 0.10.0
+  write `'custom'` for a custom embedding fn, so the model-mismatch guard is
+  satisfied across the whole range; stores written by each of 0.7.0, 0.8.0 and
+  0.9.0 were cross-opened under 0.10.0 and all returned hits.
+
+### Evidence
+- **Paired A/B, LongMemEval S stratified-56**, `memorycore_episodic_reranked`
+  k=5, identical data, one arm per version: `session_recall@5` 0.9650 →
+  0.9650, `message_recall@5` 0.5370 → 0.5370, and `session_hit@5`,
+  `message_hit@5`, `session_mrr`, `empty_retrieval_rate` all unchanged
+  (**Δ = 0.0000** on every metric). **55/56 rows byte-identical**; the single
+  difference is rank 4 of a knowledge-update question swapping to a different
+  message *within the same session*, with retrieved sessions and every metric
+  unchanged — a tie-break, not a ranking change.
+- **Versioned-memory perf gate** (`scripts/bench_versioned_memory.py
+  --rows 10000`, 4 runs): ingest overhead −1.5% to +0.9% (previous gate:
+  +0.2%), rollback 0.29–0.33 s per 1k rows (previous gate: 0.32 s), versioned
+  recall latency equal to unversioned. One run in four returned +11.8%
+  overhead and 130 ms versioned recall — host contention with ~80 MB free, not
+  a regression; the other three bracket the prior baseline. Timings from that
+  host are noisy; the per-question diff is the load-bearing evidence.
+- **Full test suite: 220 passed** on 0.10.0.
+
+### Also in this release (repo-only; scripts and tests are not in the wheel)
+- **Atomic checkpoints in the answer eval.** The result file *is* the resume
+  state for `--resume`, and it was written with `write_text`, which truncates
+  before writing — a kill mid-write left invalid JSON and permanently broke
+  resume. It is now serialized to a sibling `.tmp` and `os.replace`d, so the
+  checkpoint is either the old one or the new one.
+- **`scripts/run_answer_eval_resumable.sh`** — supervises a multi-day answer
+  run: resumes on every death, applies the MPS watermark override, exits 0
+  when complete, and gives up after 5 consecutive attempts with no forward
+  progress so a real config error cannot spin forever.
+- **Per-question `MemoryCore.close()` in all four eval harnesses**, on a
+  `finally` (see 0.17.0) — extended in this release to the two S-scale
+  harnesses, which never closed their cores at all.
+
 ## [0.17.0] — fact layer (semantic layer v0): governed facts, zero-LLM lookups
 
 A shallow, **closed-vocabulary fact layer** over the versioned memory store.
