@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 # eval_answer_longmemeval.py imports its sibling by bare name (it is run as a
@@ -137,6 +138,77 @@ def test_answer_eval_writes_the_checkpoint_atomically(tmp_path, monkeypatch):
     result = harness.run(data_path, output, tmp_path / "instances",
                          answer_model="fake:answer", judge_model="fake:judge", resume=True)
     assert len(result["results"]) == 1
+
+
+class FlakyProvider(FakeProvider):
+    """Fails the first `fail_times` calls with a transient upstream error."""
+
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self.fail_times = fail_times
+        self.failures = 0
+
+    async def chat(self, messages: list[dict]) -> SimpleNamespace:
+        if self.failures < self.fail_times:
+            self.failures += 1
+            request = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+            raise httpx.HTTPStatusError(
+                "502 Bad Gateway", request=request, response=httpx.Response(502, request=request),
+            )
+        return await FakeProvider.chat(self, messages)
+
+
+class PermanentFailureProvider(FakeProvider):
+    async def chat(self, messages: list[dict]) -> SimpleNamespace:
+        self.calls += 1
+        request = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+        raise httpx.HTTPStatusError(
+            "400 Bad Request", request=request, response=httpx.Response(400, request=request),
+        )
+
+
+def test_answer_eval_retries_transient_provider_errors(tmp_path, monkeypatch):
+    """A 502 from the cloud reader/judge must not throw away a whole question.
+
+    Each question costs minutes of ingest plus 15-25 fact-extraction calls before
+    the answer is even requested; a single transient upstream error used to kill
+    the run and lose all of it (16 such deaths on the 500-question run).
+    """
+    built, closed = _track_cores(monkeypatch)
+    provider = FlakyProvider(fail_times=2)
+    monkeypatch.setattr(harness, "create_provider", lambda model: provider)
+    monkeypatch.setattr(harness, "_RETRY_BASE_DELAY", 0.0)
+    data_path = _write_fixture(tmp_path / "fixture.json")
+
+    result = harness.run(data_path, tmp_path / "out.json", tmp_path / "instances",
+                         answer_model="fake:answer", judge_model="fake:judge")
+
+    assert len(result["results"]) == 1, "the question should survive transient errors"
+    assert provider.calls > 2, "expected the failed calls to have been retried"
+    assert closed == {id(core) for core in built}, "cores must still be closed"
+
+
+def test_chat_retries_transient_provider_errors(monkeypatch):
+    """_chat is the single choke point for both reader and judge calls."""
+    monkeypatch.setattr(harness, "_RETRY_BASE_DELAY", 0.0)
+    provider = FlakyProvider(fail_times=2)
+
+    text = harness._chat(provider, "hello")
+
+    assert text == "Maya picked the pear tart."
+    assert provider.failures == 2, "both transient failures should have been retried"
+    assert provider.calls == 1, "exactly one successful call should get through"
+
+
+def test_chat_does_not_retry_a_client_error(monkeypatch):
+    """A 4xx is not transient: retrying it only burns time before failing."""
+    monkeypatch.setattr(harness, "_RETRY_BASE_DELAY", 0.0)
+    provider = PermanentFailureProvider()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        harness._chat(provider, "hello")
+
+    assert provider.calls == 1, f"4xx must not be retried (made {provider.calls} calls)"
 
 
 def test_answer_eval_closes_its_memorycore(tmp_path, monkeypatch):

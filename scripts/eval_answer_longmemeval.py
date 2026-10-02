@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from coremem import MemoryCore
 from coremem.reading import build_facts_digest
 from coremem.providers import create_provider
@@ -49,9 +51,39 @@ MODES = (
 _CON_MODES = frozenset({"episodic_4k_reranked_con", "episodic_4k_reranked_con_json"})
 
 
+# Transient upstream failures are retried: each question costs minutes of ingest
+# plus 15-25 fact-extraction calls before the answer is even requested, so one
+# 502 from the cloud reader/judge used to throw all of it away (16 such deaths
+# on the 500-question confirmation run). 4xx is never retried -- it will not fix
+# itself, and retrying only delays the failure.
+_RETRY_ATTEMPTS = 5
+_RETRY_BASE_DELAY = 5.0  # seconds; the delay sequence is 5, 10, 20, 40
+_TRANSIENT_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _TRANSIENT_STATUS
+    return isinstance(exc, (httpx.TransportError, TimeoutError))
+
+
 def _chat(provider: Any, prompt: str) -> str:
-    response = asyncio.run(provider.chat([{"role": "user", "content": prompt}]))
-    return str(response.content if hasattr(response, "content") else response).strip()
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            response = asyncio.run(provider.chat([{"role": "user", "content": prompt}]))
+            return str(response.content if hasattr(response, "content") else response).strip()
+        except Exception as exc:  # noqa: BLE001 - classified immediately below
+            if not _is_transient(exc) or attempt == _RETRY_ATTEMPTS - 1:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            print(
+                f"[retry] transient provider error "
+                f"({type(exc).__name__}: {str(exc)[:80]}) — "
+                f"retry {attempt + 1}/{_RETRY_ATTEMPTS - 1} in {delay:.0f}s",
+                flush=True,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable: the loop either returns or re-raises")
 
 
 def _format_messages(messages: list[Any]) -> str:
