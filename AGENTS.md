@@ -4,19 +4,20 @@
 
 **Dataset**: `data/longmemeval_oracle.json` — 500 questions, ~2 sessions each
 
-| Metric | `memorycore` | `llm_expansion` | `episodic` | `episodic_reranked` | `episodic_reranked_4k` |
-|---|---:|---:|---:|---:|---:|
-| session_recall@5 | 0.938 | 0.951 | **0.999** | **0.999** | **0.999** |
-| message_recall@5 | 0.754 | 0.854 | 0.472 | **0.867** | **0.867** |
-| session_hit@5 | 0.972 | 0.972 | **1.000** | **1.000** | **1.000** |
-| message_hit@5 | 0.904 | 0.951 | 0.570 | **0.947** | **0.947** |
-| session_mrr | 0.972 | 0.972 | **1.000** | **1.000** | **1.000** |
-| session_map | 0.938 | 0.951 | **0.999** | **0.999** | **0.999** |
-| empty_retrieval_rate | 0.060 | 0.060 | 0.060 | 0.060 | 0.060 |
-| context_chars_mean | 4,937 | **3,928** | 8,050 | 4,540 | 4,540 |
-| bundle_message_recall | — | — | 0.829 | **0.917** | 0.897 |
-| bundle_message_hit | — | — | 0.909 | **0.966** | 0.951 |
-| bundle_context_chars_mean | — | — | 7,757 | 6,898 | **2,243** |
+| Metric | `memorycore` | `llm_expansion` |
+|---|---:|---:|
+| session_recall@5 | 0.938 | **0.951** |
+| message_recall@5 | 0.754 | **0.854** |
+| session_hit@5 | 0.972 | 0.972 |
+| message_hit@5 | 0.904 | **0.951** |
+| session_mrr | 0.972 | 0.972 |
+| session_map | 0.938 | 0.951 |
+| empty_retrieval_rate | 0.060 | 0.060 |
+| context_chars_mean | 4,937 | **3,928** |
+
+> The `episodic`/`episodic_reranked` Oracle columns were removed: no
+> published run supports them. Current-pipeline Oracle results are not
+> committed — the S table below is the current-pipeline measurement.
 
 ## Eval Results — LongMemEval S (500 questions, k=5, ~48 sessions each)
 
@@ -36,6 +37,10 @@
 | bundle_message_hit | — | **0.921** | 0.855 |
 | bundle_context_chars_mean | — | 11,579 | **2,685** |
 
+> The `episodic_reranked` column above is the previous all-MiniLM default;
+> the current default (bge-small, since v0.13.4) measures **0.957 session /
+> 0.628 message recall@5** on the same 500 questions.
+
 **By question type — message_recall@5:**
 
 | Type | n | `memorycore` (saved) | `episodic_reranked` |
@@ -53,11 +58,11 @@
 
 It is the strongest zero-LLM-retrieval mode across both oracle and S evaluations:
 
-- **Best session recall** (0.950 S, 0.999 oracle) — finds the right context.
-- **Competitive message recall** (0.617 S, 0.867 oracle) — close to `memorycore` on S, exceeds it on oracle.
-- **Bundle evidence recall** (0.847 S, 0.917 oracle) — evidence is available even when not in top-5.
+- **Best session recall** (0.957 S with the bge-small default) — finds the right context.
+- **Competitive message recall** (0.628 S) — close to `memorycore` on S.
+- **Bundle evidence recall** (0.847 S) — evidence is available even when not in top-5.
 - **No retrieval LLM calls** — uses a local cross-encoder (`ms-marco-MiniLM-L-6-v2`).
-- **Context is efficient** (3,991 chars S, 4,540 chars oracle).
+- **Context is efficient** (3,733 chars S).
 - **Answer eval is the decision metric for bundles** (500 S questions, LLM answer + LLM judge, `scripts/eval_answer_longmemeval.py`): the default ships **4k bundles with evidence-first ordering** (0.678 accuracy, 6,016 chars) — the winning configuration over 16k bundles (0.608) and cap=2 (0.656).
 
 **When to use other strategies:**

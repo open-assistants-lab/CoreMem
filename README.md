@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/coremem)](https://pypi.org/project/coremem/)
 [![Downloads](https://img.shields.io/pypi/dm/coremem)](https://pypi.org/project/coremem/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. The default `recall(strategy="episodic")` path scores **99.9% session recall@5 on LongMemEval Oracle (500 questions)** and **95.0% on LongMemEval S (500 questions, ~48 sessions each)** with zero LLM calls.
+> **Zero-LLM memory retrieval for AI agents.** CoreMem gives agents instant access to conversation history — semantic search plus deterministic retrieval heuristics, all without a single API call. The default `recall(strategy="episodic")` path scores **95.7% session recall@5 on LongMemEval S (500 questions, ~48 sessions each)** with zero LLM calls — measured with bge-small (default embedder since v0.13.4) plus the L-6 cross-encoder.
 
 > **Embedded. Local. Open source.** No external APIs, no vector DB services, no internet connection required. Runs entirely on-device with HybridDB (SQLite + FTS5 + ChromaDB) + sentence-transformers. Ships as a single Python package with zero infrastructure dependencies.
 
@@ -38,34 +38,39 @@ CoreMem solves all three:
 | **Deterministic heuristics** | Keyword overlap (exact + fuzzy + bigram), temporal recency, person-name boost, quoted-phrase matching |
 | **Query decomposition** | Splits multi-cue relational questions into independent search cues — temporal questions ("from X to Y", "since X when Y", "how many days ago did I X") get anchor + target cues (+0.037 session recall on S temporal-reasoning) |
 | **Preference routing** | Preference questions ("what do I like") route through a per-variant union so implicit-preference evidence survives (+0.033 session recall on S preference questions) |
-| **Cross-encoder reranking** | `ms-marco-MiniLM-L-6-v2` reranks candidates — the single biggest recall win (m@5 0.472 → 0.867 on oracle) |
+| **Cross-encoder reranking** | `ms-marco-MiniLM-L-6-v2` reranks candidates — the single biggest recall win (LongMemEval S message recall@5 0.628 with the default embedder) |
 | **MMR session diversity** | One result per session, preventing cross-encoder overfit |
 
 ## LongMemEval Results
 
 ### Oracle (500 questions, ~2 sessions each, k=5)
 
-| Metric | `direct` | `expanded` | `episodic` (default) |
-|---|---:|---:|---:|
-| session_recall@5 | 0.938 | 0.951 | **0.999** |
-| message_recall@5 | 0.754 | 0.854 | **0.867** |
-| session_hit@5 | 0.972 | 0.972 | **1.000** |
-| message_hit@5 | 0.904 | 0.951 | **0.947** |
-| context_chars_mean | 4,937 | 3,928 | **4,540** |
+> Measured before cross-encoder reranking became the default (July 2026); a current-pipeline Oracle run is not published.
+
+| Metric | `direct` (zero-LLM) | `expanded` (1 LLM call/q) |
+|---|---:|---:|
+| session_recall@5 | 0.938 | **0.951** |
+| message_recall@5 | 0.754 | **0.854** |
+| session_hit@5 | 0.972 | 0.972 |
+| message_hit@5 | 0.904 | **0.951** |
+| context_chars_mean | 4,937 | **3,928** |
 
 ### S (500 questions, ~48 sessions each, k=5)
 
-> Numbers are the pre-improvement `episodic` baseline; the validated
-> improvements below add +0.034 session recall overall (temporal +0.037,
-> preference +0.033) — see the next section.
+> Measured `memorycore_episodic_reranked` runs: **0.957 session / 0.628
+> message recall@5** with bge-small (default embedder since v0.13.4), and
+> 0.952 / 0.618 with the previous all-MiniLM default. Temporal decomposition
+> and preference routing are folded into the default and validated on their
+> question subsets (+0.037 on 133 temporal questions, +0.033 on 30 preference
+> questions) — not re-measured as a full-set aggregate.
 
-| Metric | `direct` | `episodic` (default) |
-|---|---:|---:|
-| session_recall@5 | 0.865 | **0.950** |
-| message_recall@5 | **0.670** | 0.617 |
-| session_hit@5 | 0.968 | **0.981** |
-| message_hit@5 | **0.768** | **0.768** |
-| context_chars_mean | — | **3,991** |
+| Metric | `direct` | `episodic` (bge-small) | `episodic` (MiniLM) |
+|---|---:|---:|---:|
+| session_recall@5 | 0.865 | **0.957** | 0.952 |
+| message_recall@5 | **0.670** | 0.628 | 0.618 |
+| session_hit@5 | 0.968 | **0.981** | **0.981** |
+| message_hit@5 | **0.768** | **0.774** | 0.770 |
+| context_chars_mean | — | **3,733** | 3,880 |
 
 **Recommendation: use `recall(strategy="episodic")` (the default).** It is the strongest zero-LLM mode on both evaluations — best session recall, competitive message recall, and no retrieval LLM calls. Use `direct` for single-session factual questions (best message precision), `expanded` when highest precision is needed (1 LLM call for query rephrasing), and `fusion` when session diversity is critical (2× compute).
 
@@ -104,7 +109,7 @@ with the resumable harness in `scripts/`:
 | **L-12 cross-encoder** (`COREMEM_CROSS_ENCODER_MODEL` opt-in) | +0.018 message recall on the oracle-style subset — but cancels the temporal win on S (−0.004) | ⚠️ opt-in only; L-6 stays the default |
 | Graph-based retrieval (8 research-grounded edge types) | neutral-to-negative across 500 S questions | ❌ parked (see `docs/graph-edges-design.md`) |
 
-**The composition lesson:** individually-positive improvements do not always sum — a combined 500/500 S-scale validation showed the L-12 reranker cancels the temporal decomposition's session gains. The default strategy ships only the validated combination (L-6 + temporal decomposition + preference routing), measured at +0.034 session recall overall with zero regressions.
+**The composition lesson:** individually-positive improvements do not always sum — a combined 500/500 S-scale validation showed the L-12 reranker cancels the temporal decomposition's session gains. The default strategy ships only the validated combination (L-6 + temporal decomposition + preference routing), validated on their question subsets with zero regressions.
 
 ## Installation
 
