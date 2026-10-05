@@ -1027,3 +1027,73 @@ def test_fact_augment_off_by_default_and_no_provider_degrades_gracefully():
         assert core2.count() == 1
     finally:
         core2._test_cleanup()
+
+
+def test_embedding_model_load_recovers_after_a_transient_failure(monkeypatch, caplog):
+    """A momentary load failure must not disable embeddings for the process.
+
+    The loader used to cache *failure* (``_batch_embed_model = False``) behind a
+    bare ``except Exception``, so one transient error — memory pressure, a torch
+    allocation hiccup, an HF hub blip — made every later call raise "no
+    embedding model available" until the process died, with the real cause
+    swallowed and never logged. On the 500-question run that silently cost 60
+    failed attempts and ~2 days of wall clock.
+    """
+    import logging
+
+    import coremem.core as core
+
+    attempts = {"n": 0}
+
+    class FlakyModel:
+        def encode(self, texts, **kwargs):
+            return [[0.0] * 384 for _ in texts]
+
+    def flaky_ctor(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("simulated transient load failure")
+        return FlakyModel()
+
+    monkeypatch.setattr(core, "_batch_embed_model", None)
+    monkeypatch.setattr(core, "_batch_embed_retry_after", 0.0, raising=False)
+    monkeypatch.setattr(core, "_BATCH_EMBED_RETRY_COOLDOWN", 0.0, raising=False)
+    monkeypatch.setattr("sentence_transformers.SentenceTransformer", flaky_ctor)
+
+    with caplog.at_level(logging.WARNING, logger="coremem.core"):
+        with pytest.raises(RuntimeError, match="no embedding model available"):
+            core._query_embedding_fn("first")
+
+        assert "simulated transient load failure" in caplog.text, (
+            "the real load error must be logged, not swallowed"
+        )
+
+        # The very next call must retry rather than serve a cached failure.
+        vector = core._query_embedding_fn("second")
+
+    assert len(vector) == 384
+    assert attempts["n"] == 2, "loader should have retried after the failure"
+
+
+def test_embedding_model_load_respects_the_retry_cooldown(monkeypatch):
+    """A genuinely broken environment must not spin on model-load attempts."""
+    import coremem.core as core
+
+    attempts = {"n": 0}
+
+    def always_fails(*args, **kwargs):
+        attempts["n"] += 1
+        raise RuntimeError("no such model")
+
+    monkeypatch.setattr(core, "_batch_embed_model", None)
+    monkeypatch.setattr(core, "_batch_embed_retry_after", 0.0, raising=False)
+    monkeypatch.setattr(core, "_BATCH_EMBED_RETRY_COOLDOWN", 3600.0, raising=False)
+    monkeypatch.setattr("sentence_transformers.SentenceTransformer", always_fails)
+
+    for _ in range(5):
+        with pytest.raises(RuntimeError, match="no embedding model available"):
+            core._query_embedding_fn("x")
+
+    assert attempts["n"] == 1, (
+        f"cooldown should suppress retries, but the loader ran {attempts['n']} times"
+    )

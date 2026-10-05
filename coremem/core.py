@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,17 +62,36 @@ def _embedding_model_name() -> str:
     return os.environ.get("COREMEM_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 
 
+# Cooldown before retrying a failed model load. The failure is deliberately NOT
+# cached: a transient error (host memory pressure, a torch allocation hiccup, an
+# HF hub blip) must not disable embeddings for the rest of the process. 60s is
+# long enough that a genuinely broken environment does not spin on load attempts.
+_BATCH_EMBED_RETRY_COOLDOWN = 60.0
+_batch_embed_retry_after: float = 0.0
+
+
 def _batch_embedding_model() -> Any:
-    global _batch_embed_model
+    global _batch_embed_model, _batch_embed_retry_after
     if _batch_embed_model is None:
         with _batch_embed_lock:
-            if _batch_embed_model is None:
+            now = time.monotonic()
+            if _batch_embed_model is None and now >= _batch_embed_retry_after:
                 try:
                     from sentence_transformers import SentenceTransformer
 
                     _batch_embed_model = SentenceTransformer(_embedding_model_name())
-                except Exception:
-                    _batch_embed_model = False
+                    _batch_embed_retry_after = 0.0
+                except Exception as exc:
+                    # Retry after a cooldown instead of caching the failure: a
+                    # momentary error would otherwise raise "no embedding model
+                    # available" forever. The real cause is logged — swallowing it
+                    # is what made a two-day eval stall undiagnosable.
+                    _batch_embed_retry_after = now + _BATCH_EMBED_RETRY_COOLDOWN
+                    logger.warning(
+                        "embedding model %r unavailable (%s: %s); retrying in %.0fs",
+                        _embedding_model_name(), type(exc).__name__, exc,
+                        _BATCH_EMBED_RETRY_COOLDOWN,
+                    )
     return _batch_embed_model or None
 
 

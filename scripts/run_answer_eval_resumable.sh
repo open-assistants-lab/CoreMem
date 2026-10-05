@@ -11,6 +11,13 @@
 # --max-stall consecutive attempts that make NO forward progress, so a genuine
 # data/config error cannot spin forever.
 #
+# The wait between attempts grows with the stall count, because the dominant
+# real failure mode is environmental and self-healing: under memory pressure
+# the embedding model fails to load ("no embedding model available") and every
+# attempt dies at the same question within seconds. A flat 20s wait burned
+# through 5 attempts in 100 seconds and abandoned a healthy run; the backoff
+# below gives ~24 minutes of grace instead.
+#
 # Usage:
 #   scripts/run_answer_eval_resumable.sh <dataset> <output.json> [extra args...]
 #
@@ -83,15 +90,20 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     best=$after
     stall=0
     echo "--- progress $after/$total (exit $status); continuing ---"
+    wait_s=20
   else
     stall=$((stall + 1))
     echo "--- NO progress (still $after/$total, exit $status); stall $stall/$MAX_STALL ---"
     if [ "$stall" -ge "$MAX_STALL" ]; then
       echo "=== giving up: $stall consecutive attempts without progress ===" >&2
+      echo "=== last exit status was $status — check the log for the root cause ===" >&2
       exit 1
     fi
+    # Back off hard: 60s, 120s, 240s, 480s, ... so a transient host problem
+    # (memory pressure, a dead endpoint) has time to clear before we retry.
+    wait_s=$((60 * (2 ** (stall - 1))))
   fi
-  sleep 20
+  sleep "$wait_s"
 done
 
 echo "=== giving up: exhausted $MAX_ATTEMPTS attempts ===" >&2
